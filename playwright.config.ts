@@ -29,6 +29,10 @@ export default defineConfig({
     /* Base URL to use in actions like `await page.goto('')`. */
     baseURL: 'https://www.saucedemo.com',
 
+    /* Playwright's default is no limit; agents driving the browser over MCP would hang forever on a missing element */
+    actionTimeout: 10_000,
+    navigationTimeout: 15_000,
+
     /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
     trace: 'on-first-retry',
   },

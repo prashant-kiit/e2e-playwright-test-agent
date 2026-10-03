@@ -1,5 +1,11 @@
 {
-  "enabledMcpjsonServers": ["playwright-test", "github"],
+  "env": {
+    "MCP_TOOL_TIMEOUT": "120000"
+  },
+  "enabledMcpjsonServers": [
+    "playwright-test",
+    "github"
+  ],
   "permissions": {
     "allow": [
       "mcp__playwright-test",

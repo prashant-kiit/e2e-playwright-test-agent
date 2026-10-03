@@ -15,3 +15,4 @@ opencode
 10. Add Logs for Monitoring
 11. Splits the Agent in Bounded Scenario
 12. Write Tests only for the Changed Part as Per Git History
+13. Next Task is to implement the important points from TASK.md
