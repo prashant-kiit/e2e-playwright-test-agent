@@ -1,0 +1,22 @@
+{
+  "name": "e2e-playwright-test-agent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/prashant-kiit/e2e-playwright-test-agent.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/prashant-kiit/e2e-playwright-test-agent/issues"
+  },
+  "homepage": "https://github.com/prashant-kiit/e2e-playwright-test-agent#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^26.6.4"
+  }
+}
