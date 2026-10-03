@@ -226,6 +226,7 @@ node_modules/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+/.playwright-mcp/
 
 # Claude Code (personal settings)
 .claude/settings.local.json
