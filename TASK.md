@@ -20,3 +20,5 @@ opencode
 15. Questions asked by Claude Code as Human in the Loop should be reflective on Frontend as well in same form and answers from frontend should go the Claude Code
 16. Claude Code should not stop for GitHub user/credential permissions (May be run in auto mode dangerously)
 17. Commit and Push should be in Batches Not in Bulk.
+18. Understand the flaws in Manual Flow using the Logs.
+19. Make Custom Test Target that can be chnaged to have versioned Tests and User Stories.
