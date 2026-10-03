@@ -11,12 +11,33 @@
       "mcp__playwright-test",
       "Bash(npx playwright test:*)",
       "Bash(npx playwright show-report:*)",
-      "Write(specs/**)",
       "Edit(specs/**)",
-      "Write(tests/**)",
       "Edit(tests/**)",
-      "Write(reports/**)",
       "Edit(reports/**)"
+    ]
+  },
+  "hooks": {
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/close-test-browsers.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/close-test-browsers.sh",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   }
 }
