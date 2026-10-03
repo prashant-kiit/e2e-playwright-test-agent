@@ -2,7 +2,21 @@
 
 ## Workflow Overview
 
-This prompt guides you through a complete 7-step QA workflow using MCP servers and AI agents to go from user story to committed automated test scripts.
+This prompt guides you through a complete 7-step QA workflow using MCP servers and AI agents to go from user story to automated test scripts delivered as a pull request.
+
+**Conventions used by every step:**
+
+| Item | Value |
+|---|---|
+| User story | `user-stories/scrum-latest.md` |
+| Test plan | `specs/saucedemo-checkout-test-plan.md` |
+| Test scripts (TypeScript) | `tests/saucedemo-checkout/*.spec.ts` |
+| Test report | `reports/SCRUM-101-checkout-test-report.md` |
+| Target repo | `prashant-kiit/e2e-playwright-agent-test-target` (default branch `master`) |
+| Seed test | `tests/seed.spec.ts` (already logs in as `standard_user` and lands on `/inventory.html`) |
+| Base URL | `https://www.saucedemo.com` (set in `playwright.config.ts`, so use relative paths in `page.goto`) |
+
+Do not write anything into `test-results/`: Playwright wipes it on every run and it is git-ignored.
 
 ---
 
@@ -38,7 +52,7 @@ agent to:
 
 1. Read the application URL and test credentials from the user story
 2. Explore the application and understand all workflows mentioned in the acceptance
-criteria
+criteria (the seed test tests/seed.spec.ts already logs in)
 3. Create a comprehensive test plan that covers all acceptance criteria including:
    - Happy path scenarios
    - Negative scenarios (validation errors, empty fields, invalid data)
@@ -75,7 +89,9 @@ Now I need to perform manual exploratory testing using Playwright MCP browser to
 Please read the test plan from: specs/saucedemo-checkout-test-plan.md
 
 Then execute the test scenarios defined in that plan:
-1. Use Playwright browser tools to manually execute each test scenario from the plan
+1. Start a browser session from the seed test (tests/seed.spec.ts) using the
+   playwright-test MCP setup tool, then use the Playwright browser tools to manually
+   execute each test scenario from the plan
 2. Follow the step-by-step instructions in each test case
 3. Verify expected results match actual results
 4. Take screenshots at key steps and error states
@@ -84,6 +100,7 @@ Then execute the test scenarios defined in that plan:
    - Any UI inconsistencies or unexpected behaviors
    - Missing validations or bugs discovered
    - Screenshots as evidence
+   - The locators that worked for each element (needed in Step 4)
 ```
 
 **Expected Output:**
@@ -110,13 +127,14 @@ Please review:
 
 Using insights from the manual exploratory testing:
 - Leverage the element selectors and locators that were successfully used in Step 3
-- Use stable element properties (IDs, data attributes, roles) discovered during exploration
+- Use stable element properties (data-test attributes, roles, IDs) discovered during exploration
 - Apply wait strategies and UI behaviors observed during manual testing
 - Incorporate any workarounds for UI quirks discovered
 
-Generate Playwright JavaScript automation scripts:
+Generate Playwright TypeScript automation scripts:
 1. Create scripts for each test scenario from the test plan
 2. Organize scripts into appropriate test suite files in: tests/saucedemo-checkout/
+   (one *.spec.ts file per acceptance criterion or feature area)
 3. Use the test case names and steps from the test plan
 4. Use reliable selectors and strategies from exploratory testing
 
@@ -126,11 +144,14 @@ Requirements for all scripts:
 - Use descriptive test names matching the format in the test plan
 - Use robust element selectors discovered during manual testing
 - Add comments for complex steps
-- Use proper wait strategies based on actual application behavior
+- Use proper wait strategies based on actual application behavior (no fixed timeouts)
 - Add proper test hooks (beforeEach, afterEach)
-- Configure for multiple browsers (Chrome, Firefox, Safari)
+- Use relative URLs (baseURL is set in playwright.config.ts)
+- Do not change playwright.config.ts: browsers (Chromium, Firefox, WebKit, Mobile Chrome)
+  are already configured there
 
-After generating the scripts, run the tests to verify they pass.
+After generating the scripts, run them on Chromium only to verify they pass:
+npx playwright test tests/saucedemo-checkout/ --project=chromium
 ```
 
 **Expected Output:**
@@ -152,18 +173,23 @@ After generating the scripts, run the tests to verify they pass.
 Now I need to execute the generated automation scripts and heal any failures using the
 playwright-test-healer agent.
 
-1. Run all automation scripts in: tests/saucedemo-checkout/
+1. Run all automation scripts on Chromium:
+   npx playwright test tests/saucedemo-checkout/ --project=chromium
 2. Identify any failing tests
 3. For each failing test, use the playwright-test-healer agent to:
    - Analyze the failure (selector issues, timing issues, assertion failures)
    - Auto-heal the test by fixing selectors, adding waits, or adjusting assertions
    - Update the test script with the fixes
-4. Re-run the healed tests to verify they pass
-5. Repeat the heal process until all tests are stable and passing
-6. Document:
+4. Re-run the healed tests on Chromium to verify they pass
+5. Repeat the heal process until all tests are stable and passing on Chromium
+6. Final cross-browser run once Chromium is green:
+   npx playwright test tests/saucedemo-checkout/
+   (Chromium, Firefox, WebKit and Mobile Chrome). Heal any browser-specific failures,
+   then re-run that browser with --project=<name>.
+7. Document:
    - Initial test results (pass/fail count)
    - Healing activities performed
-   - Final test results after healing
+   - Final test results after healing, per browser
    - Any tests that couldn't be auto-healed
 ```
 
@@ -172,7 +198,7 @@ playwright-test-healer agent.
 - All automation tests executed
 - Failing tests identified and healed using test-healer agent
 - Healed test scripts updated in tests/saucedemo-checkout/
-- Final stable test execution results
+- Final stable test execution results across all four browser projects
 - Summary of healing activities performed
 
 ---
@@ -192,7 +218,8 @@ Please compile results from:
 - Step 4: Generated automation scripts
 - Step 5: Automated test execution and healing results
 
-Structure the report as: test-results/SCRUM-101-checkout-test-report.md
+Save the report as: reports/SCRUM-101-checkout-test-report.md
+(not under test-results/, which Playwright deletes on every run)
 
 Include:
 1. Executive Summary
@@ -210,7 +237,7 @@ Include:
    - Healing activities performed
    - Final test execution results after healing
    - Test suite execution summary
-   - Pass/Fail count for each test suite
+   - Pass/Fail count for each test suite and each browser project
 
 4. Defects Log
    - For any failed tests (manual or automated):
@@ -246,25 +273,36 @@ Include:
 
 
 
-## 🚀 STEP 7: Commit to Git Repository
+## 🚀 STEP 7: Open a Pull Request in the Target Repository
 
-**Git Repository URL:** [https://github.com/prashant-kiit/e2e-playwright-agent-test-target](https://github.com/prashant-kiit/e2e-playwright-agent-test-target)
+**Target repository:** [prashant-kiit/e2e-playwright-agent-test-target](https://github.com/prashant-kiit/e2e-playwright-agent-test-target) (default branch `master`)
 
 **Prompt:**
 
 ```
-Now I need to commit all the test artifacts to the Git repository using the GitHub MCP
-agent.
+Now I need to deliver the test artifacts to the target repository using the GitHub MCP
+server (owner: prashant-kiit, repo: e2e-playwright-agent-test-target). Do not use local
+git commands and do not commit to this workspace repository.
 
-Git Repository URL: https://github.com/ravikaanthe/AgentE2EQAWorkflow-Playwright.git
+1. Check whether the target repository has any commits.
+   If it is empty, first push one bootstrap commit directly to master containing these
+   workspace files at the same paths:
+   - package.json
+   - package-lock.json
+   - playwright.config.ts
+   - .gitignore
+   - .github/workflows/playwright.yml
+   - tests/seed.spec.ts
+   Commit message: "chore: bootstrap Playwright project"
 
-Please perform the following Git operations:
+2. Create a branch from master named: qa/SCRUM-101-checkout
 
-1. Initialize Git repository if not already initialized
-
-2. Stage all files in the workspace (all new and modified files)
-
-3. Create a commit with the message:
+3. Push these files to that branch, at the same paths as in the workspace:
+   - user-stories/scrum-latest.md
+   - specs/saucedemo-checkout-test-plan.md
+   - tests/saucedemo-checkout/*.spec.ts
+   - reports/SCRUM-101-checkout-test-report.md
+   Commit message:
    "feat(tests): Add complete test suite for SCRUM-101 checkout workflow
 
    - Add user story documentation
@@ -275,17 +313,19 @@ Please perform the following Git operations:
 
    Resolves SCRUM-101"
 
-4. Push all changes to the Git repository
+4. Open a pull request from qa/SCRUM-101-checkout into master titled
+   "SCRUM-101: Checkout E2E test suite", with a body summarising the test counts,
+   per-browser results and any open defects from the report.
 
-5. Provide a summary of what was committed
+5. Provide a summary of what was pushed and the pull request URL
 ```
 
 **Expected Output:**
 
-- All workspace files committed to Git
-- Descriptive commit message following conventional commit format
-- Confirmation of successful push to the provided repository
-- Summary of changes
+- Bootstrap commit on master (first run only)
+- Branch qa/SCRUM-101-checkout with all test artifacts
+- Pull request opened into master
+- Pull request URL and summary of changes
 
 ---
 
@@ -310,31 +350,32 @@ acceptance criteria. Save it as: specs/saucedemo-checkout-test-plan.md
 
 STEP 3 - EXPLORATORY TESTING:
 Read the test plan from specs/saucedemo-checkout-test-plan.md and use Playwright browser
-tools to manually execute each test scenario. Document findings with screenshots and note
-any issues discovered.
+tools to manually execute each test scenario. Document findings with screenshots, note
+any issues discovered, and record the locators that worked.
 
 STEP 4 - GENERATE AUTOMATION SCRIPTS:
 Review both the test plan (specs/saucedemo-checkout-test-plan.md) and exploratory testing
-results from Step 3. Use the playwright-test-generator agent to create JavaScript
+results from Step 3. Use the playwright-test-generator agent to create TypeScript
 automation scripts leveraging the element selectors and insights discovered during manual
 testing. Save scripts in tests/saucedemo-checkout/.
 
 STEP 5 - EXECUTE AND HEAL TESTS:
-Run all automation scripts from tests/saucedemo-checkout/. Use the playwright-test-healer
-agent to identify and auto-heal any failing tests. Re-run tests until all are stable and
-passing. Document healing activities.
+Run all automation scripts from tests/saucedemo-checkout/ with --project=chromium. Use the
+playwright-test-healer agent to identify and auto-heal any failing tests. Re-run until all
+are stable and passing on Chromium, then do one final run across all browser projects and
+heal any browser-specific failures. Document healing activities.
 
 STEP 6 - CREATE TEST REPORT:
-Create a comprehensive test execution report at: test-results/SCRUM-101-checkout-test-
-report.md
+Create a comprehensive test execution report at: reports/SCRUM-101-checkout-test-report.md
 Compile results from Step 3 (manual testing), Step 4 (script generation), and Step 5
-(execution and healing). Include PASS/FAIL status, healing summary, defects log, and test
-coverage analysis.
+(execution and healing). Include PASS/FAIL status per browser, healing summary, defects
+log, and test coverage analysis.
 
-STEP 7 - COMMIT TO GIT:
-Use the GitHub MCP agent to commit all new files with a descriptive message and push to the
-repository.
+STEP 7 - OPEN A PULL REQUEST:
+Using the GitHub MCP server, deliver the artifacts to prashant-kiit/e2e-playwright-agent-test-target
+as described in Step 7 of qa_system_prompt.md: bootstrap master if the repo is empty,
+push the user story, test plan, tests and report to branch qa/SCRUM-101-checkout, and open
+a pull request into master.
 
 Execute this complete workflow and provide status updates after each step.
 ```
-
