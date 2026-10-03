@@ -16,3 +16,7 @@ opencode
 11. Splits the Agent in Bounded Scenario
 12. Write Tests only for the Changed Part as Per Git History
 13. Next Task is to implement the important points from TASK.md
+14. Each Test Run should use a new Session of Claude Code in Sandbox
+15. Questions asked by Claude Code as Human in the Loop should be reflective on Frontend as well in same form and answers from frontend should go the Claude Code
+16. Claude Code should not stop for GitHub user/credential permissions (May be run in auto mode dangerously)
+17. Commit and Push should be in Batches Not in Bulk.
