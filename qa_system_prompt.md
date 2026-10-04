@@ -4,6 +4,8 @@
 
 This prompt guides you through a 5-step QA workflow using MCP servers and AI agents to go from a user story to a healed, automated test suite on disk. **The agent stops after Step 5 for human review.** It does NOT deliver: a human reviews the generated test code and then runs `./push-artifacts.sh {APP} {STORY_ID}` to open the pull request in the target repo.
 
+**The only way the flow is run is `run-stories.sh`** — one headless, unattended Claude Code session per story (see "Run contract" below). There is no interactive mode: every session runs with no human to answer questions, so you never ask; you apply a safe default and record it. The kick-off prompt always names the active story and a run-id.
+
 The harness can test more than one application. Each run works on **one active story**. Every step below uses `{PLACEHOLDERS}` that you derive from the story file's location and the app's `app.json` (see Run Configuration).
 
 ---
@@ -26,11 +28,11 @@ apps/<app>/
 
 ### Choosing the active story
 
-1. The kick-off prompt names the active story (e.g. `Active story: SCRUM-201`).
-2. If no story is named, ask the user which story to run. Don't guess. (Unattended: end the run with an error.)
-3. Find the one file matching `apps/*/user-stories/{STORY_ID}-*.md`. The folder it sits in is the app. If there is no match, or more than one, stop and ask (unattended: end the run with an error).
+1. The kick-off prompt always names the active story (e.g. `Active story: SCRUM-201`), injected by `run-stories.sh`.
+2. If no story is named, end the run with a one-line error. Do not guess and do not ask — nobody can answer.
+3. Find the one file matching `apps/*/user-stories/{STORY_ID}-*.md`. The folder it sits in is the app. If there is no match, or more than one, end the run with a one-line error.
 4. Read `apps/{APP}/app.json`.
-5. State the resolved values at the start of Step 1 so the user can catch a wrong pick.
+5. State the resolved values at the start of Step 1 (they are recorded in the session log).
 
 ### Placeholders
 
@@ -49,7 +51,7 @@ apps/<app>/
 | `{BASE_URL}`, `{TARGET_REPO}`, `{TARGET_BRANCH}` | `baseURL`, `targetRepo`, `targetBranch` from `app.json` |
 | `{BRANCH}` | `qa/{STORY_ID}-{SLUG}` |
 | `{PR_TITLE}` | `{STORY_ID}: {STORY_TITLE} E2E test suite` |
-| `{RUN_ID}` | Unattended only: the `Run-ID:` line in the kick-off prompt (e.g. `20261004-180531-saucedemo`). Empty for interactive runs |
+| `{RUN_ID}` | The `Run-ID:` line in the kick-off prompt (e.g. `20261004-180531-saucedemo`), set by `run-stories.sh` for every run |
 
 The placeholders `{TARGET_REPO}`, `{TARGET_BRANCH}`, `{BRANCH}` and `{PR_TITLE}` describe where a human later delivers the suite with `./push-artifacts.sh`; the agent itself never pushes or opens a PR.
 
@@ -60,15 +62,13 @@ Rules that follow from this layout:
 
 To add a story: drop `<STORY_ID>-<slug>.md` into `apps/<app>/user-stories/`. To add an app: copy `apps/_template/` to `apps/<new-app>/`, fill in `app.json`, write `seed.spec.ts` and the stories. Nothing else changes.
 
-### Unattended (batch) runs
+### Run contract (every run)
 
-`run-stories.sh` starts one headless session per story, several at once, with `Mode: unattended` and a `Run-ID:` line in the kick-off prompt. All stories in a batch belong to the same app. In that mode:
+Every run is launched by `run-stories.sh`: one headless, unattended session per story, several at once, with `Mode: unattended` and a `Run-ID:` line in the kick-off prompt. All stories in a batch belong to the same app. These rules always apply:
 
-1. **Never ask the user.** Nobody can answer, and asking ends the session. Wherever this prompt says "stop and ask", apply the default below and record it in your final summary under "Unattended decisions".
-   - Story file not found, or more than one match: end the run with a one-line error. Do nothing else.
-   - Anything else unclear: make the most conservative choice that lets the run finish, and note it.
+1. **Never ask anyone.** There is no human in the session; asking just ends it. Wherever a step says "stop" on ambiguity, instead: for a missing/duplicate story file, end the run with a one-line error and do nothing else; for anything else unclear, make the most conservative choice that lets the run finish and record it in your final summary under "Unattended decisions".
 2. **The run-id makes a rerun safe and traceable.** The script wipes this story's old generated files before restarting it, so you always start clean (never merge leftovers from an earlier attempt).
-3. **The agent does not deliver, in batch or interactively.** You stop after Step 5 with the healed suite in `{TEST_DIR}`. A human reviews it and runs `./push-artifacts.sh` afterwards. Do not run `./push-artifacts.sh` and do not open a PR yourself.
+3. **The agent does not deliver.** You stop after Step 5 with the healed suite in `{TEST_DIR}`. A human reviews it and runs `./push-artifacts.sh` afterwards. Do not run `./push-artifacts.sh` and do not open a PR yourself.
 4. **Other stories are running in this repo at the same time.** Write only your own story's files (`{PLAN_FILE}`, `{TEST_DIR}`). Never edit `playwright.config.ts`, any `app.json`, any seed or another story's files, and never delete other folders (e.g. `test-results/`, `runs/`).
 5. Playwright output goes to the per-story folder in `QA_RUN_DIR` automatically. Run the commands exactly as written in the steps.
 6. End with a short summary as your final message: story, app, the test files created in `{TEST_DIR}`, the Chromium pass/fail count after healing, open defects, and any "Unattended decisions". The batch script marks the story **ready-for-review** when the suite exists on disk and the session ended cleanly.
@@ -319,56 +319,3 @@ Do not create {APP_DIR}/reports/... and do not run any delivery command.
 - The healed test suite left in `{TEST_DIR}`, ready for a human to review
 - A concise summary as the final message (no file written, no PR)
 - No delivery performed — that is the human's next step with `./push-artifacts.sh`
-
----
-
-
-
-## 🔁 Complete Workflow (Single Prompt)
-
-**Prompt:**
-
-```
-I want to demonstrate an end-to-end QA workflow using natural language and MCP
-servers for the active story {STORY_ID}. Resolve every {PLACEHOLDER} from the Run
-Configuration section of qa_system_prompt.md first. The agent stops after Step 5 for human
-review and does NOT deliver; a human runs ./push-artifacts.sh afterwards.
-
-STEP 1 - READ USER STORY:
-State the resolved run configuration, then read the user story from: {STORY_FILE} and give a
-brief summary of what needs to be tested. Do not check or touch the target repo — delivery
-and its bootstrap requirement are a separate human step.
-
-STEP 2 - CREATE TEST PLAN:
-Use the playwright-test-planner agent to create a comprehensive test plan based on the user
-story. The agent should set up the page with seedFile {SEED} and project
-{CHROMIUM_PROJECT}, explore the application and cover all acceptance criteria. Save it as:
-{PLAN_FILE}
-
-STEP 3 - EXPLORATORY TESTING:
-Read the test plan from {PLAN_FILE} and use Playwright browser tools (same seed and
-project) to manually execute each test scenario. Document findings with screenshots, note
-any issues discovered, and record the locators that worked.
-
-STEP 4 - GENERATE AUTOMATION SCRIPTS:
-Review both the test plan ({PLAN_FILE}) and exploratory testing results from Step 3. Use
-the playwright-test-generator agent (same seed and project) to create TypeScript
-automation scripts leveraging the element selectors and insights discovered during manual
-testing. Save scripts in {TEST_DIR}.
-
-STEP 5 - EXECUTE AND HEAL TESTS:
-Run all automation scripts from {TEST_DIR} with --project={CHROMIUM_PROJECT}. Use the
-playwright-test-healer agent to identify and auto-heal any failing tests. Re-run until all
-are stable and passing on {CHROMIUM_PROJECT}. Do NOT do a cross-browser pass: to save
-tokens the agent heals on Chromium only; the target repo's CI runs the suite on all
-projects. Document healing activities.
-
-STEP 6 - STOP FOR HUMAN REVIEW (do NOT deliver):
-Do not write a report file, do not run ./push-artifacts.sh, and do not open a PR. End with a
-short Markdown summary as your final message (ACs covered, test files in {TEST_DIR}, local
-Chromium result, defects, unattended decisions) and a reminder that a human delivers with
-./push-artifacts.sh {APP} {STORY_ID}. The results report is generated by that repo's CI after
-delivery.
-
-Execute this workflow (Steps 1-6) and provide status updates after each step.
-```

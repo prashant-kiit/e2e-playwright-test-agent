@@ -41,18 +41,18 @@ Nothing else changes: `playwright.config.ts` discovers the folder, and the promp
 ./run-stories.sh SCRUM-201 SCRUM-202 SCRUM-205     # specific stories of one app
 ./run-stories.sh practice-target                   # every story of an app
 ./run-stories.sh -j 2 -w 1 saucedemo               # 2 sessions at a time, 1 Playwright worker each
-./run-stories.sh --force SCRUM-201                 # redo a story already marked done
+./run-stories.sh --force SCRUM-201                 # regenerate a story already marked ready
 ./run-stories.sh --dry-run practice-target         # show what would run; costs nothing
 ```
 
-- Defaults: 3 sessions at a time (`-j`), 2 Playwright workers per session (`-w`), sessions started 5 s apart. Each session costs as much as an interactive run.
-- Each session gets `qa_user_prompt.md` with its own `Active story:`, `Mode: unattended` and `Run-ID:` lines. The prompt's "Unattended (batch) runs" rules apply: no questions (safe defaults, recorded in the session's final summary), only its own story's files, and no delivery (the agent stops after healing; the run-id is stamped into `.qa-state.json`).
+- Defaults: 3 sessions at a time (`-j`), 2 Playwright workers per session (`-w`), sessions started 5 s apart. Each session costs as much as a full agent run (planning + exploration + generation + healing).
+- Each session gets `qa_user_prompt.md` with its own `Active story:`, `Mode: unattended` and `Run-ID:` lines. The prompt's "Run contract" applies: no questions (safe defaults, recorded in the session's final summary), only its own story's files, and no delivery (the agent stops after healing; the run-id is stamped into `.qa-state.json`).
 - **Reruns are safe (e.g. after a session limit).** State is tracked per story in `.qa-state.json` (git-ignored, survives deleting `runs/`). On a rerun:
   - a story already **generated** (marked `ready` in state, or whose test suite is already committed) is **skipped** — add `--force` to redo it;
   - any other story has its previous generated files (plan, tests) **wiped, then regenerated from scratch**, so a story's artifacts never mix two runs.
 - Artifacts stay at their stable paths (`apps/<app>/specs|tests/`); the run-id is metadata (in `.qa-state.json`), so CI and the later human delivery are unaffected.
 - The `--dry-run` output shows, per story, whether it would `run` or `skip` and why.
-- **The agent never delivers** (in batch or interactively). After the batch, a human reviews each `ready` story and runs `./push-artifacts.sh <app> <STORY_ID>` to open/update its PR. The batch summary prints that command.
+- **The agent never delivers.** After the batch, a human reviews each `ready` story and runs `./push-artifacts.sh <app> <STORY_ID>` to open/update its PR. The batch summary prints that command.
 - **The batch refuses to start unless the app's target repo is bootstrapped** (it runs `./check-bootstrapped.sh <app>` up front). If not, run `./bootstrap-target.sh <app>` first.
 - Sessions share this folder. Each story writes only its own files, and each session's Playwright output goes to `runs/<timestamp>-<app>/<STORY_ID>/` (via `QA_RUN_DIR`), so parallel test runs can't wipe each other.
 - Per story: `session.jsonl` (full transcript, stream-json), `stderr.log`, `result.md` (the session's final summary), `clean.log` (files wiped before the redo), `test-results/`, `playwright-report/`. Overall: `runs/<timestamp>-<app>/summary.md`, one row per story with status, minutes, cost and the tests path. Status: **ready** = tests generated+healed, awaiting human review/delivery; **incomplete** = session ended but no test suite (rerun to finish); **failed** = session errored (e.g. hit the limit); **skipped** = already generated.
@@ -87,7 +87,7 @@ apps/<app>/user-stories/<STORY_ID>-<slug>.md      (+ apps/<app>/app.json)
 
 **Who does what:**
 - The **main session** orchestrates the steps: step 1 (read story), step 3 (exploratory testing with the `mcp__playwright-test__browser_*` tools), and step 6 (stop with a final summary). **It does not touch the target repo or deliver** — it needs no GitHub access.
-- **A human** reviews the generated tests and runs `./push-artifacts.sh <app> <STORY_ID>` to open the PR — in both batch and interactive modes.
+- **A human** reviews the generated tests after the run and runs `./push-artifacts.sh <app> <STORY_ID>` to open the PR.
 - **Sub-agents can't call other sub-agents.** All hand-offs happen through files on disk (`apps/<app>/specs/`, `tests/`) and through the main session.
 - Steps 2, 4 and 5 are delegated to the sub-agents in [.claude/agents/](.claude/agents/).
 
@@ -262,7 +262,7 @@ Target-repo work is done by four reusable shell tools (any app in `apps/<app>/`)
 
 | Tool | What it does |
 |---|---|
-| `./check-bootstrapped.sh <app>` | Read-only. Exit 0 if `apps/<app>/app.json` and `playwright.config.ts` exist on the target's `targetBranch`, else exit 1 with the bootstrap hint. Used by `run-stories.sh` as the up-front batch gate (and by a human before an interactive run if they want to check). The agent does not run it. |
+| `./check-bootstrapped.sh <app>` | Read-only. Exit 0 if `apps/<app>/app.json` and `playwright.config.ts` exist on the target's `targetBranch`, else exit 1 with the bootstrap hint. Used by `run-stories.sh` as the up-front gate before launching any session (and runnable by a human who wants to confirm before delivering). The agent does not run it. |
 | `./bootstrap-target.sh <app> [--dry-run]` | Sync the infra files (package manifests, `playwright.config.ts`, `.gitignore`, the workflow, the app's `app.json` and seed) to `targetBranch`. First commit on an empty repo; on an existing one, commits only changed files (`--dry-run` previews). This is how infra/workflow/config updates reach already-delivered repos. |
 | `./push-artifacts.sh <app> <STORY_ID> [--body-file F] [--run-id R] [--dry-run]` | Deliver one story: sync its story, plan and test suite onto `qa/<STORY_ID>-<slug>` (tests folder replaced wholesale), reuse the branch and update the PR on reruns, open/update the PR into `targetBranch`, print the PR URL. Requires the repo to be bootstrapped; pushes no report/evidence/infra. |
 | `./reset-target.sh <app> [--yes] [--dry-run]` | **Destructive.** Wipe the target repo to a fresh, empty state: replace `targetBranch` with a single empty commit (all files and history gone) and delete every other branch (closing their PRs). Asks you to type the repo name to confirm (skip with `--yes`); `--dry-run` previews; an already-empty repo is a no-op. Does NOT re-bootstrap — run `./bootstrap-target.sh <app>` afterwards. Leaves the agent repo untouched. |
@@ -307,20 +307,20 @@ then re-bootstrap:
 ./bootstrap-target.sh <app>         # rebuild the clean infra
 ```
 
-Then run the flow:
+Then run the flow. **`run-stories.sh` is the only way to run it** — one headless, unattended session per story, in parallel (see §2 for all its options):
 
 ```bash
-set -a; source .env; set +a   # GITHUB_PAT available to the delivery tools / gh
-claude                        # /mcp should show playwright-test connected
+set -a; source .env; set +a                 # GITHUB_PAT for the bootstrap gate / delivery tools / gh
+./run-stories.sh saucedemo SCRUM-101         # one or more stories of one app
 ```
 
-Then paste the contents of [qa_user_prompt.md](qa_user_prompt.md). (The agent does not check bootstrap — run `./check-bootstrapped.sh <app>` yourself first if you want to confirm there's somewhere to deliver.) Expect a visible browser window during steps 2–5. The agent **stops after step 5** with the healed suite in `apps/<app>/tests/<slug>/` and a summary — it does not deliver. Review the generated tests, then deliver with:
+`run-stories.sh` runs the bootstrap gate up front (and refuses to start if the repo isn't bootstrapped), then launches the sessions. Each session **stops after step 5** with the healed suite in `apps/<app>/tests/<slug>/`, marked `ready` in `.qa-state.json` — it does not deliver. When it finishes, review the generated tests and deliver each ready story yourself:
 
 ```bash
 ./push-artifacts.sh <app> <STORY_ID>     # e.g. ./push-artifacts.sh saucedemo SCRUM-101
 ```
 
-(Batch runs via `run-stories.sh` run the bootstrap check automatically but, like interactive runs, stop at step 5 — you deliver each `ready` story with `./push-artifacts.sh` afterwards.)
+(There is no interactive mode: the flow always runs through `run-stories.sh`, with no human in the session to answer questions.)
 
 ### 5.4 Run the tests directly
 
