@@ -22,3 +22,10 @@ opencode
 17. Commit and Push should be in Batches Not in Bulk.
 18. Understand the flaws in Manual Flow using the Logs.
 19. Make Custom Test Target that can be chnaged to have versioned Tests and User Stories.
+20. Which folders/files will be inside and outside of the Sandbox.
+21. How the permissions will be managed for Claude Code Agent inside the Sandbox.
+22. How to handle is something breaks? How to resume from the point of breaking?
+23. See if any folder/files are useless. If yes then remove them.
+24. Stay minialist.
+25. How Multi Tenant Session will be managed?
+26. Is Storing the Test Artifacts in File Storage Correct? Or S3 like something be used? 
