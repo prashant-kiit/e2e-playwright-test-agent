@@ -1,8 +1,8 @@
 # e2e-playwright-test-agent
 
-An **agentic QA harness**: a user story (markdown) goes in. Out come an automated, cross-browser Playwright test suite and a test plan, delivered as a pull request to a separate test repository, where CI runs the tests and generates the results report.
+An **agentic QA harness**: a user story (markdown) goes in. Out come an automated, cross-browser Playwright test suite and a test plan. The agent **stops there for human review**; a human then delivers the suite as a pull request to a separate test repository, where CI runs the tests and generates the results report.
 
-The work is done by **Claude Code**, using three Playwright sub-agents (planner, generator, healer) and two MCP servers (Playwright Test, GitHub). This repo contains no application code. It holds the configuration, prompts, agent definitions and the artifacts the agents produce.
+The work is done by **Claude Code**, using three Playwright sub-agents (planner, generator, healer) and the Playwright Test MCP server. The agent explores, plans, generates and heals the tests, then stops. **Delivery is a separate, human-initiated step**: a human reviews the generated code and runs `push-artifacts.sh`. Four shell tools for the target repo (`check-bootstrapped.sh`, `bootstrap-target.sh`, `push-artifacts.sh`, `reset-target.sh`) do the Git/GitHub work via `git`/`gh`, not a GitHub MCP. This repo contains no application code. It holds the configuration, prompts, agent definitions, tools and the artifacts the agents produce.
 
 > **For coding agents:** read this file top to bottom before changing anything. The section [Gotchas](#9-gotchas-read-before-changing-things) records failures that already happened. Don't reintroduce them.
 
@@ -16,7 +16,7 @@ The work is done by **Claude Code**, using three Playwright sub-agents (planner,
 | Test framework | `@playwright/test` ^1.63 (TypeScript, no build step, no `tsconfig`) |
 | Applications under test | One folder per app under [apps/](apps/). Each `apps/<app>/app.json` holds everything app-specific (URL, target repo, locator style, agent notes). Currently:<br>**[saucedemo](apps/saucedemo/)**, `https://www.saucedemo.com` (public demo shop, `standard_user` / `secret_sauce`) → [`prashant-kiit/e2e-playwright-agent-test-target`](https://github.com/prashant-kiit/e2e-playwright-agent-test-target)<br>**[practice-target](apps/practice-target/)**, `https://custom-test-target-app.vercel.app` (static UI sandbox; mock login `demo` / `password123` for `/dashboard` only) → [`prashant-kiit/e2e-playwright-test-custom-target`](https://github.com/prashant-kiit/e2e-playwright-test-custom-target) (still empty; the first run bootstraps it) |
 | Input | One **active story** per run, named in [qa_user_prompt.md](qa_user_prompt.md) (`Active story: SCRUM-xxx`). The app is wherever `apps/*/user-stories/SCRUM-xxx-*.md` lives.<br>saucedemo: **SCRUM-101…107** (checkout, login, product catalog, product details, shopping cart, menu & navigation, dynamic catalog)<br>practice-target: **SCRUM-201…208** (auth, forms, buttons, modals, dropdowns, table, dynamic content, navigation) |
-| Workflow definition | [qa_system_prompt.md](qa_system_prompt.md) (7 steps, all paths derived from the active story); kick-off prompt in [qa_user_prompt.md](qa_user_prompt.md) |
+| Workflow definition | [qa_system_prompt.md](qa_system_prompt.md) (5 working steps + a stop-for-review step; the agent never delivers; all paths derived from the active story); kick-off prompt in [qa_user_prompt.md](qa_user_prompt.md) |
 | This repo | `prashant-kiit/e2e-playwright-test-agent` (default branch `master`) |
 | Current state | Only SCRUM-101 has been run: 22 test cases × 4 browser projects = 88/88 passing, 1 test healed, delivered as PR #1 to the SauceDemo target repo (merged). The other 14 stories have no plans or tests yet |
 
@@ -46,16 +46,16 @@ Nothing else changes: `playwright.config.ts` discovers the folder, and the promp
 ```
 
 - Defaults: 3 sessions at a time (`-j`), 2 Playwright workers per session (`-w`), sessions started 5 s apart. Each session costs as much as an interactive run.
-- Each session gets `qa_user_prompt.md` with its own `Active story:`, `Mode: unattended` and `Run-ID:` lines. The prompt's "Unattended (batch) runs" rules apply: no questions (safe defaults, recorded in the report), only its own story's files, and the run-id stamped into the report and PR body.
+- Each session gets `qa_user_prompt.md` with its own `Active story:`, `Mode: unattended` and `Run-ID:` lines. The prompt's "Unattended (batch) runs" rules apply: no questions (safe defaults, recorded in the session's final summary), only its own story's files, and no delivery (the agent stops after healing; the run-id is stamped into `.qa-state.json`).
 - **Reruns are safe (e.g. after a session limit).** State is tracked per story in `.qa-state.json` (git-ignored, survives deleting `runs/`). On a rerun:
-  - a story already **delivered** (PR recorded in state, or its report already committed) is **skipped** — add `--force` to redo it;
-  - any other story has its previous generated files (plan, tests, report, evidence) **wiped, then regenerated from scratch**, so a story's artifacts never mix two runs;
-  - the branch stays `qa/<STORY_ID>-<slug>` and is updated in place (one branch and one PR per story across reruns).
-- Artifacts stay at their stable paths (`apps/<app>/specs|tests|reports/`); the run-id is metadata (in the report, the PR body and `.qa-state.json`), so CI and step 7 are unaffected.
+  - a story already **generated** (marked `ready` in state, or whose test suite is already committed) is **skipped** — add `--force` to redo it;
+  - any other story has its previous generated files (plan, tests) **wiped, then regenerated from scratch**, so a story's artifacts never mix two runs.
+- Artifacts stay at their stable paths (`apps/<app>/specs|tests/`); the run-id is metadata (in `.qa-state.json`), so CI and the later human delivery are unaffected.
 - The `--dry-run` output shows, per story, whether it would `run` or `skip` and why.
-- **Step 7 is pre-approved** for these sessions (`--allowedTools mcp__github`), so they push and open PRs without asking. Interactive sessions still ask.
+- **The agent never delivers** (in batch or interactively). After the batch, a human reviews each `ready` story and runs `./push-artifacts.sh <app> <STORY_ID>` to open/update its PR. The batch summary prints that command.
+- **The batch refuses to start unless the app's target repo is bootstrapped** (it runs `./check-bootstrapped.sh <app>` up front). If not, run `./bootstrap-target.sh <app>` first.
 - Sessions share this folder. Each story writes only its own files, and each session's Playwright output goes to `runs/<timestamp>-<app>/<STORY_ID>/` (via `QA_RUN_DIR`), so parallel test runs can't wipe each other.
-- Per story: `session.jsonl` (full transcript, stream-json), `stderr.log`, `result.md` (the session's final summary), `clean.log` (files wiped before the redo), `test-results/`, `playwright-report/`. Overall: `runs/<timestamp>-<app>/summary.md`, one row per story with status, minutes, cost and PR link. Status: **done** = PR opened; **incomplete** = session ended but no PR (rerun to finish); **failed** = session errored (e.g. hit the limit); **skipped** = already delivered.
+- Per story: `session.jsonl` (full transcript, stream-json), `stderr.log`, `result.md` (the session's final summary), `clean.log` (files wiped before the redo), `test-results/`, `playwright-report/`. Overall: `runs/<timestamp>-<app>/summary.md`, one row per story with status, minutes, cost and the tests path. Status: **ready** = tests generated+healed, awaiting human review/delivery; **incomplete** = session ended but no test suite (rerun to finish); **failed** = session errored (e.g. hit the limit); **skipped** = already generated.
 - Headless sessions deny tool calls that aren't allowed in `.claude/settings.json` (or by the script) instead of asking. If a story stalls, search its `session.jsonl` for denied calls.
 - Ctrl-C stops all running sessions. `GITHUB_PAT` is loaded from `.env` if it isn't already set.
 
@@ -75,30 +75,35 @@ apps/<app>/user-stories/<STORY_ID>-<slug>.md      (+ apps/<app>/app.json)
 │                ──► 3 Exploratory testing (main session, MCP browser tools)│
 │                ──► 4 playwright-test-generator ──► apps/<app>/tests/<slug>/
 │                ──► 5 playwright-test-healer (Chromium only; CI runs all 4)       
-│                ──► 6 Summarize for PR (no file; results report is CI's)   │
-│                ──► 7 GitHub MCP ──► branch + PR in app.json targetRepo   │
+│                ──► 6 STOP for human review (no delivery, no report)       │
 └──────────────────────────────────────────────────────────────────────────┘
+        │
+        ▼  (human reviews the generated tests)
+   ./push-artifacts.sh <app> <STORY_ID>   ──►  branch + PR in app.json target
         │
         ▼
 <targetRepo>  <targetBranch> ◄── PR from qa/<STORY_ID>-<slug>  (its CI runs the tests)
 ```
 
 **Who does what:**
-- The **main session** orchestrates the steps, does step 1 (reading the story), step 3 (exploratory testing with the `mcp__playwright-test__browser_*` tools), step 6 (writing the report) and step 7 (GitHub MCP calls).
-- **Sub-agents can't call other sub-agents.** All hand-offs happen through files on disk (`apps/<app>/specs/`, `tests/`, `reports/`) and through the main session.
+- The **main session** orchestrates the steps: step 1 (read story), step 3 (exploratory testing with the `mcp__playwright-test__browser_*` tools), and step 6 (stop with a final summary). **It does not touch the target repo or deliver** — it needs no GitHub access.
+- **A human** reviews the generated tests and runs `./push-artifacts.sh <app> <STORY_ID>` to open the PR — in both batch and interactive modes.
+- **Sub-agents can't call other sub-agents.** All hand-offs happen through files on disk (`apps/<app>/specs/`, `tests/`) and through the main session.
 - Steps 2, 4 and 5 are delegated to the sub-agents in [.claude/agents/](.claude/agents/).
 
-### The seven steps (summary of qa_system_prompt.md)
+### The steps (summary of qa_system_prompt.md)
+
+Steps 1–6 are the agent's work; it stops at step 6. Delivery is a separate human step (below the table).
 
 | Step | Actor | Output |
 |---|---|---|
-| 1 Read user story | main session | Resolved paths and app settings, summary of ACs, URL, credentials |
+| 1 Read user story | main session | Resolved paths and app settings, summary of ACs, URL, credentials (no target-repo check — bootstrap is a delivery concern) |
 | 2 Create test plan | `playwright-test-planner` | `apps/<app>/specs/<STORY_ID>-<slug>-test-plan.md` (scenarios with steps, expected results and the stable locators found) |
 | 3 Exploratory testing | main session + Playwright MCP | Findings, screenshots, the locators that worked |
 | 4 Generate scripts | `playwright-test-generator` | `apps/<app>/tests/<slug>/*.spec.ts`, verified on `<app>-chromium` |
 | 5 Execute and heal | `playwright-test-healer` | Green on the app's Chromium project. Cross-browser is left to the target repo's CI (token saving) |
-| 6 Summarize for PR | main session | A short PR-body summary (no file). The results report is generated by CI |
-| 7 Deliver | main session + GitHub MCP | Bootstraps the target repo if empty, pushes to `qa/<STORY_ID>-<slug>`, opens a PR into `targetBranch` |
+| 6 Stop for human review | main session | A short final summary (no file, no PR). The agent does not deliver |
+| — Deliver (human) | human + `push-artifacts.sh` | After reviewing the tests, a human runs `./push-artifacts.sh <app> <STORY_ID>`: syncs story+plan+tests to `qa/<STORY_ID>-<slug>` and opens/updates a PR into `targetBranch` (repo must be bootstrapped). The results report is generated by CI |
 
 ---
 
@@ -116,7 +121,12 @@ apps/<app>/user-stories/<STORY_ID>-<slug>.md      (+ apps/<app>/app.json)
 │   ├── settings.json                   # shared Claude Code settings: env, permissions, hooks (committed)
 │   └── settings.local.json             # per-user approvals (git-ignored)
 ├── .github/workflows/playwright.yml    # CI: runs tests + writes the results report to the Job Summary
-├── .mcp.json                           # MCP servers for Claude Code: playwright-test (stdio), github (http)
+├── .mcp.json                           # MCP servers for Claude Code: playwright-test (stdio)
+├── check-bootstrapped.sh               # tool: is a target repo bootstrapped for an app?
+├── bootstrap-target.sh                 # tool: sync infra to a target repo (bootstrap/re-bootstrap)
+├── push-artifacts.sh                   # tool: deliver a story's artifacts as a PR (sync)
+├── reset-target.sh                     # tool: wipe a target repo to a fresh, empty state (destructive)
+├── scripts/qa-lib.sh                   # shared helpers for the four tools
 ├── .env.example                        # template: GITHUB_PAT= (copy to .env, which is git-ignored)
 ├── apps/
 │   ├── _template/                      # copy this to add an app (skipped by the config)
@@ -133,7 +143,7 @@ apps/<app>/user-stories/<STORY_ID>-<slug>.md      (+ apps/<app>/app.json)
 │       └── user-stories/SCRUM-20x-*.md # SCRUM-201…208 (specs/, tests/ appear when run; no agent report)
 ├── playwright.config.ts                # discovers apps/*/app.json → <app>-<browser> projects; timeouts, reporters
 ├── run-stories.sh                      # batch runner: one headless session per story, in parallel
-├── qa_system_prompt.md                 # THE workflow: 7 steps, path conventions
+├── qa_system_prompt.md                 # THE workflow: 5 steps + stop-for-review, path conventions
 ├── qa_user_prompt.md                   # kick-off prompt: names the active story
 ├── TASK.md                             # the owner's running backlog / roadmap (see §11)
 ├── package.json / package-lock.json    # only devDeps: @playwright/test, @types/node; no npm scripts
@@ -188,7 +198,8 @@ Test file conventions used by the generator:
 | Server | Transport | Purpose |
 |---|---|---|
 | `playwright-test` | stdio: `npx playwright run-test-mcp-server` | Browser automation and test-runner tools (`browser_*`, `planner_*`, `generator_*`, `test_run`, `test_debug`, `test_list`). Reads `playwright.config.ts` |
-| `github` | http: `https://api.githubcopilot.com/mcp/` with `Authorization: Bearer ${GITHUB_PAT}` | Step 7: create branch, push files, open the PR in the target repo |
+
+Delivery to the target repo is **not** done through an MCP server. It uses the shell tools in §4.6 via `git` and the `gh` CLI.
 
 **How the `playwright-test` server gives an agent a browser:** `planner_setup_page` / `generator_setup_page` run the `seedFile` they're given (`apps/<app>/seed.spec.ts`) in the given `project` (`<app>-chromium`). Without a `project` they use the first project (whichever app sorts first), and without a `seedFile` they create a default seed, so the prompt always passes both. The test is then **paused at its end**, and the agent drives that live page with `browser_*` tools.
 
@@ -196,8 +207,6 @@ Consequences:
 - The browser stays open until the paused worker process goes away. `browser_close` only closes the tab. See §7.3.
 - The paused test has **no test timeout**, so the only limits on a stuck click or fill are `actionTimeout` / `navigationTimeout` from the config. See §7.1.
 - The server runs headed by default. Add `"--headless"` to its `args` for sandbox/CI use.
-
-Claude Code expands `${VAR}` in `.mcp.json` **when it starts**. `GITHUB_PAT` must already be in the environment of the shell that launches `claude`. Otherwise the `github` server fails with `400 Authorization header is badly formatted`.
 
 ### 4.2 Sub-agents ([.claude/agents/](.claude/agents/))
 
@@ -229,8 +238,8 @@ These were generated by `npx playwright init-agents --loop=claude`; re-running t
 | Key | Value | Purpose |
 |---|---|---|
 | `env.MCP_TOOL_TIMEOUT` | `120000` | Backup limit: any single MCP tool call is cancelled after 2 minutes. Applies to sessions started after the change |
-| `enabledMcpjsonServers` | `playwright-test`, `github` | Pre-approves the project's MCP servers |
-| `permissions.allow` | `mcp__playwright-test`, `Bash(npx playwright test:*)`, `Bash(npx playwright show-report:*)`, `Edit(apps/*/specs/**)`, `Edit(apps/*/tests/**)`, `Edit(apps/*/reports/**)` | Steps 1–6 run without prompts. **GitHub MCP is deliberately not allowed**, so step 7 asks before pushing or opening PRs |
+| `enabledMcpjsonServers` | `playwright-test` | Pre-approves the project's MCP server |
+| `permissions.allow` | `mcp__playwright-test`, `Bash(npx playwright test:*)`, `Bash(npx playwright show-report:*)`, `Edit(apps/*/specs/**)`, `Edit(apps/*/tests/**)`, `Edit(apps/*/reports/**)` | Steps 1–6 run without prompts. The agent does no GitHub/target-repo work, so **neither `check-bootstrapped.sh` nor `push-artifacts.sh` is allowed** — both are human/`run-stories.sh` concerns. If `push-artifacts.sh` were ever invoked in-session it would be stopped by this permission. |
 | `hooks.SubagentStop`, `hooks.SessionEnd` | `"$CLAUDE_PROJECT_DIR"/.claude/hooks/close-test-browsers.sh` (timeout 15s) | Closes paused test browsers (§7.3) |
 
 Note: in permission rules, `Edit(path)` covers every file-writing tool. `Write(path)` rules are not matched by file permission checks, so don't add them.
@@ -245,7 +254,20 @@ GitHub-hosted `ubuntu-latest`, triggered on push/PR to `main`/`master`. The step
 5. Upload `playwright-report/` as an artifact (30 days)
 6. Fail the job if any test failed (step 3 runs with `continue-on-error` so the summary and artifact are always produced first)
 
-**This is where the QA report comes from — CI, not the agent.** It needs **no secrets**: it doesn't run Claude Code or the agents. The same workflow file is pushed to the target repo during step 7's bootstrap, so each target repo produces its own report on every PR.
+**This is where the QA report comes from — CI, not the agent.** It needs **no secrets**: it doesn't run Claude Code or the agents. The same workflow file is pushed to the target repo during bootstrap (`bootstrap-target.sh`), so each target repo produces its own report on every PR.
+
+### 4.6 Target-repo tools (`check-bootstrapped.sh`, `bootstrap-target.sh`, `push-artifacts.sh`, `reset-target.sh`)
+
+Target-repo work is done by four reusable shell tools (any app in `apps/<app>/`), via `git` and the `gh` CLI — there is no GitHub MCP. Shared helpers live in [scripts/qa-lib.sh](scripts/qa-lib.sh); each tool reads `targetRepo`/`targetBranch` from `apps/<app>/app.json`. The **agent repo is the source of truth**: the tools copy from here into the target, never the reverse.
+
+| Tool | What it does |
+|---|---|
+| `./check-bootstrapped.sh <app>` | Read-only. Exit 0 if `apps/<app>/app.json` and `playwright.config.ts` exist on the target's `targetBranch`, else exit 1 with the bootstrap hint. Used by `run-stories.sh` as the up-front batch gate (and by a human before an interactive run if they want to check). The agent does not run it. |
+| `./bootstrap-target.sh <app> [--dry-run]` | Sync the infra files (package manifests, `playwright.config.ts`, `.gitignore`, the workflow, the app's `app.json` and seed) to `targetBranch`. First commit on an empty repo; on an existing one, commits only changed files (`--dry-run` previews). This is how infra/workflow/config updates reach already-delivered repos. |
+| `./push-artifacts.sh <app> <STORY_ID> [--body-file F] [--run-id R] [--dry-run]` | Deliver one story: sync its story, plan and test suite onto `qa/<STORY_ID>-<slug>` (tests folder replaced wholesale), reuse the branch and update the PR on reruns, open/update the PR into `targetBranch`, print the PR URL. Requires the repo to be bootstrapped; pushes no report/evidence/infra. |
+| `./reset-target.sh <app> [--yes] [--dry-run]` | **Destructive.** Wipe the target repo to a fresh, empty state: replace `targetBranch` with a single empty commit (all files and history gone) and delete every other branch (closing their PRs). Asks you to type the repo name to confirm (skip with `--yes`); `--dry-run` previews; an already-empty repo is a no-op. Does NOT re-bootstrap — run `./bootstrap-target.sh <app>` afterwards. Leaves the agent repo untouched. |
+
+Auth: the tools use `GITHUB_PAT` (from `.env`) if set, otherwise `gh`'s own login. All four tools are **run by a human or by `run-stories.sh`** (`check-bootstrapped.sh` only), never by the agent — the test-writing agent does no GitHub work and needs no credentials. None of them is in the agent's allow-list.
 
 ---
 
@@ -255,7 +277,8 @@ GitHub-hosted `ubuntu-latest`, triggered on push/PR to `main`/`master`. The step
 
 - Node.js (LTS) and npm
 - Claude Code CLI (`claude`)
-- A GitHub token with push access to **both** target repos. It needs `repo` and `workflow` scopes (classic) or Contents/Pull requests/Workflows read-write (fine-grained), because step 7 pushes `.github/workflows/playwright.yml`.
+- `git`, the GitHub CLI (`gh`) and `jq` — the delivery tools use them
+- GitHub access to each target repo, via `gh auth login` and/or a `GITHUB_PAT` in `.env`. It needs push + pull-request rights, and Workflows write (bootstrap pushes `.github/workflows/playwright.yml`).
 
 ### 5.2 One-time setup
 
@@ -267,12 +290,37 @@ cp .env.example .env        # then put the real token in .env: GITHUB_PAT=...
 
 ### 5.3 Run the QA flow
 
+First make sure the active app's target repo is bootstrapped (one-time per repo, and again
+after any infra/workflow/config change):
+
 ```bash
-set -a; source .env; set +a   # GITHUB_PAT must be in the env BEFORE claude starts
-claude                        # approve MCP servers on first run; /mcp should show both connected
+./check-bootstrapped.sh <app>     # e.g. saucedemo — exits non-zero if not ready
+./bootstrap-target.sh  <app>      # sync infra to the target repo (bootstrap or re-bootstrap)
 ```
 
-Then paste the contents of [qa_user_prompt.md](qa_user_prompt.md). For first runs or debugging, run the steps one at a time using the per-step prompts in [qa_system_prompt.md](qa_system_prompt.md). Expect a visible browser window during steps 2–5, and approval prompts for each GitHub action in step 7.
+To start a target repo over from scratch (wipe all history, branches and PRs), reset it first,
+then re-bootstrap:
+
+```bash
+./reset-target.sh <app> --dry-run   # preview what would be wiped
+./reset-target.sh <app>             # destructive; type the repo name to confirm
+./bootstrap-target.sh <app>         # rebuild the clean infra
+```
+
+Then run the flow:
+
+```bash
+set -a; source .env; set +a   # GITHUB_PAT available to the delivery tools / gh
+claude                        # /mcp should show playwright-test connected
+```
+
+Then paste the contents of [qa_user_prompt.md](qa_user_prompt.md). (The agent does not check bootstrap — run `./check-bootstrapped.sh <app>` yourself first if you want to confirm there's somewhere to deliver.) Expect a visible browser window during steps 2–5. The agent **stops after step 5** with the healed suite in `apps/<app>/tests/<slug>/` and a summary — it does not deliver. Review the generated tests, then deliver with:
+
+```bash
+./push-artifacts.sh <app> <STORY_ID>     # e.g. ./push-artifacts.sh saucedemo SCRUM-101
+```
+
+(Batch runs via `run-stories.sh` run the bootstrap check automatically but, like interactive runs, stop at step 5 — you deliver each `ready` story with `./push-artifacts.sh` afterwards.)
 
 ### 5.4 Run the tests directly
 
@@ -325,16 +373,14 @@ Manual fallback: `pkill -f "Google Chrome for Testing"`. This closes only Playwr
 
 ---
 
-## 8. Step 7 delivery contract (target repo)
+## 8. Delivery contract (human step, target repo)
 
-These rules are defined in [qa_system_prompt.md](qa_system_prompt.md) step 7. Keep them consistent if you change either side.
+Delivery is a **human-initiated step** after reviewing the agent's generated tests. It is handled by the delivery tools in §4.6 (`check-bootstrapped.sh`, `bootstrap-target.sh`, `push-artifacts.sh`), not by an MCP server, by the agent, or by hand-crafted git. The agent repo is the source of truth.
 
-0. Deliver to the **active app's** target repo (Target applications table in the prompt). Never mix apps in one repo.
-1. Use only the **GitHub MCP server**: no local `git` commands, and nothing is committed to *this* repo.
-2. **If the target repo has no commits**, push one bootstrap commit straight to `targetBranch` containing `package.json`, `package-lock.json`, `playwright.config.ts`, `.gitignore`, `.github/workflows/playwright.yml`, `apps/<app>/app.json` and `apps/<app>/seed.spec.ts`. Commit message: `chore: bootstrap Playwright project`. A PR can't be opened against an empty repo.
-3. Create `qa/<STORY_ID>-<slug>` from `targetBranch`. Stop and ask if it already exists.
-4. Push the story's files (story, plan, tests — **no report or evidence**; the report is generated by CI) at the same paths under `apps/<app>/`. Also push `playwright.config.ts`, `app.json` and the seed if they're missing or differ. Never push another app's folder: the target repo's config then discovers only its own app.
-5. Open a PR into `targetBranch` titled `<STORY_ID>: <story title> E2E test suite`; the body is the step-6 scope summary and notes that CI produces the results report.
+0. Deliver to the **active app's** target repo (from `apps/<app>/app.json`). Never mix apps in one repo.
+1. **Bootstrap is separate from delivery.** `bootstrap-target.sh <app>` syncs the infra (`package.json`, `package-lock.json`, `playwright.config.ts`, `.gitignore`, `.github/workflows/playwright.yml`, `apps/<app>/app.json`, `apps/<app>/seed.spec.ts`) to the target repo — creating the first commit on an empty repo, or updating changed files on an existing one. Run it after any infra/workflow/config change so existing repos pick it up.
+2. **The batch refuses to run against a repo that isn't bootstrapped.** `check-bootstrapped.sh <app>` (true when `apps/<app>/app.json` and `playwright.config.ts` exist on `targetBranch`) is run up front by `run-stories.sh`; if false it stops and tells you to bootstrap. The agent itself does not check — it only writes tests — and `push-artifacts.sh` re-checks at delivery.
+3. **Delivery is a human step** run after review: `push-artifacts.sh <app> <STORY_ID>` syncs the story, plan and test suite onto `qa/<STORY_ID>-<slug>` (replacing the tests folder wholesale, so deletions propagate), reuses the branch and updates the PR on reruns, and opens/updates the PR into `targetBranch`. No report or evidence is pushed (CI generates the report). It never pushes infra or another app's folder. The agent does not run this tool.
 
 App-specific delivery facts live in that app's `agentNotes`. Currently: the SauceDemo repo has history (bootstrap done, PR #1 merged, branch `qa/SCRUM-101-checkout` exists) and still has the pre-refactor paths (`user-stories/scrum-latest.md`, `specs/saucedemo-checkout-test-plan.md`, `tests/seed.spec.ts`, `tests/saucedemo-checkout/`, `reports/SCRUM-101-checkout-test-report.md`), which the next SauceDemo delivery should delete. The Practice Target repo is empty, so its first delivery does the bootstrap.
 
@@ -346,7 +392,7 @@ App-specific delivery facts live in that app's `agentNotes`. Currently: the Sauc
 |---|---|
 | Removing `actionTimeout` / `navigationTimeout` | Agents will hang indefinitely on missing elements (§7.1) |
 | Writing outputs under `test-results/` | They are deleted on the next test run |
-| `github` MCP: `400 Authorization header is badly formatted` | `GITHUB_PAT` wasn't in the environment when `claude` started. Load `.env` and restart `claude` |
+| `push-artifacts.sh`/`bootstrap-target.sh`/`reset-target.sh`: auth or push fails | No `GITHUB_PAT` in `.env` and `gh` not logged in, or the token lacks push/PR/Workflows rights to the target repo (`reset-target.sh` also needs force-push and branch-delete rights). Fix `.env` or run `gh auth login` |
 | Using `${input:...}` in `.mcp.json` | That's VS Code syntax. Claude Code only supports `${VAR}` / `${VAR:-default}` |
 | Relying on the default MCP project | Projects are generated alphabetically per app. Always pass `project: <app>-chromium` and `seedFile` to `*_setup_page` |
 | Editing `playwright.config.ts` to add an app | Not needed. Add `apps/<app>/app.json`; folders starting with `_` are ignored |
@@ -354,7 +400,7 @@ App-specific delivery facts live in that app's `agentNotes`. Currently: the Sauc
 | Assuming SauceDemo rejects whitespace or special characters in checkout fields | It accepts them and moves to step two. Tests document this as an observation, not a defect, so code that re-fills the form afterwards will fail |
 | Cart page "total price" (AC1) | SauceDemo shows no total on the cart page. Totals appear on the overview page (AC3). This is documented in the report |
 | Adding `Write(...)` permission rules | They have no effect. Use `Edit(...)` |
-| Re-running `npx playwright init-agents` | Overwrites `.claude/agents/*` and `.mcp.json`. Re-add the `github` server afterwards |
+| Re-running `npx playwright init-agents` | Overwrites `.claude/agents/*` and `.mcp.json` (which now has only `playwright-test` — delivery no longer uses an MCP server) |
 | `.playwright-mcp/` filling up | Expected (MCP logs and snapshots). It's git-ignored and safe to delete |
 
 ---
@@ -381,7 +427,7 @@ App-specific delivery facts live in that app's `agentNotes`. Currently: the Sauc
 - **Sandboxed, unattended runs:**
   - Each test run in a fresh Claude Code session inside a sandbox.
   - Headless browser (`--headless` in `.mcp.json`).
-  - GitHub actions without approval prompts (needs the `mcp__github` tools allowed, or auto mode).
+  - Delivery is a deliberate human step after review (`./push-artifacts.sh`); the agent never delivers in any mode.
   - Defining what lives inside vs outside the sandbox, and how permissions are managed there.
 - **Triggering:** target app → this agent → PR to a test repo → that repo's CI runs `npx playwright test`.
 - **Human in the loop:** questions Claude Code asks should appear in a frontend, with answers flowing back.

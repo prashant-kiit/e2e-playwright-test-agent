@@ -5,18 +5,28 @@
 #   ./run-stories.sh SCRUM-201 SCRUM-202 SCRUM-205     # specific stories of one app
 #   ./run-stories.sh practice-target                   # every story of an app
 #   ./run-stories.sh -j 2 -w 1 saucedemo               # 2 sessions at a time, 1 Playwright worker each
-#   ./run-stories.sh --force SCRUM-201                 # redo a story already marked done
+#   ./run-stories.sh --force SCRUM-201                 # regenerate a story already marked ready
 #   ./run-stories.sh --dry-run practice-target         # show what would run, start nothing
 #
-# Reruns are safe (e.g. after a session limit): a story already delivered (its PR recorded in
-# .qa-state.json, or its report already committed) is SKIPPED; any other story has its previous
-# generated files wiped and is regenerated from scratch, so a story's artifacts never mix two runs.
-# Use --force to redo a skipped story. .qa-state.json tracks, per story, the last run-id and PR.
+# Each session runs the QA flow up to the healed test suite, then STOPS for human review.
+# The agent does NOT deliver: after reviewing the generated tests, a human runs
+# ./push-artifacts.sh <app> <STORY_ID> to open the PR in the target repo.
+#
+# Reruns are safe (e.g. after a session limit): a story already generated (marked "ready" in
+# .qa-state.json, or whose tests are already committed) is SKIPPED; any other story has its
+# previous generated files wiped and is regenerated from scratch, so a story's artifacts never
+# mix two runs. Use --force to redo a skipped story. .qa-state.json tracks, per story, the last
+# run-id and status.
 #
 # Each session gets the kick-off prompt from qa_user_prompt.md with its own "Active story:",
 # "Mode: unattended" and "Run-ID:" lines (see "Unattended (batch) runs" in qa_system_prompt.md).
-# Artifacts stay at stable paths (apps/<app>/specs|tests|reports); the run-id is metadata only.
-# Step 7 (GitHub push + PR) is pre-approved for these sessions only.
+# Artifacts stay at stable paths (apps/<app>/specs|tests); the run-id is metadata only.
+# The batch refuses to start unless the app's target repo is already bootstrapped
+# (./check-bootstrapped.sh); if not, run ./bootstrap-target.sh <app> first.
+#
+# Status: ready = tests generated+healed, awaiting human review/delivery · incomplete = session
+# ended cleanly but produced no test suite (rerun) · failed = session errored (e.g. limit) ·
+# skipped = already generated (use --force to regenerate).
 #
 # Output: runs/<timestamp>-<app>/<STORY_ID>/{session.jsonl,stderr.log,result.md,clean.log,test-results/,playwright-report/}
 #         runs/<timestamp>-<app>/summary.md ; persistent state in .qa-state.json
@@ -79,12 +89,16 @@ for s in "${stories[@]}"; do
   [ "$a" = "$APP" ] || die "all stories in a batch must belong to one app: ${stories[0]%%|*} is in '$APP' but ${s%%|*} is in '$a'. Run one batch per app."
 done
 
-# The GitHub MCP server reads GITHUB_PAT when each session starts.
+# The bootstrap check (./check-bootstrapped.sh) needs GitHub auth: GITHUB_PAT or `gh` login.
+# Sessions themselves no longer deliver, so a PAT is not required for the agent runs.
 if [ -z "${GITHUB_PAT:-}" ] && [ -f .env ]; then set -a; . ./.env; set +a; fi
-[ -n "${GITHUB_PAT:-}" ] || [ $DRY_RUN -eq 1 ] || die "GITHUB_PAT is not set (and not found in .env); step 7 would fail"
+[ -n "${GITHUB_PAT:-}" ] || [ $DRY_RUN -eq 1 ] || echo "run-stories: note: GITHUB_PAT not set; the bootstrap check will rely on 'gh' login." >&2
 command -v claude >/dev/null || die "claude CLI not found"
 command -v jq >/dev/null || die "jq not found (used to read session results and state)"
 [ -f "$STATE_FILE" ] || echo '{}' > "$STATE_FILE"
+
+# Gate: the app's target repo must be bootstrapped before any session starts.
+if ./check-bootstrapped.sh "$APP" >/dev/null 2>&1; then BOOTED=1; else BOOTED=0; fi
 
 RUN_ROOT="runs/$(date '+%Y%m%d-%H%M%S')-$APP"
 RUN_ID="$(basename "$RUN_ROOT")"
@@ -95,15 +109,15 @@ kickoff_for() { # $1=STORY_ID
 }
 
 state_get() { jq -r --arg id "$1" ".[\$id].$2 // \"\"" "$STATE_FILE" 2>/dev/null; }
-committed_report() { # $1=app $2=id $3=slug ; 0 if the report file is tracked by git
-  git ls-files --error-unmatch "apps/$1/reports/$2-$3-test-report.md" >/dev/null 2>&1
+committed_tests() { # $1=app $2=id $3=slug ; 0 if the story's test suite is tracked by git
+  git ls-files "apps/$1/tests/$3" 2>/dev/null | grep -q .
 }
 decide() { # $1=id $2=app $3=slug ; echo run|skip and a reason
   local st; st="$(state_get "$1" status)"
   if [ "$FORCE" = 1 ]; then echo "run forced"; return; fi
-  [ "$st" = done ] && { echo "skip already delivered (state: ${1} PR $(state_get "$1" pr))"; return; }
-  if [ -z "$st" ] && committed_report "$2" "$1" "$3"; then
-    echo "skip report already committed (use --force to regenerate)"; return
+  [ "$st" = ready ] && { echo "skip already generated (state: ready, run $(state_get "$1" runId))"; return; }
+  if [ -z "$st" ] && committed_tests "$2" "$1" "$3"; then
+    echo "skip test suite already committed (use --force to regenerate)"; return
   fi
   echo "run ${st:-new}"
 }
@@ -124,6 +138,10 @@ clean_artifacts() { # $1=app $2=id $3=slug $4=logfile
 
 echo "App: $APP ($(jq -r .baseURL "apps/$APP/app.json") -> $(jq -r .targetRepo "apps/$APP/app.json"))"
 echo "Run-ID: $RUN_ID${FORCE:+  (force: $( [ $FORCE = 1 ] && echo on || echo off ))}"
+if [ "$BOOTED" = 1 ]; then echo "Bootstrapped: yes"; else
+  echo "Bootstrapped: NO"
+  [ $DRY_RUN -eq 1 ] || die "target repo for '$APP' is not bootstrapped. Run: ./bootstrap-target.sh $APP"
+fi
 echo "Stories (${#stories[@]}), $JOBS at a time, $WORKERS Playwright worker(s) each:"
 for s in "${stories[@]}"; do
   IFS='|' read -r id app file slug <<<"$s"
@@ -133,32 +151,33 @@ if [ $DRY_RUN -eq 1 ]; then
   first="${stories[0]%%|*}"
   echo; echo "Output would go to $RUN_ROOT/<STORY_ID>/. Kick-off prompt for $first:"; echo "----"
   kickoff_for "$first"; echo "----"
-  echo "Command: QA_RUN_DIR=$RUN_ROOT/$first QA_WORKERS=$WORKERS claude -p <prompt> --output-format stream-json --verbose --allowedTools mcp__github"
+  echo "Command: QA_RUN_DIR=$RUN_ROOT/$first QA_WORKERS=$WORKERS claude -p <prompt> --output-format stream-json --verbose"
   exit 0
 fi
 mkdir -p "$RUN_ROOT"
 
 run_story() { # $1=STORY_ID $2=app $3=slug ; runs in a background subshell
-  local id=$1 app=$2 slug=$3 dir="$RUN_ROOT/$1" start rc pr is_error cost
+  local id=$1 app=$2 slug=$3 dir="$RUN_ROOT/$1" start rc is_error cost tests
   mkdir -p "$dir"
   clean_artifacts "$app" "$id" "$slug" "$dir/clean.log"
   start=$(date +%s)
+  # No --allowedTools for push-artifacts: the agent must NOT deliver. It stops after Step 5;
+  # a human runs ./push-artifacts.sh after review.
   QA_RUN_DIR="$dir" QA_WORKERS="$WORKERS" claude -p "$(kickoff_for "$id")" \
     --output-format stream-json --verbose \
-    --allowedTools mcp__github \
     > "$dir/session.jsonl" 2> "$dir/stderr.log" < /dev/null
   rc=$?
   jq -rs 'map(select(.type == "result")) | last | .result // "(no result message; see session.jsonl and stderr.log)"' \
     "$dir/session.jsonl" > "$dir/result.md" 2>/dev/null || echo "(could not parse session.jsonl)" > "$dir/result.md"
   is_error=$(jq -rs 'map(select(.type == "result")) | last | .is_error // true' "$dir/session.jsonl" 2>/dev/null || echo true)
   cost=$(jq -rs 'map(select(.type == "result")) | last | .total_cost_usd // empty' "$dir/session.jsonl" 2>/dev/null)
-  pr=$(grep -oE 'https://github\.com/[^ )]+/pull/[0-9]+' "$dir/result.md" 2>/dev/null | head -1)
-  # Delivered only if the session ended cleanly AND a PR URL came back.
-  if [ "$rc" -eq 0 ] && [ "$is_error" = "false" ] && [ -n "$pr" ]; then status=done
-  elif [ "$rc" -eq 0 ] && [ "$is_error" = "false" ]; then status=incomplete  # ran OK but no PR (e.g. steps 1-6 only / limit mid-flow)
+  # Ready for review only if the session ended cleanly AND a test suite was produced.
+  if ls "apps/$app/tests/$slug"/*.spec.ts >/dev/null 2>&1; then tests="apps/$app/tests/$slug"; else tests=""; fi
+  if [ "$rc" -eq 0 ] && [ "$is_error" = "false" ] && [ -n "$tests" ]; then status=ready
+  elif [ "$rc" -eq 0 ] && [ "$is_error" = "false" ]; then status=incomplete  # ran OK but no test suite (e.g. limit mid-flow)
   else status=failed; fi
-  echo "$status|$(( $(date +%s) - start ))|${cost:-?}|$pr" > "$dir/status"
-  echo "[$(date '+%H:%M:%S')] $id ($app): $status after $(( ($(date +%s) - start) / 60 )) min${pr:+  $pr}"
+  echo "$status|$(( $(date +%s) - start ))|${cost:-?}|$tests" > "$dir/status"
+  echo "[$(date '+%H:%M:%S')] $id ($app): $status after $(( ($(date +%s) - start) / 60 )) min${tests:+  $tests}"
 }
 
 pids=()
@@ -176,7 +195,7 @@ for s in "${stories[@]}"; do
   d="$(decide "$id" "$app" "$slug")"
   if [ "${d%% *}" = skip ]; then
     mkdir -p "$RUN_ROOT/$id"
-    echo "skipped|0|0|$(state_get "$id" pr)" > "$RUN_ROOT/$id/status"
+    echo "skipped|0|0|$(state_get "$id" tests)" > "$RUN_ROOT/$id/status"
     echo "skipped: ${d#skip }" > "$RUN_ROOT/$id/result.md"
     echo "[$(date '+%H:%M:%S')] $id ($app): skipped — ${d#skip }"
     continue
@@ -193,11 +212,11 @@ wait
 now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 for s in "${stories[@]}"; do
   IFS='|' read -r id app file slug <<<"$s"
-  IFS='|' read -r st secs cost pr < "$RUN_ROOT/$id/status" 2>/dev/null || continue
+  IFS='|' read -r st secs cost tests < "$RUN_ROOT/$id/status" 2>/dev/null || continue
   [ "$st" = skipped ] && continue   # keep the earlier state for skipped stories
   tmp="$(mktemp)"
-  jq --arg id "$id" --arg app "$app" --arg st "$st" --arg run "$RUN_ID" --arg pr "$pr" --arg at "$now" \
-    '.[$id] = {app:$app, status:$st, runId:$run, pr:$pr, updatedAt:$at}' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+  jq --arg id "$id" --arg app "$app" --arg st "$st" --arg run "$RUN_ID" --arg tests "$tests" --arg at "$now" \
+    '.[$id] = {app:$app, status:$st, runId:$run, tests:$tests, updatedAt:$at}' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
 done
 
 # Summary
@@ -205,14 +224,16 @@ summary="$RUN_ROOT/summary.md"
 {
   echo "# Batch run $RUN_ID (app: $APP)"
   echo
-  echo "status: **done** = PR opened · **incomplete** = session ended but no PR (rerun to finish) · **failed** = session errored (e.g. limit) · **skipped** = already delivered (use --force)"
+  echo "status: **ready** = tests generated+healed, awaiting human review/delivery · **incomplete** = session ended but no test suite (rerun) · **failed** = session errored (e.g. limit) · **skipped** = already generated (use --force)"
   echo
-  echo "| Story | App | Status | Minutes | Cost (USD) | PR | Result |"
+  echo "To deliver a ready story after review:  ./push-artifacts.sh $APP <STORY_ID>"
+  echo
+  echo "| Story | App | Status | Minutes | Cost (USD) | Tests | Result |"
   echo "|---|---|---|---|---|---|---|"
   for s in "${stories[@]}"; do
     IFS='|' read -r id app file slug <<<"$s"
-    IFS='|' read -r st secs cost pr < "$RUN_ROOT/$id/status" 2>/dev/null || { st=unknown; secs=0; cost=?; pr=; }
-    echo "| $id | $app | $st | $(( secs / 60 )) | $cost | ${pr:--} | [$id/result.md]($id/result.md) |"
+    IFS='|' read -r st secs cost tests < "$RUN_ROOT/$id/status" 2>/dev/null || { st=unknown; secs=0; cost=?; tests=; }
+    echo "| $id | $app | $st | $(( secs / 60 )) | $cost | ${tests:--} | [$id/result.md]($id/result.md) |"
   done
 } > "$summary"
 echo; cat "$summary"

@@ -29,3 +29,51 @@ opencode
 24. Stay minialist.
 25. How Multi Tenant Session will be managed?
 26. Is Storing the Test Artifacts in File Storage Correct? Or S3 like something be used? 
+
+Next Question:
+- Have Very Simple Test Flow for Testing to Save Cost.
+- why was scrum-101 was not pused to target repo? Story -> Plan (Specs) -> Code (X) -> Report why? Code Regenerated and Report both should be mark of completion. Based on that Skipping should happen.
+- Add Some-Determinism in the Above Mapping using Frontend and SQL DB
+- Use Docker Based Object Storage for Artfiacts Storage using Streaming
+- Feature to Clean the Artifacts
+- How can we have a Every Step Log, HITL Questions and Push Approval? Please discuss.
+- Only one version of aritfacts should be maintained. Plywright CI do not belon in this Repo.
+- Agent Claude Code must use cheap Model.
+- Bootstrapping should be a Separate Step from Frontend.
+
+Agent Repo:
+- 
+
+Test Target Repo:
+- User Story - Deliverable
+- Plan/Specs - Deliverable
+- Seed - Deliverable
+- Tests Code - Deliverable
+- Evidence - Deliverable
+- Report - Deliverable
+- App.json - For Running Test CI
+- Playwright Config - For Running Test CI
+- Package - For Running Test CI
+- State + Git History for Syncing in case of Breakdown 
+
+Add 3 Tools in this reagrd:
+- Bootstrapp - Sync mode with Agent Repo as Source of Truth
+- Check Is bootstrapped
+- Push Artifacts - Sync mode with Agent Repo as Source of Truth
+- Integrate these Tools with Main Agent
+- If this means that GitHub MCP is not required then it is Fine
+- All these tools should be Reusable
+- Run Script (Agent) should run Check is Bootstrapped Tool to. If yes then Agentic workflow should start
+- Make Sure that While QA Flow do not break
+- Ask me if any questions or loop holes u find.
+
+custom mcp. legacy cleanup. parallel push may lead to git conflicts.
+there is only batch mode with Human Review
+what is the use playwright-test-report folder and its index.html file
+
+```bash
+set -a; source .env; set +a            # loads GITHUB_PAT (if not already set)
+./reset-target.sh --dry-run saucedemo  # preview: what it would wipe (no changes)
+./reset-target.sh saucedemo            # do it — asks you to type the repo name to confirm
+./bootstrap-target.sh saucedemo        # rebuild the clean infra on master
+```

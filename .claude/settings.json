@@ -3,8 +3,7 @@
     "MCP_TOOL_TIMEOUT": "120000"
   },
   "enabledMcpjsonServers": [
-    "playwright-test",
-    "github"
+    "playwright-test"
   ],
   "permissions": {
     "allow": [
