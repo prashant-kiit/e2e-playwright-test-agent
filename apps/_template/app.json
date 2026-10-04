@@ -1,0 +1,11 @@
+{
+  "name": "Human-readable app name",
+  "baseURL": "https://your-app.example.com",
+  "targetRepo": "owner/repo-that-receives-the-tests",
+  "targetBranch": "master",
+  "locators": "How elements are best located, e.g. data-testid attributes: page.getByTestId('...')",
+  "agentNotes": [
+    "What the seed does (e.g. logs in as X and lands on Y, or opens the home page logged out).",
+    "Any quirk the agents must know: flaky pages, elements that need a special click, test data that resets, etc."
+  ]
+}

@@ -1,34 +1,63 @@
-import { defineConfig, devices } from '@playwright/test';
+import fs from 'fs';
+import path from 'path';
+import { defineConfig, devices, type Project } from '@playwright/test';
 
 /**
- * Read environment variables from file.
- * https://github.com/motdotla/dotenv
+ * Applications under test are discovered, not listed here.
+ * Every folder apps/<app>/ with an app.json becomes one set of browser projects
+ * named <app>-<browser>, running only apps/<app>/** against the app's baseURL.
+ * Folders starting with "_" (e.g. apps/_template) are skipped.
+ * To add an app, copy apps/_template — nothing in this file needs to change.
  */
-// import dotenv from 'dotenv';
-// import path from 'path';
-// dotenv.config({ path: path.resolve(__dirname, '.env') });
+const APPS_DIR = path.join(__dirname, 'apps');
+
+/* run-stories.sh sets QA_RUN_DIR per story so parallel runs don't wipe each other's results/report. */
+const RUN_DIR = process.env.QA_RUN_DIR;
+
+const BROWSERS = {
+  chromium: devices['Desktop Chrome'],
+  firefox: devices['Desktop Firefox'],
+  webkit: devices['Desktop Safari'],
+  'mobile-chrome': devices['Pixel 7'],
+};
+
+function appProjects(): Project[] {
+  const apps = fs
+    .readdirSync(APPS_DIR, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && !d.name.startsWith('_') && fs.existsSync(path.join(APPS_DIR, d.name, 'app.json')))
+    .map((d) => d.name)
+    .sort();
+
+  return apps.flatMap((app) => {
+    const { baseURL } = JSON.parse(fs.readFileSync(path.join(APPS_DIR, app, 'app.json'), 'utf8'));
+    if (!baseURL) throw new Error(`apps/${app}/app.json: "baseURL" is required`);
+    return Object.entries(BROWSERS).map(([browser, device]) => ({
+      name: `${app}-${browser}`,
+      testDir: path.join(APPS_DIR, app),
+      use: { ...device, baseURL },
+    }));
+  });
+}
 
 /**
  * See https://playwright.dev/docs/test-configuration.
  */
 export default defineConfig({
-  testDir: './tests',
+  testDir: './apps',
+  outputDir: RUN_DIR ? path.join(RUN_DIR, 'test-results') : 'test-results',
   /* Run tests in files in parallel */
   fullyParallel: true,
   /* Fail the build on CI if you accidentally left test.only in the source code. */
   forbidOnly: !!process.env.CI,
   /* Retry on CI only */
   retries: process.env.CI ? 2 : 0,
-  /* Opt out of parallel tests on CI. */
-  workers: process.env.CI ? 1 : undefined,
+  /* Opt out of parallel tests on CI. run-stories.sh sets QA_WORKERS to keep parallel story runs from overloading the machine. */
+  workers: process.env.CI ? 1 : process.env.QA_WORKERS ? Number(process.env.QA_WORKERS) : undefined,
   /* Reporter to use. See https://playwright.dev/docs/test-reporters */
   /* open: 'never' so a failing local run doesn't block waiting on the report server */
-  reporter: [['list'], ['html', { open: 'never' }]],
+  reporter: [['list'], ['html', { open: 'never', outputFolder: RUN_DIR ? path.join(RUN_DIR, 'playwright-report') : 'playwright-report' }]],
   /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
   use: {
-    /* Base URL to use in actions like `await page.goto('')`. */
-    baseURL: 'https://www.saucedemo.com',
-
     /* Playwright's default is no limit; agents driving the browser over MCP would hang forever on a missing element */
     actionTimeout: 10_000,
     navigationTimeout: 15_000,
@@ -37,48 +66,7 @@ export default defineConfig({
     trace: 'on-first-retry',
   },
 
-  /* Configure projects for major browsers */
-  projects: [
-    {
-      name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
-    },
-
-    {
-      name: 'firefox',
-      use: { ...devices['Desktop Firefox'] },
-    },
-
-    {
-      name: 'webkit',
-      use: { ...devices['Desktop Safari'] },
-    },
-
-    /* Test against mobile viewports. */
-    {
-      name: 'Mobile Chrome',
-      use: { ...devices['Pixel 7'] },
-    },
-    // {
-    //   name: 'Mobile Safari',
-    //   use: { ...devices['iPhone 12'] },
-    // },
-
-    /* Test against branded browsers. */
-    // {
-    //   name: 'Microsoft Edge',
-    //   use: { ...devices['Desktop Edge'], channel: 'msedge' },
-    // },
-    // {
-    //   name: 'Google Chrome',
-    //   use: { ...devices['Desktop Chrome'], channel: 'chrome' },
-    // },
-  ],
-
-  /* Run your local dev server before starting the tests */
-  // webServer: {
-  //   command: 'npm run start',
-  //   url: 'http://localhost:3000',
-  //   reuseExistingServer: !process.env.CI,
-  // },
+  /* <app>-chromium, <app>-firefox, <app>-webkit, <app>-mobile-chrome for every app.
+   * The MCP *_setup_page tools default to the first project, so always pass `project`. */
+  projects: appProjects(),
 });

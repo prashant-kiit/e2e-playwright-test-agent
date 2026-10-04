@@ -11,9 +11,9 @@
       "mcp__playwright-test",
       "Bash(npx playwright test:*)",
       "Bash(npx playwright show-report:*)",
-      "Edit(specs/**)",
-      "Edit(tests/**)",
-      "Edit(reports/**)"
+      "Edit(apps/*/specs/**)",
+      "Edit(apps/*/tests/**)",
+      "Edit(apps/*/reports/**)"
     ]
   },
   "hooks": {
