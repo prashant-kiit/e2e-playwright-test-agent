@@ -32,17 +32,17 @@ All five acceptance criteria are fully covered by passing automated tests across
 
 ## 2. Manual (Exploratory) Test Results
 
-Exploratory testing was performed by driving a real browser (Chromium) through the Playwright MCP tools, starting from the logged-in seed state (`tests/seed.spec.ts`).
+Exploratory testing was performed by driving a real browser (Chromium) through the Playwright MCP tools, starting from the logged-in seed state (`tests/saucedemo/seed.spec.ts`).
 
 | # | Scenario | AC | Result | Evidence |
 |---|---|---|---|---|
 | E1 | Add Backpack ($29.99) + Bike Light ($9.99); cart badge → 2 | AC1 | ✅ PASS | — |
-| E2 | Cart page lists both items (qty 1, description, price); Continue Shopping + Checkout present; no total shown on cart page | AC1 | ✅ PASS | `evidence/01-cart-review.png` |
-| E3 | Checkout → `/checkout-step-one.html`; Continue with all fields empty → **"Error: First Name is required"**, URL unchanged | AC2, AC5 | ✅ PASS | `evidence/02-info-validation-error.png` |
+| E2 | Cart page lists both items (qty 1, description, price); Continue Shopping + Checkout present; no total shown on cart page | AC1 | ✅ PASS | `evidence/SCRUM-101-01-cart-review.png` |
+| E3 | Checkout → `/checkout-step-one.html`; Continue with all fields empty → **"Error: First Name is required"**, URL unchanged | AC2, AC5 | ✅ PASS | `evidence/SCRUM-101-02-info-validation-error.png` |
 | E4 | Fill Jane / Smith / 94107 → `/checkout-step-two.html` | AC2 | ✅ PASS | — |
-| E5 | Overview: both items, Payment **SauceCard #31337**, Shipping **Free Pony Express Delivery!**, Item total **$39.98**, Tax **$3.20**, Total **$43.18** | AC3 | ✅ PASS | `evidence/03-order-overview.png` |
-| E6 | Finish → `/checkout-complete.html`, **"Thank you for your order!"**, dispatch text, Pony Express image, Back Home | AC4 | ✅ PASS | `evidence/04-order-complete.png` |
-| E7 | Cart badge cleared after order completion | AC4, business rule 4 | ✅ PASS | `evidence/04-order-complete.png` |
+| E5 | Overview: both items, Payment **SauceCard #31337**, Shipping **Free Pony Express Delivery!**, Item total **$39.98**, Tax **$3.20**, Total **$43.18** | AC3 | ✅ PASS | `evidence/SCRUM-101-03-order-overview.png` |
+| E6 | Finish → `/checkout-complete.html`, **"Thank you for your order!"**, dispatch text, Pony Express image, Back Home | AC4 | ✅ PASS | `evidence/SCRUM-101-04-order-complete.png` |
+| E7 | Cart badge cleared after order completion | AC4, business rule 4 | ✅ PASS | `evidence/SCRUM-101-04-order-complete.png` |
 
 ### Observations from exploration
 - **Totals math confirmed:** Tax = 8% of item total ($39.98 × 0.08 = $3.198 → displayed $3.20); Total = item total + tax.
@@ -55,7 +55,7 @@ Exploratory testing was performed by driving a real browser (Chromium) through t
 
 ## 3. Automated Test Results
 
-Scripts: `tests/saucedemo-checkout/` — 9 spec files, 22 test cases. Each file logs in via a `beforeEach` replicating the seed, uses relative URLs (baseURL in `playwright.config.ts`), stable `data-test` locators, and web-first assertions (no fixed timeouts).
+Scripts: `tests/saucedemo/checkout/` — 9 spec files, 22 test cases. Each file logs in via a `beforeEach` replicating the seed, uses relative URLs (baseURL in `playwright.config.ts`), stable `data-test` locators, and web-first assertions (no fixed timeouts).
 
 ### 3.1 Test suite composition
 
@@ -74,7 +74,7 @@ Scripts: `tests/saucedemo-checkout/` — 9 spec files, 22 test cases. Each file 
 
 ### 3.2 Initial run (Chromium)
 
-`npx playwright test tests/saucedemo-checkout/ --project=chromium`
+`npx playwright test tests/saucedemo/checkout/ --project=chromium`
 
 - **Result: 21 passed, 1 failed.**
 - Failure: `cart-review.spec.ts` → *"Continue Shopping returns to products page and preserves cart contents"*.
@@ -90,7 +90,7 @@ Scripts: `tests/saucedemo-checkout/` — 9 spec files, 22 test cases. Each file 
 
 ### 3.4 Final run — all browsers
 
-`npx playwright test tests/saucedemo-checkout/`
+`npx playwright test tests/saucedemo/checkout/`
 
 | Browser project | Tests | Passed | Failed |
 |---|---|---|---|
@@ -154,7 +154,7 @@ Scripts: `tests/saucedemo-checkout/` — 9 spec files, 22 test cases. Each file 
 **Next steps:**
 1. Triage OBS-1 and OBS-2 with product to confirm intended behavior; add enforcement tests if rules change.
 2. Extend coverage to additional SauceDemo user personas.
-3. Wire `tests/saucedemo-checkout/` into CI (the repo already contains `.github/workflows/playwright.yml`).
+3. Wire `tests/saucedemo/checkout/` into CI (the repo already contains `.github/workflows/playwright.yml`).
 4. Deliver artifacts via pull request to the target repository (Step 7 of the workflow).
 
 ---
@@ -162,4 +162,4 @@ Scripts: `tests/saucedemo-checkout/` — 9 spec files, 22 test cases. Each file 
 ### Appendix — Environment
 - `playwright.config.ts`: `baseURL=https://www.saucedemo.com`, `actionTimeout=10s`, `navigationTimeout=15s`, trace on first retry, HTML + list reporters.
 - Node project `e2e-playwright-test-agent`, `@playwright/test ^1.63.0`.
-- Evidence screenshots: `reports/evidence/01-cart-review.png`, `02-info-validation-error.png`, `03-order-overview.png`, `04-order-complete.png`.
+- Evidence screenshots: `reports/evidence/SCRUM-101-01-cart-review.png`, `SCRUM-101-02-info-validation-error.png`, `SCRUM-101-03-order-overview.png`, `SCRUM-101-04-order-complete.png`.

@@ -1,5 +1,5 @@
-// spec: specs/saucedemo-checkout-test-plan.md
-// seed: tests/seed.spec.ts
+// spec: specs/saucedemo/SCRUM-101-checkout-test-plan.md
+// seed: tests/saucedemo/seed.spec.ts
 
 import { test, expect } from '@playwright/test';
 

@@ -9,7 +9,7 @@ SauceDemo (https://www.saucedemo.com) - a demo e-commerce site used for test aut
 End-to-end checkout workflow covering: Cart Review, Checkout Information entry, Order Overview, Order Completion, and related error handling / edge cases, per user story SCRUM-101.
 
 ## Starting State / Assumptions
-- All scenarios assume a fresh browser session that has already authenticated as `standard_user` / `secret_sauce` and landed on `/inventory.html` (see seed file `tests/seed.spec.ts`).
+- All scenarios assume a fresh browser session that has already authenticated as `standard_user` / `secret_sauce` and landed on `/inventory.html` (see seed file `tests/saucedemo/seed.spec.ts`).
 - `baseURL` is configured in `playwright.config.ts`; all navigation in generated tests should use relative paths (e.g. `/cart.html`, `/checkout-step-one.html`).
 - Unless a scenario states otherwise, the cart is assumed empty at the start of each scenario (use "Reset App State" from the burger menu, or remove items, to guarantee isolation between tests).
 
@@ -61,7 +61,7 @@ End-to-end checkout workflow covering: Cart Review, Checkout Information entry, 
 
 ### 1. AC1 - Cart Review
 
-**Seed:** `tests/seed.spec.ts`
+**Seed:** `tests/saucedemo/seed.spec.ts`
 
 #### 1.1. Cart displays correct item details, quantities, and supports navigation options
 
@@ -114,7 +114,7 @@ End-to-end checkout workflow covering: Cart Review, Checkout Information entry, 
 
 ### 2. AC2 & AC5 - Checkout Information Entry and Validation
 
-**Seed:** `tests/seed.spec.ts`
+**Seed:** `tests/saucedemo/seed.spec.ts`
 
 #### 2.1. Happy path: valid First Name, Last Name, and Zip proceed to Overview
 
@@ -220,7 +220,7 @@ End-to-end checkout workflow covering: Cart Review, Checkout Information entry, 
 
 ### 3. AC3 - Order Overview
 
-**Seed:** `tests/seed.spec.ts`
+**Seed:** `tests/saucedemo/seed.spec.ts`
 
 #### 3.1. Overview page shows item summary, payment/shipping info, and correct subtotal/tax/total
 
@@ -268,7 +268,7 @@ End-to-end checkout workflow covering: Cart Review, Checkout Information entry, 
 
 ### 4. AC4 - Order Completion
 
-**Seed:** `tests/seed.spec.ts`
+**Seed:** `tests/saucedemo/seed.spec.ts`
 
 #### 4.1. Clicking Finish completes the order, shows the confirmation message, and clears the cart
 
@@ -299,7 +299,7 @@ End-to-end checkout workflow covering: Cart Review, Checkout Information entry, 
 
 ### 5. Navigation Flow - Cancel, Back, and End-to-End Happy Path
 
-**Seed:** `tests/seed.spec.ts`
+**Seed:** `tests/saucedemo/seed.spec.ts`
 
 #### 5.1. End-to-end happy path: Inventory to Cart to Info to Overview to Completion
 
@@ -343,7 +343,7 @@ End-to-end checkout workflow covering: Cart Review, Checkout Information entry, 
 
 ### 6. UI Element Validation
 
-**Seed:** `tests/seed.spec.ts`
+**Seed:** `tests/saucedemo/seed.spec.ts`
 
 #### 6.1. All expected UI elements are present and correctly labeled across the checkout flow
 
