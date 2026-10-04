@@ -11,6 +11,9 @@ import { defineConfig, devices, type Project } from '@playwright/test';
  */
 const APPS_DIR = path.join(__dirname, 'apps');
 
+/* run-stories.sh sets QA_RUN_DIR per story so parallel runs don't wipe each other's results/report. */
+const RUN_DIR = process.env.QA_RUN_DIR;
+
 const BROWSERS = {
   chromium: devices['Desktop Chrome'],
   firefox: devices['Desktop Firefox'],
@@ -41,17 +44,18 @@ function appProjects(): Project[] {
  */
 export default defineConfig({
   testDir: './apps',
+  outputDir: RUN_DIR ? path.join(RUN_DIR, 'test-results') : 'test-results',
   /* Run tests in files in parallel */
   fullyParallel: true,
   /* Fail the build on CI if you accidentally left test.only in the source code. */
   forbidOnly: !!process.env.CI,
   /* Retry on CI only */
   retries: process.env.CI ? 2 : 0,
-  /* Opt out of parallel tests on CI. */
-  workers: process.env.CI ? 1 : undefined,
+  /* Opt out of parallel tests on CI. run-stories.sh sets QA_WORKERS to keep parallel story runs from overloading the machine. */
+  workers: process.env.CI ? 1 : process.env.QA_WORKERS ? Number(process.env.QA_WORKERS) : undefined,
   /* Reporter to use. See https://playwright.dev/docs/test-reporters */
   /* open: 'never' so a failing local run doesn't block waiting on the report server */
-  reporter: [['list'], ['html', { open: 'never' }]],
+  reporter: [['list'], ['html', { open: 'never', outputFolder: RUN_DIR ? path.join(RUN_DIR, 'playwright-report') : 'playwright-report' }]],
   /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
   use: {
     /* Playwright's default is no limit; agents driving the browser over MCP would hang forever on a missing element */

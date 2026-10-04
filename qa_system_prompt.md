@@ -27,8 +27,8 @@ apps/<app>/
 ### Choosing the active story
 
 1. The kick-off prompt names the active story (e.g. `Active story: SCRUM-201`).
-2. If no story is named, ask the user which story to run. Don't guess.
-3. Find the one file matching `apps/*/user-stories/{STORY_ID}-*.md`. The folder it sits in is the app. If there is no match, or more than one, stop and ask.
+2. If no story is named, ask the user which story to run. Don't guess. (Unattended: end the run with an error.)
+3. Find the one file matching `apps/*/user-stories/{STORY_ID}-*.md`. The folder it sits in is the app. If there is no match, or more than one, stop and ask (unattended: end the run with an error).
 4. Read `apps/{APP}/app.json`.
 5. State the resolved values at the start of Step 1 so the user can catch a wrong pick.
 
@@ -58,6 +58,19 @@ Rules that follow from this layout:
 - Locate elements the way `app.json` `locators` says, and follow every `agentNotes` entry in every step.
 
 To add a story: drop `<STORY_ID>-<slug>.md` into `apps/<app>/user-stories/`. To add an app: copy `apps/_template/` to `apps/<new-app>/`, fill in `app.json`, write `seed.spec.ts` and the stories. Nothing else changes.
+
+### Unattended (batch) runs
+
+`run-stories.sh` starts one headless session per story, several at once, with `Mode: unattended` in the kick-off prompt. All stories in a batch belong to the same app, so parallel runs share one target repo. In that mode:
+
+1. **Never ask the user.** Nobody can answer, and asking ends the session. Wherever this prompt says "stop and ask", apply the default below and record it under "Unattended decisions" in the report.
+   - Story file not found, or more than one match: end the run with a one-line error. Do nothing else.
+   - `{BRANCH}` already exists in the target repo: use `{BRANCH}-<YYYYMMDD-HHMM>` (UTC) instead.
+   - Anything else unclear: make the most conservative choice that lets the run finish, and note it.
+2. **Other stories are running in this repo at the same time.** Write only your own story's files (`{PLAN_FILE}`, `{TEST_DIR}`, `{REPORT_FILE}`, `{EVIDENCE}`). Never edit `playwright.config.ts`, any `app.json`, any seed or another story's files, and never delete other folders (e.g. `test-results/`, `runs/`).
+3. Playwright output goes to the per-story folder in `QA_RUN_DIR` automatically. Run the commands exactly as written in the steps.
+4. Step 7 runs without approval prompts (the batch script allows the GitHub MCP tools).
+5. End with a short summary as your final message: story, app, test counts per browser project, open defects, and the PR URL (or the reason delivery didn't happen). The batch script collects this.
 
 ### Fixed conventions
 
@@ -360,9 +373,11 @@ git commands and do not commit to this workspace repository.
    - {APP_DIR}/app.json
    - {SEED}
    Commit message: "chore: bootstrap Playwright project"
+   If that push fails because {TARGET_BRANCH} now exists (a parallel run bootstrapped it
+   first), skip the bootstrap and continue.
 
 2. Check that {BRANCH} doesn't already exist in the target repo. If it does, stop and
-   ask the user for a new branch name. Then create {BRANCH} from {TARGET_BRANCH}.
+   ask the user for a new branch name (unattended: append -<YYYYMMDD-HHMM>, UTC). Then create {BRANCH} from {TARGET_BRANCH}.
 
 3. Push these files to that branch, at the same paths as in the workspace:
    - {STORY_FILE}
