@@ -18,10 +18,43 @@ jobs:
     - name: Install Playwright Browsers
       run: npx playwright install --with-deps
     - name: Run Playwright tests
-      run: npx playwright test
+      id: pw
+      continue-on-error: true   # keep going so the summary and artifact always run; the job is failed at the end if tests failed
+      run: npx playwright test --reporter=list,html,json
+      env:
+        PLAYWRIGHT_JSON_OUTPUT_NAME: results.json
+    # The QA report is generated here, by CI — not by the agent. A per-project
+    # pass/fail/flaky/skipped table is written to the run's Job Summary.
+    - name: Test report (Job Summary)
+      if: ${{ !cancelled() }}
+      run: |
+        {
+          echo "## Playwright results"
+          echo ""
+          if [ -f results.json ]; then
+            echo "| Project | Passed | Failed | Flaky | Skipped |"
+            echo "|---|---|---|---|---|"
+            jq -r '
+              [.. | objects | select(has("projectName") and has("status") and has("results"))]
+              | group_by(.projectName)[]
+              | "| \(.[0].projectName) | \([.[]|select(.status=="expected")]|length) | \([.[]|select(.status=="unexpected")]|length) | \([.[]|select(.status=="flaky")]|length) | \([.[]|select(.status=="skipped")]|length) |"
+            ' results.json
+            echo ""
+            jq -r '"**Total:** \(.stats.expected) passed, \(.stats.unexpected) failed, \(.stats.flaky) flaky, \(.stats.skipped) skipped"' results.json
+          else
+            echo "_No results.json was produced; see the job log._"
+          fi
+          echo ""
+          echo "Full HTML report: the **playwright-report** artifact on this run."
+        } >> "$GITHUB_STEP_SUMMARY"
     - uses: actions/upload-artifact@v4
       if: ${{ !cancelled() }}
       with:
         name: playwright-report
         path: playwright-report/
         retention-days: 30
+    - name: Fail job if tests failed
+      if: ${{ steps.pw.outcome == 'failure' }}
+      run: |
+        echo "Playwright reported failures — see the Job Summary above." >&2
+        exit 1
