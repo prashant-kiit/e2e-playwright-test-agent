@@ -2,7 +2,7 @@
 
 ## Workflow Overview
 
-This prompt guides you through a complete 7-step QA workflow using MCP servers and AI agents to go from user story to automated test scripts delivered as a pull request.
+This prompt guides you through a 5-step QA workflow using MCP servers and AI agents to go from a user story to a healed, automated test suite on disk. **The agent stops after Step 5 for human review.** It does NOT deliver: a human reviews the generated test code and then runs `./push-artifacts.sh {APP} {STORY_ID}` to open the pull request in the target repo.
 
 The harness can test more than one application. Each run works on **one active story**. Every step below uses `{PLACEHOLDERS}` that you derive from the story file's location and the app's `app.json` (see Run Configuration).
 
@@ -45,13 +45,13 @@ apps/<app>/
 | `{SEED}` | `{APP_DIR}/seed.spec.ts` |
 | `{PLAN_FILE}` | `{APP_DIR}/specs/{STORY_ID}-{SLUG}-test-plan.md` |
 | `{TEST_DIR}` | `{APP_DIR}/tests/{SLUG}/` |
-| `{REPORT_FILE}` | `{APP_DIR}/reports/{STORY_ID}-{SLUG}-test-report.md` |
-| `{EVIDENCE}` | `{APP_DIR}/reports/evidence/{STORY_ID}-<short-name>.png` |
 | `{CHROMIUM_PROJECT}` | `{APP}-chromium` |
 | `{BASE_URL}`, `{TARGET_REPO}`, `{TARGET_BRANCH}` | `baseURL`, `targetRepo`, `targetBranch` from `app.json` |
 | `{BRANCH}` | `qa/{STORY_ID}-{SLUG}` |
 | `{PR_TITLE}` | `{STORY_ID}: {STORY_TITLE} E2E test suite` |
 | `{RUN_ID}` | Unattended only: the `Run-ID:` line in the kick-off prompt (e.g. `20261004-180531-saucedemo`). Empty for interactive runs |
+
+The placeholders `{TARGET_REPO}`, `{TARGET_BRANCH}`, `{BRANCH}` and `{PR_TITLE}` describe where a human later delivers the suite with `./push-artifacts.sh`; the agent itself never pushes or opens a PR.
 
 Rules that follow from this layout:
 - The agent generates and heals on `{CHROMIUM_PROJECT}` only (token saving). `npx playwright test {TEST_DIR}` (no `--project`) runs all 4 of the app's projects; that full run is for CI, not the agent.
@@ -62,19 +62,16 @@ To add a story: drop `<STORY_ID>-<slug>.md` into `apps/<app>/user-stories/`. To 
 
 ### Unattended (batch) runs
 
-`run-stories.sh` starts one headless session per story, several at once, with `Mode: unattended` and a `Run-ID:` line in the kick-off prompt. All stories in a batch belong to the same app, so parallel runs share one target repo. In that mode:
+`run-stories.sh` starts one headless session per story, several at once, with `Mode: unattended` and a `Run-ID:` line in the kick-off prompt. All stories in a batch belong to the same app. In that mode:
 
-1. **Never ask the user.** Nobody can answer, and asking ends the session. Wherever this prompt says "stop and ask", apply the default below and record it under "Unattended decisions" in the report.
+1. **Never ask the user.** Nobody can answer, and asking ends the session. Wherever this prompt says "stop and ask", apply the default below and record it in your final summary under "Unattended decisions".
    - Story file not found, or more than one match: end the run with a one-line error. Do nothing else.
    - Anything else unclear: make the most conservative choice that lets the run finish, and note it.
-2. **The run-id makes a rerun safe and traceable.** The script wipes this story's old generated files before restarting it, so you always start clean (never merge leftovers from an earlier attempt). Put the run-id into the artifacts you produce:
-   - a `**Run-ID:** {RUN_ID}` line near the top of `{REPORT_FILE}`,
-   - the same line in the PR body.
-3. **Reuse the stable branch `{BRANCH}` — do not add a run-id or timestamp suffix.** In step 7: if `{BRANCH}` already exists, update it to match the current artifacts (push the files onto it) rather than creating a new branch; if an open PR from `{BRANCH}` already exists, update that PR instead of opening a second one. This keeps one branch and one PR per story across reruns.
-4. **Other stories are running in this repo at the same time.** Write only your own story's files (`{PLAN_FILE}`, `{TEST_DIR}`, `{REPORT_FILE}`, `{EVIDENCE}`). Never edit `playwright.config.ts`, any `app.json`, any seed or another story's files, and never delete other folders (e.g. `test-results/`, `runs/`).
+2. **The run-id makes a rerun safe and traceable.** The script wipes this story's old generated files before restarting it, so you always start clean (never merge leftovers from an earlier attempt).
+3. **The agent does not deliver, in batch or interactively.** You stop after Step 5 with the healed suite in `{TEST_DIR}`. A human reviews it and runs `./push-artifacts.sh` afterwards. Do not run `./push-artifacts.sh` and do not open a PR yourself.
+4. **Other stories are running in this repo at the same time.** Write only your own story's files (`{PLAN_FILE}`, `{TEST_DIR}`). Never edit `playwright.config.ts`, any `app.json`, any seed or another story's files, and never delete other folders (e.g. `test-results/`, `runs/`).
 5. Playwright output goes to the per-story folder in `QA_RUN_DIR` automatically. Run the commands exactly as written in the steps.
-6. Step 7 runs without approval prompts (the batch script allows the GitHub MCP tools).
-7. End with a short summary as your final message: story, app, Chromium test counts, open defects, and the PR URL (or the reason delivery didn't happen). The batch script reads the PR URL from this to mark the story delivered.
+6. End with a short summary as your final message: story, app, the test files created in `{TEST_DIR}`, the Chromium pass/fail count after healing, open defects, and any "Unattended decisions". The batch script marks the story **ready-for-review** when the suite exists on disk and the session ended cleanly.
 
 ### Fixed conventions
 
@@ -94,11 +91,17 @@ Do not write anything into `test-results/`: Playwright wipes it on every run and
 ```
 I need to start a new testing workflow for {STORY_ID}. First state the resolved run
 configuration (story file, app, base URL, seed, Chromium project, plan, test directory,
-report, branch, target repo) and the app's agentNotes. Then read the user story from:
+branch, target repo) and the app's agentNotes.
+
+Then read the user story from:
 {STORY_FILE}
 
 Summarize the key requirements, acceptance criteria, and testing scope.
 ```
+
+You do not check or touch the target repo. Delivery (and its bootstrap requirement) is a
+separate human step with `./push-artifacts.sh`; `run-stories.sh` already verifies bootstrap
+up front for batch runs.
 
 **Expected Output:**
 
@@ -167,13 +170,13 @@ Then execute the test scenarios defined in that plan:
    tools to manually execute each test scenario from the plan
 2. Follow the step-by-step instructions in each test case
 3. Verify expected results match actual results
-4. Take screenshots at key steps and error states, saved as
-   {EVIDENCE}
+4. Screenshots are optional and only to aid your own analysis; keep them out of the
+   delivery (do not save them under the app folder). The QA results report is produced by
+   CI, not here.
 5. Document your findings:
    - Test execution results for each scenario
    - Any UI inconsistencies or unexpected behaviors
    - Missing validations or bugs discovered
-   - Screenshots as evidence
    - The locators that worked for each element (needed in Step 4)
 ```
 
@@ -284,140 +287,38 @@ playwright-test-healer agent.
 
 
 
-## 📊 STEP 6: Create Test Report
+## 🛑 STEP 6: Stop for Human Review (do NOT deliver)
+
+**This is the end of the agent's work.** Do NOT open a pull request, do NOT run
+`./push-artifacts.sh`, do NOT use local `git` or any GitHub MCP, and do NOT write a report
+file. The QA **report is generated by CI** (the target repo's
+`.github/workflows/playwright.yml`) once the suite is delivered — not by the agent.
+
+Delivery is a separate, human-initiated step: after reviewing the generated test code, a
+human runs `./push-artifacts.sh {APP} {STORY_ID}` to sync the story, plan and tests onto
+branch `{BRANCH}` of `{TARGET_REPO}` and open the PR into `{TARGET_BRANCH}`.
 
 **Prompt:**
 
 ```
-Now I need to create a comprehensive test execution report based on manual testing,
-automation execution, and healing activities.
+The test suite is written and healed on {CHROMIUM_PROJECT}. Stop here for human review —
+do not deliver. End with a short Markdown summary as your final message (no file written):
+- Story, application and base URL tested
+- Acceptance criteria covered, and the test files created in {TEST_DIR}
+- Local Chromium result from Step 5 (pass/fail count) and any healing performed
+- Any defects or notable observations found during exploration (Step 3)
+- Any "Unattended decisions" made (batch mode only)
+- A reminder that a human delivers with: ./push-artifacts.sh {APP} {STORY_ID}
+  (full cross-browser results are then produced by that repo's CI)
 
-Please compile results from:
-- Step 3: Manual exploratory testing results
-- Step 4: Generated automation scripts
-- Step 5: Automated test execution and healing results
-
-Save the report as: {REPORT_FILE}
-(not under test-results/, which Playwright deletes on every run)
-
-Include:
-1. Executive Summary
-   - Story, application and base URL tested
-   - Total test cases planned
-   - Test cases executed (manual + automated)
-   - Overall Pass/Fail/Blocked status
-
-2. Manual Test Results
-   - Results from Step 3 exploratory testing
-   - Screenshots and observations
-   - Issues found during manual testing
-
-3. Automated Test Results
-   - Initial automation results from Step 5
-   - Healing activities performed
-   - Final test execution results after healing
-   - Test suite execution summary
-   - Pass/Fail count for each test suite on {CHROMIUM_PROJECT}
-   - Note that cross-browser execution is delegated to the target repo's CI
-
-4. Defects Log
-   - For any failed tests (manual or automated):
-     * Bug ID
-     * Severity (Critical/High/Medium/Low)
-     * Title and Description
-     * Steps to Reproduce
-     * Expected vs Actual Behavior
-     * Screenshots/Evidence
-     * Environment Details
-
-5. Test Coverage Analysis
-   - Which acceptance criteria are covered
-   - Coverage from manual vs automated tests
-   - Any gaps in test coverage
-   - Recommendations for additional testing
-
-6. Summary and Recommendations
-   - Overall quality assessment
-   - Risk areas
-   - Next steps
+Do not create {APP_DIR}/reports/... and do not run any delivery command.
 ```
 
 **Expected Output:**
 
-- Comprehensive test execution report covering both manual and automated testing
-- Clear PASS/FAIL status for all test scenarios
-- Detailed bug reports for failures
-- Complete test coverage analysis
-- Evidence and screenshots attached
-
----
-
-
-
-## 🚀 STEP 7: Open a Pull Request in the Target Repository
-
-**Target repository:** `{TARGET_REPO}`, branch `{TARGET_BRANCH}`, both from `{APP_DIR}/app.json`
-
-**Prompt:**
-
-```
-Now I need to deliver the test artifacts to the target repository using the GitHub MCP
-server ({TARGET_REPO}). Do not use local
-git commands and do not commit to this workspace repository.
-
-1. Check whether the target repository has any commits.
-   If it is empty, first push one bootstrap commit directly to {TARGET_BRANCH} containing these
-   workspace files at the same paths:
-   - package.json
-   - package-lock.json
-   - playwright.config.ts
-   - .gitignore
-   - .github/workflows/playwright.yml
-   - {APP_DIR}/app.json
-   - {SEED}
-   Commit message: "chore: bootstrap Playwright project"
-   If that push fails because {TARGET_BRANCH} now exists (a parallel run bootstrapped it
-   first), skip the bootstrap and continue.
-
-2. If {BRANCH} doesn't exist, create it from {TARGET_BRANCH}. If it already exists
-   (e.g. a rerun of this story), reuse it: push the current artifacts onto it, and if an
-   open PR from it already exists, update that PR instead of opening another.
-
-3. Push these files to that branch, at the same paths as in the workspace:
-   - {STORY_FILE}
-   - {PLAN_FILE}
-   - {TEST_DIR}*.spec.ts
-   - {REPORT_FILE}
-   - {APP_DIR}/reports/evidence/{STORY_ID}-*.png (if any)
-   Shared files: also push playwright.config.ts, {APP_DIR}/app.json and {SEED} if they
-   are missing on {TARGET_BRANCH} or differ from the workspace copies (skip whatever the
-   bootstrap just pushed). Never push another app's folder.
-   Follow any delivery instructions in app.json agentNotes (e.g. legacy paths to delete). The target repo's CI runs
-   `npx playwright test`, so it needs the app's browser projects and seed.
-   Commit message:
-   "feat(tests): Add complete test suite for {STORY_ID} {STORY_TITLE}
-
-   - Add user story documentation
-   - Add comprehensive test plan with all scenarios
-   - Add test execution report with results
-   - Add automated test scripts
-   - Include validation, navigation, and edge case tests
-
-   Resolves {STORY_ID}"
-
-4. Open a pull request from {BRANCH} into {TARGET_BRANCH} titled "{PR_TITLE}", with a body
-   summarising the application tested, test counts (Chromium), and any open defects
-   from the report.
-
-5. Provide a summary of what was pushed and the pull request URL
-```
-
-**Expected Output:**
-
-- Bootstrap commit on {TARGET_BRANCH} of {TARGET_REPO} (first run against that repo only)
-- Branch {BRANCH} with all test artifacts (plus shared config/seed if they changed)
-- Pull request opened into {TARGET_BRANCH}
-- Pull request URL and summary of changes
+- The healed test suite left in `{TEST_DIR}`, ready for a human to review
+- A concise summary as the final message (no file written, no PR)
+- No delivery performed — that is the human's next step with `./push-artifacts.sh`
 
 ---
 
@@ -428,13 +329,15 @@ git commands and do not commit to this workspace repository.
 **Prompt:**
 
 ```
-I want to demonstrate a complete end-to-end QA workflow using natural language and MCP
+I want to demonstrate an end-to-end QA workflow using natural language and MCP
 servers for the active story {STORY_ID}. Resolve every {PLACEHOLDER} from the Run
-Configuration section of qa_system_prompt.md first.
+Configuration section of qa_system_prompt.md first. The agent stops after Step 5 for human
+review and does NOT deliver; a human runs ./push-artifacts.sh afterwards.
 
 STEP 1 - READ USER STORY:
-State the resolved run configuration, then read the user story from: {STORY_FILE}
-Provide a brief summary of what needs to be tested.
+State the resolved run configuration, then read the user story from: {STORY_FILE} and give a
+brief summary of what needs to be tested. Do not check or touch the target repo — delivery
+and its bootstrap requirement are a separate human step.
 
 STEP 2 - CREATE TEST PLAN:
 Use the playwright-test-planner agent to create a comprehensive test plan based on the user
@@ -460,17 +363,12 @@ are stable and passing on {CHROMIUM_PROJECT}. Do NOT do a cross-browser pass: to
 tokens the agent heals on Chromium only; the target repo's CI runs the suite on all
 projects. Document healing activities.
 
-STEP 6 - CREATE TEST REPORT:
-Create a comprehensive test execution report at: {REPORT_FILE}
-Compile results from Step 3 (manual testing), Step 4 (script generation), and Step 5
-(execution and healing). Include PASS/FAIL status on {CHROMIUM_PROJECT}, healing summary, defects
-log, and test coverage analysis.
+STEP 6 - STOP FOR HUMAN REVIEW (do NOT deliver):
+Do not write a report file, do not run ./push-artifacts.sh, and do not open a PR. End with a
+short Markdown summary as your final message (ACs covered, test files in {TEST_DIR}, local
+Chromium result, defects, unattended decisions) and a reminder that a human delivers with
+./push-artifacts.sh {APP} {STORY_ID}. The results report is generated by that repo's CI after
+delivery.
 
-STEP 7 - OPEN A PULL REQUEST:
-Using the GitHub MCP server, deliver the artifacts to {TARGET_REPO} (the active app's repo)
-as described in Step 7 of qa_system_prompt.md: bootstrap {TARGET_BRANCH} if the repo is empty,
-push the user story, test plan, tests, report (and shared config/seed if changed) to
-branch {BRANCH}, and open a pull request into {TARGET_BRANCH} titled "{PR_TITLE}".
-
-Execute this complete workflow and provide status updates after each step.
+Execute this workflow (Steps 1-6) and provide status updates after each step.
 ```
