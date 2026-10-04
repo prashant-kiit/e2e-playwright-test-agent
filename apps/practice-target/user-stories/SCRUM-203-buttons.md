@@ -57,7 +57,7 @@ None required. The page is public.
 - Test across Chrome, Firefox, Safari and a mobile viewport
 - Test IDs: `counter-button`, `checkbox-disable-target`, `disableable-button`, `async-action-button`, `async-action-result`, `like-toggle-button`, `double-click-button`, `double-click-count`, `button-group-size`, `size-button-sm|md|lg`, `context-menu-target`, `context-menu`, `context-menu-item-copy|paste|delete`
 - Use `dblclick()` for the double-click and `click({ button: 'right' })` for the context menu
-- Right-click and double-click have no touch equivalent. On the `practice-mobile-chrome` project these may need `test.skip` with a reason, which should be recorded in the report
+- Right-click and double-click have no touch equivalent. On the `practice-target-mobile-chrome` project these may need `test.skip` with a reason, which should be recorded in the report
 - Wait on the result text, not a fixed timeout
 
 ## Definition of Done

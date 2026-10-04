@@ -1,25 +1,46 @@
-import { defineConfig, devices } from '@playwright/test';
+import fs from 'fs';
+import path from 'path';
+import { defineConfig, devices, type Project } from '@playwright/test';
 
 /**
- * Read environment variables from file.
- * https://github.com/motdotla/dotenv
+ * Applications under test are discovered, not listed here.
+ * Every folder apps/<app>/ with an app.json becomes one set of browser projects
+ * named <app>-<browser>, running only apps/<app>/** against the app's baseURL.
+ * Folders starting with "_" (e.g. apps/_template) are skipped.
+ * To add an app, copy apps/_template — nothing in this file needs to change.
  */
-// import dotenv from 'dotenv';
-// import path from 'path';
-// dotenv.config({ path: path.resolve(__dirname, '.env') });
+const APPS_DIR = path.join(__dirname, 'apps');
 
-/* Applications under test. Each app has its own test folder (tests/<app>/, seed included),
- * and its projects run only that folder against the app's own baseURL. */
-const SAUCEDEMO_BASE_URL = 'https://www.saucedemo.com';
-const SAUCEDEMO_TESTS = '**/saucedemo/**/*.spec.ts';
-const PRACTICE_BASE_URL = 'https://custom-test-target-app.vercel.app';
-const PRACTICE_TESTS = '**/practice-target/**/*.spec.ts';
+const BROWSERS = {
+  chromium: devices['Desktop Chrome'],
+  firefox: devices['Desktop Firefox'],
+  webkit: devices['Desktop Safari'],
+  'mobile-chrome': devices['Pixel 7'],
+};
+
+function appProjects(): Project[] {
+  const apps = fs
+    .readdirSync(APPS_DIR, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && !d.name.startsWith('_') && fs.existsSync(path.join(APPS_DIR, d.name, 'app.json')))
+    .map((d) => d.name)
+    .sort();
+
+  return apps.flatMap((app) => {
+    const { baseURL } = JSON.parse(fs.readFileSync(path.join(APPS_DIR, app, 'app.json'), 'utf8'));
+    if (!baseURL) throw new Error(`apps/${app}/app.json: "baseURL" is required`);
+    return Object.entries(BROWSERS).map(([browser, device]) => ({
+      name: `${app}-${browser}`,
+      testDir: path.join(APPS_DIR, app),
+      use: { ...device, baseURL },
+    }));
+  });
+}
 
 /**
  * See https://playwright.dev/docs/test-configuration.
  */
 export default defineConfig({
-  testDir: './tests',
+  testDir: './apps',
   /* Run tests in files in parallel */
   fullyParallel: true,
   /* Fail the build on CI if you accidentally left test.only in the source code. */
@@ -41,76 +62,7 @@ export default defineConfig({
     trace: 'on-first-retry',
   },
 
-  /* One set of browser projects per application under test, each with its own baseURL.
-   * SauceDemo projects keep their original names and `chromium` must stay first:
-   * the MCP *_setup_page tools use the first project unless `project` is passed. */
-  projects: [
-    {
-      name: 'chromium',
-      testMatch: SAUCEDEMO_TESTS,
-      use: { ...devices['Desktop Chrome'], baseURL: SAUCEDEMO_BASE_URL },
-    },
-
-    {
-      name: 'firefox',
-      testMatch: SAUCEDEMO_TESTS,
-      use: { ...devices['Desktop Firefox'], baseURL: SAUCEDEMO_BASE_URL },
-    },
-
-    {
-      name: 'webkit',
-      testMatch: SAUCEDEMO_TESTS,
-      use: { ...devices['Desktop Safari'], baseURL: SAUCEDEMO_BASE_URL },
-    },
-
-    /* Test against mobile viewports. */
-    {
-      name: 'Mobile Chrome',
-      testMatch: SAUCEDEMO_TESTS,
-      use: { ...devices['Pixel 7'], baseURL: SAUCEDEMO_BASE_URL },
-    },
-
-    /* Playwright Practice Target (stories SCRUM-201..208): its own baseURL and test folder. */
-    {
-      name: 'practice-chromium',
-      testMatch: PRACTICE_TESTS,
-      use: { ...devices['Desktop Chrome'], baseURL: PRACTICE_BASE_URL },
-    },
-    {
-      name: 'practice-firefox',
-      testMatch: PRACTICE_TESTS,
-      use: { ...devices['Desktop Firefox'], baseURL: PRACTICE_BASE_URL },
-    },
-    {
-      name: 'practice-webkit',
-      testMatch: PRACTICE_TESTS,
-      use: { ...devices['Desktop Safari'], baseURL: PRACTICE_BASE_URL },
-    },
-    {
-      name: 'practice-mobile-chrome',
-      testMatch: PRACTICE_TESTS,
-      use: { ...devices['Pixel 7'], baseURL: PRACTICE_BASE_URL },
-    },
-    // {
-    //   name: 'Mobile Safari',
-    //   use: { ...devices['iPhone 12'] },
-    // },
-
-    /* Test against branded browsers. */
-    // {
-    //   name: 'Microsoft Edge',
-    //   use: { ...devices['Desktop Edge'], channel: 'msedge' },
-    // },
-    // {
-    //   name: 'Google Chrome',
-    //   use: { ...devices['Desktop Chrome'], channel: 'chrome' },
-    // },
-  ],
-
-  /* Run your local dev server before starting the tests */
-  // webServer: {
-  //   command: 'npm run start',
-  //   url: 'http://localhost:3000',
-  //   reuseExistingServer: !process.env.CI,
-  // },
+  /* <app>-chromium, <app>-firefox, <app>-webkit, <app>-mobile-chrome for every app.
+   * The MCP *_setup_page tools default to the first project, so always pass `project`. */
+  projects: appProjects(),
 });

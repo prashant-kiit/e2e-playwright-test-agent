@@ -4,65 +4,67 @@
 
 This prompt guides you through a complete 7-step QA workflow using MCP servers and AI agents to go from user story to automated test scripts delivered as a pull request.
 
-The harness can test more than one application. Each run works on **one active story**. Every step below uses `{PLACEHOLDERS}` that you fill in from that story's row in the registry.
+The harness can test more than one application. Each run works on **one active story**. Every step below uses `{PLACEHOLDERS}` that you derive from the story file's location and the app's `app.json` (see Run Configuration).
 
 ---
 
 ## 🧭 Run Configuration (resolve this before Step 1)
 
+Everything about an application under test lives in one folder, `apps/<app>/`. Nothing about a specific app is written in this prompt or in `playwright.config.ts`.
+
+```
+apps/<app>/
+├── app.json                         # the app's only config (see below)
+├── seed.spec.ts                     # brings the app to the starting state for every agent session
+├── user-stories/<STORY_ID>-<slug>.md
+├── specs/                           # generated: test plans
+├── tests/<slug>/                    # generated: test suites
+└── reports/                         # generated: reports, evidence/<STORY_ID>-*.png
+```
+
+`app.json` fields: `name`, `baseURL`, `targetRepo` (owner/repo that receives the tests), `targetBranch`, `locators` (how to locate elements in this app) and `agentNotes` (quirks every step must respect). `playwright.config.ts` discovers every `apps/<app>/app.json` (folders starting with `_` are skipped) and creates the projects `<app>-chromium`, `<app>-firefox`, `<app>-webkit` and `<app>-mobile-chrome`, each running only `apps/<app>/**` with that app's `baseURL`.
+
 ### Choosing the active story
 
 1. The kick-off prompt names the active story (e.g. `Active story: SCRUM-201`).
 2. If no story is named, ask the user which story to run. Don't guess.
-3. Look the story up in the **Story registry**, then look its app up in **Target applications**. Together they define every placeholder.
-4. State the resolved values at the start of Step 1 so the user can catch a wrong pick.
+3. Find the one file matching `apps/*/user-stories/{STORY_ID}-*.md`. The folder it sits in is the app. If there is no match, or more than one, stop and ask.
+4. Read `apps/{APP}/app.json`.
+5. State the resolved values at the start of Step 1 so the user can catch a wrong pick.
 
-### Target applications
+### Placeholders
 
-| App | `{BASE_URL}` | `{SEED}` | `{CHROMIUM_PROJECT}` | All browser projects | Locator convention | `{TARGET_REPO}` (default branch `master`) |
-|---|---|---|---|---|---|---|
-| `saucedemo` | `https://www.saucedemo.com` | `tests/saucedemo/seed.spec.ts` (logs in as `standard_user`, lands on `/inventory.html`) | `chromium` | `chromium`, `firefox`, `webkit`, `Mobile Chrome` | `data-test` attributes: `page.locator('[data-test="…"]')` | [`prashant-kiit/e2e-playwright-agent-test-target`](https://github.com/prashant-kiit/e2e-playwright-agent-test-target) |
-| `practice` | `https://custom-test-target-app.vercel.app` | `tests/practice-target/seed.spec.ts` (home page `/`, **not** logged in) | `practice-chromium` | `practice-chromium`, `practice-firefox`, `practice-webkit`, `practice-mobile-chrome` | `data-testid` attributes: `page.getByTestId('…')` | [`prashant-kiit/e2e-playwright-test-custom-target`](https://github.com/prashant-kiit/e2e-playwright-test-custom-target) |
+| Placeholder | Value |
+|---|---|
+| `{STORY_ID}` | From the kick-off prompt, e.g. `SCRUM-202` |
+| `{APP}` | The folder name under `apps/` that holds the story, e.g. `practice-target` |
+| `{SLUG}` | The story file name after `{STORY_ID}-`, without `.md`, e.g. `forms` |
+| `{APP_DIR}` | `apps/{APP}` |
+| `{STORY_FILE}` | `{APP_DIR}/user-stories/{STORY_ID}-{SLUG}.md` |
+| `{STORY_TITLE}` | The title after the ID in the story's first heading, e.g. "Account Sign-up Form" |
+| `{SEED}` | `{APP_DIR}/seed.spec.ts` |
+| `{PLAN_FILE}` | `{APP_DIR}/specs/{STORY_ID}-{SLUG}-test-plan.md` |
+| `{TEST_DIR}` | `{APP_DIR}/tests/{SLUG}/` |
+| `{REPORT_FILE}` | `{APP_DIR}/reports/{STORY_ID}-{SLUG}-test-report.md` |
+| `{EVIDENCE}` | `{APP_DIR}/reports/evidence/{STORY_ID}-<short-name>.png` |
+| `{CHROMIUM_PROJECT}` | `{APP}-chromium` |
+| `{BASE_URL}`, `{TARGET_REPO}`, `{TARGET_BRANCH}` | `baseURL`, `targetRepo`, `targetBranch` from `app.json` |
+| `{BRANCH}` | `qa/{STORY_ID}-{SLUG}` |
+| `{PR_TITLE}` | `{STORY_ID}: {STORY_TITLE} E2E test suite` |
 
-Each app is delivered to its own target repo. Never push one app's artifacts to another app's repo.
+Rules that follow from this layout:
+- `npx playwright test {TEST_DIR}` already runs exactly the app's 4 browser projects, so no `--project` filter is needed for the cross-browser run.
+- Always pass `project: "{CHROMIUM_PROJECT}"` and `seedFile: "{SEED}"` to `planner_setup_page` and `generator_setup_page`. Left out, they use the first project (whichever app sorts first) and create a default seed file.
+- Locate elements the way `app.json` `locators` says, and follow every `agentNotes` entry in every step.
 
-Both apps share one `playwright.config.ts`. Each app has its own folder under `tests/` (seed included), and its projects only pick up that folder (`tests/saucedemo/**` runs only in the SauceDemo projects, `tests/practice-target/**` only in the `practice-*` projects). Each set of projects has its own `baseURL`. Consequences:
-- `npx playwright test {TEST_DIR}` already runs exactly the right 4 browser projects, so no `--project` filter is needed for the cross-browser run.
-- Always pass `project: "{CHROMIUM_PROJECT}"` and `seedFile: "{SEED}"` to `planner_setup_page` and `generator_setup_page`. Left out, they use the first project (`chromium`, which is SauceDemo) and create a default seed file instead of using the app's seed.
-
-### Story registry
-
-| `{STORY_ID}` | App | `{STORY_FILE}` | `{PLAN_FILE}` | `{TEST_DIR}` | `{REPORT_FILE}` | `{BRANCH}` |
-|---|---|---|---|---|---|---|
-| SCRUM-101 | `saucedemo` | `user-stories/saucedemo/SCRUM-101-checkout.md` | `specs/saucedemo/SCRUM-101-checkout-test-plan.md` | `tests/saucedemo/checkout/` | `reports/SCRUM-101-checkout-test-report.md` | `qa/SCRUM-101-checkout` *(already delivered in PR #1 at the old paths `user-stories/scrum-latest.md`, `specs/saucedemo-checkout-test-plan.md`, `tests/seed.spec.ts` and `tests/saucedemo-checkout/`; a re-run must use a new name, e.g. `qa/SCRUM-101-checkout-v2`, and should delete those old paths in the same commit)* |
-| SCRUM-102 | `saucedemo` | `user-stories/saucedemo/SCRUM-102-login.md` | `specs/saucedemo/SCRUM-102-login-test-plan.md` | `tests/saucedemo/login/` | `reports/SCRUM-102-login-test-report.md` | `qa/SCRUM-102-login` |
-| SCRUM-103 | `saucedemo` | `user-stories/saucedemo/SCRUM-103-product-catalog.md` | `specs/saucedemo/SCRUM-103-product-catalog-test-plan.md` | `tests/saucedemo/product-catalog/` | `reports/SCRUM-103-product-catalog-test-report.md` | `qa/SCRUM-103-product-catalog` |
-| SCRUM-104 | `saucedemo` | `user-stories/saucedemo/SCRUM-104-product-details.md` | `specs/saucedemo/SCRUM-104-product-details-test-plan.md` | `tests/saucedemo/product-details/` | `reports/SCRUM-104-product-details-test-report.md` | `qa/SCRUM-104-product-details` |
-| SCRUM-105 | `saucedemo` | `user-stories/saucedemo/SCRUM-105-shopping-cart.md` | `specs/saucedemo/SCRUM-105-shopping-cart-test-plan.md` | `tests/saucedemo/shopping-cart/` | `reports/SCRUM-105-shopping-cart-test-report.md` | `qa/SCRUM-105-shopping-cart` |
-| SCRUM-106 | `saucedemo` | `user-stories/saucedemo/SCRUM-106-menu-navigation.md` | `specs/saucedemo/SCRUM-106-menu-navigation-test-plan.md` | `tests/saucedemo/menu-navigation/` | `reports/SCRUM-106-menu-navigation-test-report.md` | `qa/SCRUM-106-menu-navigation` |
-| SCRUM-107 | `saucedemo` | `user-stories/saucedemo/SCRUM-107-dynamic-catalog.md` | `specs/saucedemo/SCRUM-107-dynamic-catalog-test-plan.md` | `tests/saucedemo/dynamic-catalog/` | `reports/SCRUM-107-dynamic-catalog-test-report.md` | `qa/SCRUM-107-dynamic-catalog` |
-| SCRUM-201 | `practice` | `user-stories/practice-target/SCRUM-201-auth.md` | `specs/practice-target/SCRUM-201-auth-test-plan.md` | `tests/practice-target/auth/` | `reports/SCRUM-201-auth-test-report.md` | `qa/SCRUM-201-auth` |
-| SCRUM-202 | `practice` | `user-stories/practice-target/SCRUM-202-forms.md` | `specs/practice-target/SCRUM-202-forms-test-plan.md` | `tests/practice-target/forms/` | `reports/SCRUM-202-forms-test-report.md` | `qa/SCRUM-202-forms` |
-| SCRUM-203 | `practice` | `user-stories/practice-target/SCRUM-203-buttons.md` | `specs/practice-target/SCRUM-203-buttons-test-plan.md` | `tests/practice-target/buttons/` | `reports/SCRUM-203-buttons-test-report.md` | `qa/SCRUM-203-buttons` |
-| SCRUM-204 | `practice` | `user-stories/practice-target/SCRUM-204-modals.md` | `specs/practice-target/SCRUM-204-modals-test-plan.md` | `tests/practice-target/modals/` | `reports/SCRUM-204-modals-test-report.md` | `qa/SCRUM-204-modals` |
-| SCRUM-205 | `practice` | `user-stories/practice-target/SCRUM-205-dropdowns.md` | `specs/practice-target/SCRUM-205-dropdowns-test-plan.md` | `tests/practice-target/dropdowns/` | `reports/SCRUM-205-dropdowns-test-report.md` | `qa/SCRUM-205-dropdowns` |
-| SCRUM-206 | `practice` | `user-stories/practice-target/SCRUM-206-table.md` | `specs/practice-target/SCRUM-206-table-test-plan.md` | `tests/practice-target/table/` | `reports/SCRUM-206-table-test-report.md` | `qa/SCRUM-206-table` |
-| SCRUM-207 | `practice` | `user-stories/practice-target/SCRUM-207-dynamic-content.md` | `specs/practice-target/SCRUM-207-dynamic-content-test-plan.md` | `tests/practice-target/dynamic-content/` | `reports/SCRUM-207-dynamic-content-test-report.md` | `qa/SCRUM-207-dynamic-content` |
-| SCRUM-208 | `practice` | `user-stories/practice-target/SCRUM-208-navigation.md` | `specs/practice-target/SCRUM-208-navigation-test-plan.md` | `tests/practice-target/navigation/` | `reports/SCRUM-208-navigation-test-report.md` | `qa/SCRUM-208-navigation` |
-
-Derived values:
-- `{STORY_TITLE}`: the title after the ID in the story's first heading (e.g. "Account Sign-up Form").
-- `{PR_TITLE}`: `{STORY_ID}: {STORY_TITLE} E2E test suite`.
-- Screenshots: `reports/evidence/{STORY_ID}-*.png`.
-
-To add a story: put the story file under `user-stories/` and add a row here. To add an app: add a row to Target applications (including its target repo), a folder `tests/<app>/` with its seed, and a set of browser projects with their own `baseURL` and `testMatch: '**/<app>/**/*.spec.ts'` in `playwright.config.ts`. Nothing for the existing apps needs to change.
+To add a story: drop `<STORY_ID>-<slug>.md` into `apps/<app>/user-stories/`. To add an app: copy `apps/_template/` to `apps/<new-app>/`, fill in `app.json`, write `seed.spec.ts` and the stories. Nothing else changes.
 
 ### Fixed conventions
 
 | Item | Value |
 |---|---|
 | URLs in tests | Relative paths in `page.goto` (each project sets `baseURL`) |
-| Browsers | Already configured in `playwright.config.ts`. Don't change the config, and keep `chromium` as the first project |
+| Browsers | Generated by `playwright.config.ts`. Don't edit the config to add or remove an app |
 
 Do not write anything into `test-results/`: Playwright wipes it on every run and it is git-ignored.
 
@@ -75,7 +77,7 @@ Do not write anything into `test-results/`: Playwright wipes it on every run and
 ```
 I need to start a new testing workflow for {STORY_ID}. First state the resolved run
 configuration (story file, app, base URL, seed, Chromium project, plan, test directory,
-report, branch, target repo). Then read the user story from:
+report, branch, target repo) and the app's agentNotes. Then read the user story from:
 {STORY_FILE}
 
 Summarize the key requirements, acceptance criteria, and testing scope.
@@ -149,7 +151,7 @@ Then execute the test scenarios defined in that plan:
 2. Follow the step-by-step instructions in each test case
 3. Verify expected results match actual results
 4. Take screenshots at key steps and error states, saved as
-   reports/evidence/{STORY_ID}-<short-name>.png
+   {EVIDENCE}
 5. Document your findings:
    - Test execution results for each scenario
    - Any UI inconsistencies or unexpected behaviors
@@ -338,7 +340,7 @@ Include:
 
 ## 🚀 STEP 7: Open a Pull Request in the Target Repository
 
-**Target repository:** `{TARGET_REPO}` from the Target applications table (default branch `master`)
+**Target repository:** `{TARGET_REPO}`, branch `{TARGET_BRANCH}`, both from `{APP_DIR}/app.json`
 
 **Prompt:**
 
@@ -348,27 +350,30 @@ server ({TARGET_REPO}). Do not use local
 git commands and do not commit to this workspace repository.
 
 1. Check whether the target repository has any commits.
-   If it is empty, first push one bootstrap commit directly to master containing these
+   If it is empty, first push one bootstrap commit directly to {TARGET_BRANCH} containing these
    workspace files at the same paths:
    - package.json
    - package-lock.json
    - playwright.config.ts
    - .gitignore
    - .github/workflows/playwright.yml
+   - {APP_DIR}/app.json
    - {SEED}
    Commit message: "chore: bootstrap Playwright project"
 
 2. Check that {BRANCH} doesn't already exist in the target repo. If it does, stop and
-   ask the user for a new branch name. Then create {BRANCH} from master.
+   ask the user for a new branch name. Then create {BRANCH} from {TARGET_BRANCH}.
 
 3. Push these files to that branch, at the same paths as in the workspace:
    - {STORY_FILE}
    - {PLAN_FILE}
    - {TEST_DIR}*.spec.ts
    - {REPORT_FILE}
-   - reports/evidence/{STORY_ID}-*.png (if any)
-   Shared files: also push playwright.config.ts and {SEED} if they are missing on
-   master or differ from the workspace copies (skip whatever the bootstrap just pushed). The target repo's CI runs
+   - {APP_DIR}/reports/evidence/{STORY_ID}-*.png (if any)
+   Shared files: also push playwright.config.ts, {APP_DIR}/app.json and {SEED} if they
+   are missing on {TARGET_BRANCH} or differ from the workspace copies (skip whatever the
+   bootstrap just pushed). Never push another app's folder.
+   Follow any delivery instructions in app.json agentNotes (e.g. legacy paths to delete). The target repo's CI runs
    `npx playwright test`, so it needs the app's browser projects and seed.
    Commit message:
    "feat(tests): Add complete test suite for {STORY_ID} {STORY_TITLE}
@@ -381,7 +386,7 @@ git commands and do not commit to this workspace repository.
 
    Resolves {STORY_ID}"
 
-4. Open a pull request from {BRANCH} into master titled "{PR_TITLE}", with a body
+4. Open a pull request from {BRANCH} into {TARGET_BRANCH} titled "{PR_TITLE}", with a body
    summarising the application tested, test counts, per-browser results, skipped tests
    and any open defects from the report.
 
@@ -390,9 +395,9 @@ git commands and do not commit to this workspace repository.
 
 **Expected Output:**
 
-- Bootstrap commit on master of {TARGET_REPO} (first run against that repo only)
+- Bootstrap commit on {TARGET_BRANCH} of {TARGET_REPO} (first run against that repo only)
 - Branch {BRANCH} with all test artifacts (plus shared config/seed if they changed)
-- Pull request opened into master
+- Pull request opened into {TARGET_BRANCH}
 - Pull request URL and summary of changes
 
 ---
@@ -444,9 +449,9 @@ log, and test coverage analysis.
 
 STEP 7 - OPEN A PULL REQUEST:
 Using the GitHub MCP server, deliver the artifacts to {TARGET_REPO} (the active app's repo)
-as described in Step 7 of qa_system_prompt.md: bootstrap master if the repo is empty,
+as described in Step 7 of qa_system_prompt.md: bootstrap {TARGET_BRANCH} if the repo is empty,
 push the user story, test plan, tests, report (and shared config/seed if changed) to
-branch {BRANCH}, and open a pull request into master titled "{PR_TITLE}".
+branch {BRANCH}, and open a pull request into {TARGET_BRANCH} titled "{PR_TITLE}".
 
 Execute this complete workflow and provide status updates after each step.
 ```

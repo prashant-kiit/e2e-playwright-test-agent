@@ -54,7 +54,7 @@ None required. These pages are public.
 - The active nav link gets the class `active`. Assert it with `toHaveClass(/active/)`
 - For the external link, use `context.waitForEvent('page')`. Assert the new tab's URL, not its content, so the suite doesn't depend on playwright.dev being up
 - Unknown paths return HTTP 200 (the SPA serves the 404 page). Assert on the page content, not the status code
-- On the `practice-mobile-chrome` viewport the nav bar may wrap. Keep link assertions visibility-based
+- On the `practice-target-mobile-chrome` viewport the nav bar may wrap. Keep link assertions visibility-based
 
 ## Definition of Done
 - [ ] All acceptance criteria have test cases

@@ -1,0 +1,13 @@
+{
+  "name": "SauceDemo (Swag Labs)",
+  "baseURL": "https://www.saucedemo.com",
+  "targetRepo": "prashant-kiit/e2e-playwright-agent-test-target",
+  "targetBranch": "master",
+  "locators": "data-test attributes: page.locator('[data-test=\"...\"]')",
+  "agentNotes": [
+    "The seed logs in as standard_user / secret_sauce and lands on /inventory.html. Stories about login itself start from page.goto('/') instead of repeating the seed login.",
+    "Open the side menu with getByRole('button', { name: 'Open Menu' }). Clicking [data-test=\"open-menu\"] times out (the button covers it), and a JS click leaves the menu items aria-hidden.",
+    "Firefox sometimes fails page.goto with NS_ERROR_NET_TIMEOUT under parallel load. This is the site, not the test: re-run that browser before healing.",
+    "The target repo still has pre-refactor paths from PR #1: user-stories/scrum-latest.md, specs/saucedemo-checkout-test-plan.md, tests/seed.spec.ts, tests/saucedemo-checkout/, reports/SCRUM-101-checkout-test-report.md. Delete them in the next delivery's commit, or CI there runs the checkout suite twice. Branch qa/SCRUM-101-checkout already exists."
+  ]
+}

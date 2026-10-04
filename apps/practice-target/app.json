@@ -1,0 +1,12 @@
+{
+  "name": "Playwright Practice Target",
+  "baseURL": "https://custom-test-target-app.vercel.app",
+  "targetRepo": "prashant-kiit/e2e-playwright-test-custom-target",
+  "targetBranch": "master",
+  "locators": "data-testid attributes: page.getByTestId('...')",
+  "agentNotes": [
+    "The seed opens the home page without logging in. Only /dashboard is protected (mock login demo / password123).",
+    "Every route works as a deep link, and unknown paths return HTTP 200 with a client-side 404 page. Assert on page content, not status codes.",
+    "The target repo was empty when this app was added, so the first delivery does the bootstrap."
+  ]
+}

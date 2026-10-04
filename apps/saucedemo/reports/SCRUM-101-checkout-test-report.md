@@ -32,7 +32,7 @@ All five acceptance criteria are fully covered by passing automated tests across
 
 ## 2. Manual (Exploratory) Test Results
 
-Exploratory testing was performed by driving a real browser (Chromium) through the Playwright MCP tools, starting from the logged-in seed state (`tests/saucedemo/seed.spec.ts`).
+Exploratory testing was performed by driving a real browser (Chromium) through the Playwright MCP tools, starting from the logged-in seed state (`apps/saucedemo/seed.spec.ts`).
 
 | # | Scenario | AC | Result | Evidence |
 |---|---|---|---|---|
@@ -55,7 +55,7 @@ Exploratory testing was performed by driving a real browser (Chromium) through t
 
 ## 3. Automated Test Results
 
-Scripts: `tests/saucedemo/checkout/` — 9 spec files, 22 test cases. Each file logs in via a `beforeEach` replicating the seed, uses relative URLs (baseURL in `playwright.config.ts`), stable `data-test` locators, and web-first assertions (no fixed timeouts).
+Scripts: `apps/saucedemo/tests/checkout/` — 9 spec files, 22 test cases. Each file logs in via a `beforeEach` replicating the seed, uses relative URLs (baseURL in `playwright.config.ts`), stable `data-test` locators, and web-first assertions (no fixed timeouts).
 
 ### 3.1 Test suite composition
 
@@ -74,7 +74,7 @@ Scripts: `tests/saucedemo/checkout/` — 9 spec files, 22 test cases. Each file 
 
 ### 3.2 Initial run (Chromium)
 
-`npx playwright test tests/saucedemo/checkout/ --project=chromium`
+`npx playwright test apps/saucedemo/tests/checkout/ --project=saucedemo-chromium`
 
 - **Result: 21 passed, 1 failed.**
 - Failure: `cart-review.spec.ts` → *"Continue Shopping returns to products page and preserves cart contents"*.
@@ -90,7 +90,7 @@ Scripts: `tests/saucedemo/checkout/` — 9 spec files, 22 test cases. Each file 
 
 ### 3.4 Final run — all browsers
 
-`npx playwright test tests/saucedemo/checkout/`
+`npx playwright test apps/saucedemo/tests/checkout/`
 
 | Browser project | Tests | Passed | Failed |
 |---|---|---|---|
@@ -154,7 +154,7 @@ Scripts: `tests/saucedemo/checkout/` — 9 spec files, 22 test cases. Each file 
 **Next steps:**
 1. Triage OBS-1 and OBS-2 with product to confirm intended behavior; add enforcement tests if rules change.
 2. Extend coverage to additional SauceDemo user personas.
-3. Wire `tests/saucedemo/checkout/` into CI (the repo already contains `.github/workflows/playwright.yml`).
+3. Wire `apps/saucedemo/tests/checkout/` into CI (the repo already contains `.github/workflows/playwright.yml`).
 4. Deliver artifacts via pull request to the target repository (Step 7 of the workflow).
 
 ---
@@ -162,4 +162,4 @@ Scripts: `tests/saucedemo/checkout/` — 9 spec files, 22 test cases. Each file 
 ### Appendix — Environment
 - `playwright.config.ts`: `baseURL=https://www.saucedemo.com`, `actionTimeout=10s`, `navigationTimeout=15s`, trace on first retry, HTML + list reporters.
 - Node project `e2e-playwright-test-agent`, `@playwright/test ^1.63.0`.
-- Evidence screenshots: `reports/evidence/SCRUM-101-01-cart-review.png`, `SCRUM-101-02-info-validation-error.png`, `SCRUM-101-03-order-overview.png`, `SCRUM-101-04-order-complete.png`.
+- Evidence screenshots: `apps/saucedemo/reports/evidence/SCRUM-101-01-cart-review.png`, `SCRUM-101-02-info-validation-error.png`, `SCRUM-101-03-order-overview.png`, `SCRUM-101-04-order-complete.png`.

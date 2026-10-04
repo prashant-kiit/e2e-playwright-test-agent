@@ -60,7 +60,7 @@ https://www.saucedemo.com (page: `/`)
 - Use Playwright for test automation
 - Test across Chrome, Firefox, Safari and a mobile viewport
 - Locators use `data-test` attributes: `username`, `password`, `login-button`, `error`, `error-button` (the X), `login-credentials`, `login-password`, `logout-sidebar-link`
-- The SauceDemo seed (`tests/saucedemo/seed.spec.ts`) already logs in. Tests for this story are about the login itself, so they should start from `page.goto('/')` in their own fresh context instead of repeating the seed's login in `beforeEach`
+- The SauceDemo seed (`apps/saucedemo/seed.spec.ts`) already logs in. Tests for this story are about the login itself, so they should start from `page.goto('/')` in their own fresh context instead of repeating the seed's login in `beforeEach`
 - Open the menu with the "Open Menu" button (`getByRole('button', { name: 'Open Menu' })`). Clicking `[data-test="open-menu"]` times out because the button sits on top of that image
 - Other users (`problem_user`, `error_user`, `visual_user`, `performance_glitch_user`) have deliberate defects elsewhere in the shop. This story only checks that they can log in; their defects are out of scope
 
