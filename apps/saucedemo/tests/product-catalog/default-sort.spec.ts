@@ -3,9 +3,8 @@
 
 import { test, expect } from '@playwright/test';
 
-test.describe('AC2 - Default Sort State', () => {
+test.describe('Default Sort (AC2)', () => {
   test.beforeEach(async ({ page }) => {
-    // Repeat the seed login flow (standard_user / secret_sauce) to land on the Products page.
     await page.goto('/');
     await page.locator('[data-test="username"]').fill('standard_user');
     await page.locator('[data-test="password"]').fill('secret_sauce');
@@ -13,24 +12,31 @@ test.describe('AC2 - Default Sort State', () => {
     await expect(page).toHaveURL(/inventory\.html/);
   });
 
-  test('Sort dropdown defaults to Name (A to Z) and products are listed alphabetically on fresh load', async ({ page }) => {
-    // 1. Read the selected value of the sort dropdown.
-    const sortSelect = page.locator('[data-test="product-sort-container"]');
-    await expect(sortSelect).toHaveValue('az');
-    const selectedLabel = await sortSelect.locator('option:checked').textContent();
-    expect(selectedLabel).toBe('Name (A to Z)');
+  test('Dropdown defaults to Name (A to Z) and list is alphabetically sorted on load', async ({ page }) => {
+    // 1. Start from the seed file, freshly on /inventory.html without touching the sort dropdown.
+    await expect(page).toHaveURL('https://www.saucedemo.com/inventory.html');
 
-    // 2. Read the text of active-option next to the dropdown.
+    // 2. Read the selected option's visible text from the sort dropdown.
+    const sortDropdown = page.locator('[data-test="product-sort-container"]');
+    await expect(sortDropdown).toHaveValue('az');
+    await expect(sortDropdown.locator('option:checked')).toHaveText('Name (A to Z)');
+
+    // 3. Read [data-test="active-option"] text.
     await expect(page.locator('[data-test="active-option"]')).toHaveText('Name (A to Z)');
 
-    // 3. Read the inventory-item-name text of all 6 products in DOM order into array A.
-    const namesA = await page.locator('[data-test="inventory-item-name"]').allTextContents();
-    expect(namesA).toHaveLength(6);
+    // 4. Read all 6 inventory-item-name texts in DOM order into an array.
+    const names = await page.locator('[data-test="inventory-item-name"]').allTextContents();
+    expect(names).toEqual([
+      'Sauce Labs Backpack',
+      'Sauce Labs Bike Light',
+      'Sauce Labs Bolt T-Shirt',
+      'Sauce Labs Fleece Jacket',
+      'Sauce Labs Onesie',
+      'Test.allTheThings() T-Shirt (Red)',
+    ]);
 
-    // 4. Create array B = an independently-sorted copy of A (locale-aware ascending compare).
-    const namesB = [...namesA].sort((a, b) => a.localeCompare(b));
-
-    // 5. Assert A deep-equals B.
-    expect(namesA).toEqual(namesB);
+    // 5. Independently verify by sorting a copy of the captured name array alphabetically and diffing against the captured order.
+    const sortedNames = [...names].sort((a, b) => a.localeCompare(b));
+    expect(names).toEqual(sortedNames);
   });
 });

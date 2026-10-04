@@ -3,18 +3,8 @@
 
 import { test, expect } from '@playwright/test';
 
-const EXPECTED_NAMES = [
-  'Sauce Labs Backpack',
-  'Sauce Labs Bike Light',
-  'Sauce Labs Bolt T-Shirt',
-  'Sauce Labs Fleece Jacket',
-  'Sauce Labs Onesie',
-  'Test.allTheThings() T-Shirt (Red)',
-];
-
-test.describe('AC3 - Sorting Options', () => {
+test.describe('Sorting Options (AC3)', () => {
   test.beforeEach(async ({ page }) => {
-    // Repeat the seed login flow (standard_user / secret_sauce) to land on the Products page.
     await page.goto('/');
     await page.locator('[data-test="username"]').fill('standard_user');
     await page.locator('[data-test="password"]').fill('secret_sauce');
@@ -22,109 +12,130 @@ test.describe('AC3 - Sorting Options', () => {
     await expect(page).toHaveURL(/inventory\.html/);
   });
 
-  test('Name (Z to A) sort reorders products in reverse alphabetical order and dropdown reflects selection', async ({ page }) => {
-    // 1. Select option 'za' on the sort dropdown via a real control interaction (selectOption).
-    const sortSelect = page.locator('[data-test="product-sort-container"]');
-    await sortSelect.selectOption('za');
-    await expect(sortSelect).toHaveValue('za');
+  test('Sort dropdown exposes all four expected options with correct values and labels', async ({ page }) => {
+    // 1. Start from the seed file.
+    await expect(page).toHaveURL(/inventory\.html/);
+
+    // 2. Query all <option> elements inside the sort dropdown and capture their value and text.
+    const options = page.locator('[data-test="product-sort-container"] option');
+    await expect(options).toHaveCount(4);
+    const values = await options.evaluateAll((opts) => opts.map((o) => (o as HTMLOptionElement).value));
+    const texts = await options.allTextContents();
+    expect(values).toEqual(['az', 'za', 'lohi', 'hilo']);
+    expect(texts).toEqual([
+      'Name (A to Z)',
+      'Name (Z to A)',
+      'Price (low to high)',
+      'Price (high to low)',
+    ]);
+  });
+
+  test('Selecting Name (Z to A) reorders products reverse-alphabetically', async ({ page }) => {
+    const nameLocator = page.locator('[data-test="inventory-item-name"]');
+
+    // 1. Start from the seed file. Capture the current list of 6 product names before sorting.
+    // Wait for all 6 cards to be rendered first: right after the beforeEach's URL check, the
+    // inventory grid can still be mid-render, so reading names immediately can yield an empty
+    // (or partial) array.
+    await expect(nameLocator).toHaveCount(6);
+    const baseline = await nameLocator.allTextContents();
+
+    // 2. Use selectOption on the sort dropdown with value 'za'.
+    await page.locator('[data-test="product-sort-container"]').selectOption('za');
+
+    // 3. Read [data-test="active-option"] text.
     await expect(page.locator('[data-test="active-option"]')).toHaveText('Name (Z to A)');
 
-    // 2. Read inventory-item-name text of all 6 products in DOM order into array A.
-    const namesA = await page.locator('[data-test="inventory-item-name"]').allTextContents();
+    // 4. Read the 6 product names in DOM order after sorting.
+    const afterSort = await nameLocator.allTextContents();
 
-    // 3. Create array B = an independently alphabetically-sorted copy of A, then reversed.
-    const namesB = [...namesA].sort((a, b) => a.localeCompare(b)).reverse();
-
-    // 4. Assert A deep-equals B.
-    expect(namesA).toEqual(namesB);
-
-    // 5. Assert the same 6 product names are present (as a set), with none added or removed.
-    expect(new Set(namesA)).toEqual(new Set(EXPECTED_NAMES));
+    // 5. Programmatically sort a copy of the baseline names descending and compare to the captured post-sort order.
+    const expectedDescending = [...baseline].sort((a, b) => b.localeCompare(a));
+    expect(afterSort).toEqual(expectedDescending);
+    expect(afterSort).toEqual([...baseline].reverse());
   });
 
-  test('Price (low to high) sort reorders products by ascending price; equal-priced items may appear in either relative order', async ({ page }) => {
-    // 1. Select option 'lohi' on the sort dropdown.
-    const sortSelect = page.locator('[data-test="product-sort-container"]');
-    await sortSelect.selectOption('lohi');
-    await expect(sortSelect).toHaveValue('lohi');
+  test('Selecting Price (low to high) reorders products by ascending price', async ({ page }) => {
+    // 1. Start from the seed file, default az sort.
+    await expect(page.locator('[data-test="product-sort-container"]')).toHaveValue('az');
+
+    // 2. Use selectOption on the sort dropdown with value 'lohi'.
+    await page.locator('[data-test="product-sort-container"]').selectOption('lohi');
+
+    // 3. Read [data-test="active-option"] text.
     await expect(page.locator('[data-test="active-option"]')).toHaveText('Price (low to high)');
 
-    // 2. Read inventory-item-price (parsed as float) of all 6 products in DOM order into array P.
+    // 4. Parse the inventory-item-price text for all 6 cards in DOM order.
     const priceTexts = await page.locator('[data-test="inventory-item-price"]').allTextContents();
-    const pricesP = priceTexts.map((t) => parseFloat(t.replace('$', '')));
+    const prices = priceTexts.map((p) => parseFloat(p.replace('$', '')));
+    expect(prices).toEqual([7.99, 9.99, 15.99, 15.99, 29.99, 49.99]);
 
-    // 3. Create array Q = an independently, numerically ascending-sorted copy of P.
-    const pricesQ = [...pricesP].sort((a, b) => a - b);
+    // 5. Assert programmatically that the captured price array is non-decreasing.
+    expect(prices.every((p, i) => i === prices.length - 1 || p <= prices[i + 1])).toBe(true);
 
-    // 4. Assert P deep-equals Q.
-    expect(pricesP).toEqual(pricesQ);
-
-    // 5. Assert the two $15.99 items (Bolt T-Shirt, Test.allTheThings) are adjacent, in either order.
-    const namesInOrder = await page.locator('[data-test="inventory-item-name"]').allTextContents();
-    const idxBolt = namesInOrder.indexOf('Sauce Labs Bolt T-Shirt');
-    const idxTest = namesInOrder.indexOf('Test.allTheThings() T-Shirt (Red)');
-    expect(idxBolt).toBeGreaterThanOrEqual(0);
-    expect(idxTest).toBeGreaterThanOrEqual(0);
-    expect(Math.abs(idxBolt - idxTest)).toBe(1);
+    // 6. Identify the two cards with price 15.99 and read their names.
+    const names = await page.locator('[data-test="inventory-item-name"]').allTextContents();
+    const tiedNames = names.filter((_, i) => prices[i] === 15.99).sort();
+    expect(tiedNames).toEqual(['Sauce Labs Bolt T-Shirt', 'Test.allTheThings() T-Shirt (Red)'].sort());
   });
 
-  test('Price (high to low) sort reorders products by descending price; equal-priced items may appear in either relative order', async ({ page }) => {
-    // 1. Select option 'hilo' on the sort dropdown.
-    const sortSelect = page.locator('[data-test="product-sort-container"]');
-    await sortSelect.selectOption('hilo');
-    await expect(sortSelect).toHaveValue('hilo');
+  test('Selecting Price (high to low) reorders products by descending price', async ({ page }) => {
+    // 1. Start from the seed file, default az sort.
+    await expect(page.locator('[data-test="product-sort-container"]')).toHaveValue('az');
+
+    // 2. Use selectOption on the sort dropdown with value 'hilo'.
+    await page.locator('[data-test="product-sort-container"]').selectOption('hilo');
+
+    // 3. Read [data-test="active-option"] text.
     await expect(page.locator('[data-test="active-option"]')).toHaveText('Price (high to low)');
 
-    // 2. Read inventory-item-price (parsed as float) of all 6 products in DOM order into array P.
+    // 4. Parse the price text for all 6 cards in DOM order into numbers.
     const priceTexts = await page.locator('[data-test="inventory-item-price"]').allTextContents();
-    const pricesP = priceTexts.map((t) => parseFloat(t.replace('$', '')));
+    const prices = priceTexts.map((p) => parseFloat(p.replace('$', '')));
+    expect(prices).toEqual([49.99, 29.99, 15.99, 15.99, 9.99, 7.99]);
 
-    // 3. Create array Q = an independently, numerically descending-sorted copy of P.
-    const pricesQ = [...pricesP].sort((a, b) => b - a);
+    // 5. Assert programmatically that the captured price array is non-increasing.
+    expect(prices.every((p, i) => i === prices.length - 1 || p >= prices[i + 1])).toBe(true);
 
-    // 4. Assert P deep-equals Q.
-    expect(pricesP).toEqual(pricesQ);
-
-    // 5. Assert the two $15.99 items are adjacent in the list regardless of mutual order.
-    const namesInOrder = await page.locator('[data-test="inventory-item-name"]').allTextContents();
-    const idxBolt = namesInOrder.indexOf('Sauce Labs Bolt T-Shirt');
-    const idxTest = namesInOrder.indexOf('Test.allTheThings() T-Shirt (Red)');
-    expect(Math.abs(idxBolt - idxTest)).toBe(1);
+    // 6. Identify the two cards with price 15.99 and read their names.
+    const names = await page.locator('[data-test="inventory-item-name"]').allTextContents();
+    const tiedNames = names.filter((_, i) => prices[i] === 15.99).sort();
+    expect(tiedNames).toEqual(['Sauce Labs Bolt T-Shirt', 'Test.allTheThings() T-Shirt (Red)'].sort());
   });
 
-  test('Switching back to Name (A to Z) from another sort restores alphabetical order', async ({ page }) => {
-    const sortSelect = page.locator('[data-test="product-sort-container"]');
+  test('Switching between multiple sort options in sequence keeps list and active-option label consistent', async ({ page }) => {
+    const sortDropdown = page.locator('[data-test="product-sort-container"]');
+    const activeOption = page.locator('[data-test="active-option"]');
+    const nameLocator = page.locator('[data-test="inventory-item-name"]');
+    const priceLocator = page.locator('[data-test="inventory-item-price"]');
 
-    // 1. Starting from 'hilo' sort applied in a prior step, select option value 'az'.
-    await sortSelect.selectOption('hilo');
-    await expect(sortSelect).toHaveValue('hilo');
+    // 1. Start from the seed file.
+    await expect(sortDropdown).toHaveValue('az');
+    const originalOrder = await nameLocator.allTextContents();
 
-    await sortSelect.selectOption('az');
-    await expect(sortSelect).toHaveValue('az');
-    await expect(page.locator('[data-test="active-option"]')).toHaveText('Name (A to Z)');
+    // 2. Select 'za', then read names and active-option.
+    await sortDropdown.selectOption('za');
+    await expect(activeOption).toHaveText('Name (Z to A)');
+    let names = await nameLocator.allTextContents();
+    expect(names).toEqual([...originalOrder].sort((a, b) => b.localeCompare(a)));
 
-    // 2. Read inventory-item-name order into array A and compare against an independently sorted copy B.
-    const namesA = await page.locator('[data-test="inventory-item-name"]').allTextContents();
-    const namesB = [...namesA].sort((a, b) => a.localeCompare(b));
-    expect(namesA).toEqual(namesB);
-  });
+    // 3. Select 'lohi', then read prices and active-option.
+    await sortDropdown.selectOption('lohi');
+    await expect(activeOption).toHaveText('Price (low to high)');
+    let prices = (await priceLocator.allTextContents()).map((p) => parseFloat(p.replace('$', '')));
+    expect(prices.every((p, i) => i === prices.length - 1 || p <= prices[i + 1])).toBe(true);
 
-  test('Repeatedly cycling through all 4 sort options preserves the full set of 6 products each time (count/contents invariant)', async ({ page }) => {
-    const sortSelect = page.locator('[data-test="product-sort-container"]');
-    const baselineSet = new Set(EXPECTED_NAMES);
-    const sequence = ['az', 'za', 'lohi', 'hilo', 'az'];
+    // 4. Select 'hilo', then read prices and active-option.
+    await sortDropdown.selectOption('hilo');
+    await expect(activeOption).toHaveText('Price (high to low)');
+    prices = (await priceLocator.allTextContents()).map((p) => parseFloat(p.replace('$', '')));
+    expect(prices.every((p, i) => i === prices.length - 1 || p >= prices[i + 1])).toBe(true);
 
-    // 1. In sequence, select each sort option, reading the full set of names after each selection.
-    for (const value of sequence) {
-      await sortSelect.selectOption(value);
-      await expect(sortSelect).toHaveValue(value);
-
-      const items = page.locator('[data-test="inventory-item"]');
-      await expect(items).toHaveCount(6);
-
-      const names = await page.locator('[data-test="inventory-item-name"]').allTextContents();
-      expect(names).toHaveLength(6);
-      expect(new Set(names)).toEqual(baselineSet);
-    }
+    // 5. Select 'az' again, then read names and active-option.
+    await sortDropdown.selectOption('az');
+    await expect(activeOption).toHaveText('Name (A to Z)');
+    names = await nameLocator.allTextContents();
+    expect(names).toEqual([...originalOrder].sort((a, b) => a.localeCompare(b)));
+    expect(names).toEqual(originalOrder);
   });
 });

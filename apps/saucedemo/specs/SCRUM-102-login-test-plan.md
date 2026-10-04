@@ -1,53 +1,40 @@
-# SCRUM-102 Login and Logout Test Plan
+# SCRUM-102: Login and Logout - Test Plan
 
 ## Application Overview
 
-## SauceDemo Login & Logout - SCRUM-102
+SauceDemo (https://www.saucedemo.com) login and logout test plan for user story SCRUM-102. Covers successful authentication (AC1), validation/negative login scenarios (AC2), the locked-out user (AC3), error-message dismissal (AC4), and protected-page/logout/back-navigation behavior (AC5).
 
-**Application Under Test:** https://www.saucedemo.com (Swag Labs)
-**Login page URL:** `/` (root)
-**Protected page used for verification:** `/inventory.html` (title: "Products")
+Environment notes:
+- baseURL: https://www.saucedemo.com
+- All tests in this story start from a FRESH, logged-out context via `page.goto('/')`. Do NOT reuse the seed login in beforeEach for this story's specs; the seed is only used by planner_setup_page to initialize the test environment.
+- Document <title> stays "Swag Labs" on every page (login, inventory). The on-page heading ".title" shows "Products" on the inventory page - assertions about "landing on the Products page" must check the visible heading text/element, not document.title.
+- Valid credentials: standard_user / secret_sauce. Locked out: locked_out_user / secret_sauce. Other accepted usernames (login succeeds; app defects on those pages are out of scope for this story): problem_user, performance_glitch_user, error_user, visual_user - all share password secret_sauce.
 
-### Starting state assumption
-All scenarios in this plan assume a **fresh, unauthenticated browser context** starting at `page.goto('/')`, UNLESS the scenario explicitly requires a logged-in state as a precondition (e.g. the Logout tests), in which case the precondition step is spelled out explicitly within the test (do not rely on any seed/global login for this story).
+Stable locators (data-test attributes, confirmed live):
+- Username field: `[data-test="username"]`
+- Password field: `[data-test="password"]`
+- Login button: `[data-test="login-button"]`
+- Error banner container: `[data-test="error"]` (role=alert)
+- Error dismiss (X) button: `[data-test="error-button"]`
+- Accepted usernames list text: `[data-test="login-credentials"]`
+- Shared password text: `[data-test="login-password"]`
+- Logout link in side menu: `[data-test="logout-sidebar-link"]` (rendered as an `<a>` with text "Logout")
+- Open side menu: use `page.getByRole('button', { name: 'Open Menu' })` - clicking `[data-test="open-menu"]` directly times out because the visual button covers it, and a raw JS click leaves menu items `aria-hidden`.
+- Close side menu: `page.getByRole('button', { name: 'Close Menu' })`
+- Inventory page heading: text "Products" inside `.title` (visible heading, not document.title)
 
-### Credentials used across this plan
-| User | Password | Expected outcome |
-|---|---|---|
-| `standard_user` | `secret_sauce` | Successful login |
-| `locked_out_user` | `secret_sauce` | Locked-out error |
-| `problem_user` | `secret_sauce` | Successful login (other defects out of scope) |
-| `performance_glitch_user` | `secret_sauce` | Successful login (slow but succeeds, out of scope) |
-| `error_user` | `secret_sauce` | Successful login (other defects out of scope) |
-| `visual_user` | `secret_sauce` | Successful login (other defects out of scope) |
-
-### Key stable locators discovered during exploration
-| Element | Locator |
-|---|---|
-| Username field | `[data-test="username"]` |
-| Password field | `[data-test="password"]` |
-| Login button | `[data-test="login-button"]` |
-| Error message banner | `[data-test="error"]` (role="alert") |
-| Error dismiss (X) button | `[data-test="error-button"]` |
-| Accepted usernames list | `[data-test="login-credentials"]` |
-| Shared password hint | `[data-test="login-password"]` |
-| Products page title | `[data-test="title"]` (text "Products") |
-| Open Menu button | `getByRole('button', { name: 'Open Menu' })` (do NOT use `[data-test="open-menu"]`, it times out; do NOT JS-click, leaves items aria-hidden) |
-| Logout link (in side menu) | `[data-test="logout-sidebar-link"]` |
-
-### Verified application behaviors (from manual exploration)
-- Clicking Login with both fields empty shows: "Epic sadface: Username is required". Both username and password inputs gain an `error` CSS class (full class becomes `input_error form_input error`; base class `input_error form_input` is always present regardless of error state, so assertions must check for the specific `error` token, not just substring `input_error`).
-- Valid username + empty password shows: "Epic sadface: Password is required", with the same field error-class behavior.
-- Wrong username and/or wrong password (both non-empty) shows: "Epic sadface: Username and password do not match any user in this service".
-- `locked_out_user` + `secret_sauce` shows: "Epic sadface: Sorry, this user has been locked out." Username/password values typed remain in the fields; user stays on `/`.
-- Clicking the error dismiss button (`[data-test="error-button"]`) removes the `[data-test="error"]` alert AND removes the `error` class token from both input fields, while preserving whatever text was already typed into the fields.
-- Successful login (`standard_user`/`secret_sauce`) via clicking Login OR via pressing Enter in the password field navigates to `/inventory.html` with page heading "Products" (`[data-test="title"]`).
-- Username matching is case-sensitive: `Standard_User`/`secret_sauce` fails with the "do not match any user" error.
-- Leading/trailing whitespace in username or password is taken literally (NOT trimmed) by the app; ` standard_user `/` secret_sauce ` fails with "do not match any user" error.
-- Navigating directly to `/inventory.html` without being logged in redirects to `/` and shows: "Epic sadface: You can only access '/inventory.html' when you are logged in."
-- After logging in and then using the side-menu Logout link (`[data-test="logout-sidebar-link"]`, reached via `getByRole('button', { name: 'Open Menu' })`), the app returns to `/` (login page, no error shown).
-- After logout, pressing the browser Back button does NOT restore the products page; it redirects back to `/` and re-shows the protected-page error: "Epic sadface: You can only access '/inventory.html' when you are logged in."
-- Other accepted users (`problem_user`, `performance_glitch_user`, `error_user`, `visual_user`) all successfully authenticate and land on `/inventory.html`; any other visual/functional defects for these users are explicitly out of scope for this story.
+Confirmed exact behaviors from live exploration (2026-10-04):
+- Empty username + empty password -> error text exactly: "Epic sadface: Username is required"
+- Any username + empty password -> error text exactly: "Epic sadface: Password is required"
+- Non-matching username/password combo -> error text exactly: "Epic sadface: Username and password do not match any user in this service"
+- Username match is case-sensitive: "Standard_User" / secret_sauce produces the "do not match" error, not success.
+- locked_out_user / secret_sauce -> error text exactly: "Epic sadface: Sorry, this user has been locked out."
+- Direct/forced navigation to /inventory.html while logged out -> browser is redirected to "/" and shows error text exactly: "Epic sadface: You can only access '/inventory.html' when you are logged in."
+- On any validation error, BOTH the username and password `<input>` elements receive an additional CSS class `error` (full className becomes "input_error form_input error"); the static class `input_error` is always present regardless of error state, so assertions should check specifically for the `error` class token, not just `input_error`.
+- Clicking the error dismiss (X) button removes the error alert and the `error` class from both fields, but does NOT clear the text the user already typed into username/password.
+- After Logout (via side menu "Logout" link), the app returns to "/" with a blank login form. Pressing the browser Back button afterwards does NOT restore the product listing - the browser is redirected back to "/" showing the same protected-page error as direct navigation, confirming no cached authenticated view is served.
+- Successful login (via clicking Login, or via pressing Enter in the password field) navigates to /inventory.html and renders the product grid with heading "Products".
+- problem_user / secret_sauce was verified to log in successfully (defects on that user's catalog page, if any, are out of scope for this story).
 
 ## Test Scenarios
 
@@ -55,305 +42,344 @@ All scenarios in this plan assume a **fresh, unauthenticated browser context** s
 
 **Seed:** `apps/saucedemo/seed.spec.ts`
 
-#### 1.1. Login page displays all required elements
+#### 1.1. Standard user logs in successfully via Login button click
 
-**File:** `apps/saucedemo/specs/AC1-successful-login.spec.ts`
-
-**Steps:**
-  1. Navigate to the base URL '/' with a fresh, unauthenticated browser context.
-    - expect: Page loads the login form without redirect
-    - expect: URL is exactly '/' (or base URL with no path)
-  2. Assert the username field '[data-test="username"]' is visible and empty.
-    - expect: Field is visible and has empty value
-  3. Assert the password field '[data-test="password"]' is visible and empty.
-    - expect: Field is visible and has empty value
-  4. Assert the Login button '[data-test="login-button"]' is visible and enabled.
-    - expect: Button is visible and enabled
-  5. Assert the accepted usernames panel '[data-test="login-credentials"]' is visible and contains text 'standard_user', 'locked_out_user', 'problem_user', 'performance_glitch_user', 'error_user', 'visual_user'.
-    - expect: All six usernames are listed in the panel text
-  6. Assert the shared password panel '[data-test="login-password"]' is visible and contains text 'secret_sauce'.
-    - expect: Panel shows 'secret_sauce' as the password for all users
-  7. Assert no error alert '[data-test="error"]' is present on initial page load.
-    - expect: Error alert element is not present/visible
-
-#### 1.2. Successful login via Login button click with standard_user
-
-**File:** `apps/saucedemo/specs/AC1-successful-login.spec.ts`
+**File:** `apps/saucedemo/tests/login/AC1-successful-login.spec.ts`
 
 **Steps:**
-  1. Navigate to '/'.
-    - expect: Login page is shown
-  2. Fill '[data-test="username"]' with 'standard_user'.
-    - expect: Field contains 'standard_user'
-  3. Fill '[data-test="password"]' with 'secret_sauce'.
-    - expect: Field contains 'secret_sauce'
-  4. Click '[data-test="login-button"]'.
-    - expect: Navigation occurs to '/inventory.html'
-    - expect: Page heading '[data-test="title"]' has text 'Products'
-    - expect: No error alert is shown
+  1. Navigate to '/' (fresh, logged-out context)
+    - expect: Login page is displayed with empty Username and Password fields
+    - expect: Login button [data-test="login-button"] is visible and enabled
+  2. Fill [data-test="username"] with 'standard_user'
+    - expect: Username field shows 'standard_user'
+  3. Fill [data-test="password"] with 'secret_sauce'
+    - expect: Password field shows masked value (input type=password)
+  4. Click [data-test="login-button"]
+    - expect: Browser navigates to /inventory.html
+    - expect: The products page heading '.title' displays text 'Products'
+    - expect: No error alert ([data-test="error"]) is present
+    - expect: At least one product card (e.g. 'Sauce Labs Backpack') is visible
 
-#### 1.3. Successful login via Enter key in password field with standard_user
+#### 1.2. Standard user logs in successfully by pressing Enter in the password field
 
-**File:** `apps/saucedemo/specs/AC1-successful-login.spec.ts`
-
-**Steps:**
-  1. Navigate to '/'.
-    - expect: Login page is shown
-  2. Fill '[data-test="username"]' with 'standard_user'.
-    - expect: Field contains 'standard_user'
-  3. Click into '[data-test="password"]', type 'secret_sauce', then press Enter.
-    - expect: Form submits without clicking the Login button
-    - expect: Navigation occurs to '/inventory.html'
-    - expect: Page heading '[data-test="title"]' has text 'Products'
-
-#### 1.4. Successful login for each of the other accepted users (problem_user, performance_glitch_user, error_user, visual_user)
-
-**File:** `apps/saucedemo/specs/AC1-successful-login.spec.ts`
+**File:** `apps/saucedemo/tests/login/AC1-successful-login.spec.ts`
 
 **Steps:**
-  1. Parameterize the test over the user list: ['problem_user','performance_glitch_user','error_user','visual_user']. For each user, navigate to '/'.
-    - expect: Login page is shown
-  2. Fill '[data-test="username"]' with the current user and '[data-test="password"]' with 'secret_sauce'. Click '[data-test="login-button"]'.
-    - expect: Navigation occurs to '/inventory.html' for every user in the list
-    - expect: Page heading '[data-test="title"]' has text 'Products'
-    - expect: No error alert is shown
-    - expect: Note: Do NOT assert on any other page content/behavior for these users - their other defects are out of scope for this story
+  1. Navigate to '/'
+    - expect: Login page is displayed
+  2. Fill [data-test="username"] with 'standard_user'
+    - expect: Username field shows 'standard_user'
+  3. Fill [data-test="password"] with 'secret_sauce' and press Enter (do not click the Login button)
+    - expect: Form submits the same as a button click
+    - expect: Browser navigates to /inventory.html
+    - expect: Page heading shows 'Products'
 
-### 2. AC2 - Failed Login Validation Messages
+#### 1.3. Login page displays the accepted usernames list and shared password hint
+
+**File:** `apps/saucedemo/tests/login/AC1-successful-login.spec.ts`
+
+**Steps:**
+  1. Navigate to '/'
+    - expect: Login page is displayed
+  2. Read text content of [data-test="login-credentials"]
+    - expect: Text contains heading 'Accepted usernames are:' followed by: standard_user, locked_out_user, problem_user, performance_glitch_user, error_user, visual_user
+  3. Read text content of [data-test="login-password"]
+    - expect: Text contains heading 'Password for all users:' followed by 'secret_sauce'
+
+#### 1.4. Each additional accepted username can log in with the shared password (data-driven)
+
+**File:** `apps/saucedemo/tests/login/AC1-successful-login.spec.ts`
+
+**Steps:**
+  1. For each username in ['problem_user', 'performance_glitch_user', 'error_user', 'visual_user']: navigate to '/' in a fresh context, fill [data-test="username"] with the username and [data-test="password"] with 'secret_sauce', click [data-test="login-button"]
+    - expect: For every username in the list, the browser navigates to /inventory.html
+    - expect: No login error alert is shown
+    - expect: Only cosmetic/functional defects on the resulting catalog page are out of scope for this assertion - the test only checks that authentication itself succeeds (URL + absence of login error)
+
+#### 1.5. Password field masks input characters
+
+**File:** `apps/saucedemo/tests/login/AC1-successful-login.spec.ts`
+
+**Steps:**
+  1. Navigate to '/'
+    - expect: Login page is displayed
+  2. Fill [data-test="password"] with 'secret_sauce'
+    - expect: The input element's type attribute is 'password' so the value is visually masked (not plain text) in the UI
+
+### 2. AC2 - Failed Login Messages
 
 **Seed:** `apps/saucedemo/seed.spec.ts`
 
-#### 2.1. Empty username and empty password shows 'Username is required' error
+#### 2.1. Submitting with both username and password empty shows 'Username is required'
 
-**File:** `apps/saucedemo/specs/AC2-failed-login-messages.spec.ts`
-
-**Steps:**
-  1. Navigate to '/'.
-    - expect: Login page is shown, both fields empty
-  2. Without filling any field, click '[data-test="login-button"]'.
-    - expect: URL remains '/' (no navigation)
-    - expect: Error alert '[data-test="error"]' is visible with text 'Epic sadface: Username is required'
-    - expect: Username field '[data-test="username"]' class attribute contains the token 'error'
-    - expect: Password field '[data-test="password"]' class attribute contains the token 'error'
-
-#### 2.2. Valid username with empty password shows 'Password is required' error
-
-**File:** `apps/saucedemo/specs/AC2-failed-login-messages.spec.ts`
+**File:** `apps/saucedemo/tests/login/AC2-failed-login-messages.spec.ts`
 
 **Steps:**
-  1. Navigate to '/'.
-    - expect: Login page is shown
-  2. Fill '[data-test="username"]' with 'standard_user'. Leave password empty. Click '[data-test="login-button"]'.
-    - expect: URL remains '/' (no navigation)
-    - expect: Error alert '[data-test="error"]' is visible with text 'Epic sadface: Password is required'
-    - expect: Username field retains value 'standard_user'
-    - expect: Both username and password fields carry the error class token
+  1. Navigate to '/'
+    - expect: Login page displayed, both fields empty
+  2. Click [data-test="login-button"] without filling any field
+    - expect: URL remains '/' (still on login page)
+    - expect: [data-test="error"] alert is visible with text exactly 'Epic sadface: Username is required'
+    - expect: [data-test="username"] and [data-test="password"] both carry the CSS class 'error'
 
-#### 2.3. Wrong username and wrong password shows generic mismatch error
+#### 2.2. Submitting with username filled and password empty shows 'Password is required'
 
-**File:** `apps/saucedemo/specs/AC2-failed-login-messages.spec.ts`
-
-**Steps:**
-  1. Navigate to '/'.
-    - expect: Login page is shown
-  2. Fill '[data-test="username"]' with 'wrong_user' and '[data-test="password"]' with 'wrong_pass'. Click '[data-test="login-button"]'.
-    - expect: URL remains '/' (no navigation)
-    - expect: Error alert '[data-test="error"]' is visible with text 'Epic sadface: Username and password do not match any user in this service'
-    - expect: Both fields carry the error class token
-    - expect: Typed values remain visible in the fields
-
-#### 2.4. Valid username with wrong password shows generic mismatch error
-
-**File:** `apps/saucedemo/specs/AC2-failed-login-messages.spec.ts`
+**File:** `apps/saucedemo/tests/login/AC2-failed-login-messages.spec.ts`
 
 **Steps:**
-  1. Navigate to '/'.
-    - expect: Login page is shown
-  2. Fill '[data-test="username"]' with 'standard_user' and '[data-test="password"]' with 'wrong_pass'. Click '[data-test="login-button"]'.
-    - expect: URL remains '/' (no navigation)
-    - expect: Error alert shows text 'Epic sadface: Username and password do not match any user in this service'
+  1. Navigate to '/'
+    - expect: Login page displayed
+  2. Fill [data-test="username"] with 'standard_user', leave password empty, click [data-test="login-button"]
+    - expect: URL remains '/'
+    - expect: Error alert text is exactly 'Epic sadface: Password is required'
+    - expect: Username field retains 'standard_user'
+    - expect: Both username and password fields carry the CSS class 'error'
 
-#### 2.5. Username is case-sensitive (wrong-case valid username fails)
+#### 2.3. Submitting with username empty and password filled still shows 'Username is required'
 
-**File:** `apps/saucedemo/specs/AC2-failed-login-messages.spec.ts`
+**File:** `apps/saucedemo/tests/login/AC2-failed-login-messages.spec.ts`
 
 **Steps:**
-  1. Navigate to '/'.
-    - expect: Login page is shown
-  2. Fill '[data-test="username"]' with 'Standard_User' (capitalized) and '[data-test="password"]' with 'secret_sauce'. Click '[data-test="login-button"]'.
-    - expect: URL remains '/' (no navigation to inventory)
-    - expect: Error alert shows text 'Epic sadface: Username and password do not match any user in this service'
+  1. Navigate to '/'
+    - expect: Login page displayed
+  2. Leave username empty, fill [data-test="password"] with 'secret_sauce', click [data-test="login-button"]
+    - expect: URL remains '/'
+    - expect: Error alert text is exactly 'Epic sadface: Username is required' (username validation takes precedence over password validation)
+    - expect: Password field retains the typed value
+
+#### 2.4. Wrong username and wrong password shows the generic mismatch error
+
+**File:** `apps/saucedemo/tests/login/AC2-failed-login-messages.spec.ts`
+
+**Steps:**
+  1. Navigate to '/'
+    - expect: Login page displayed
+  2. Fill username with 'invalid_user' and password with 'wrong_pass', submit via Enter key in the password field
+    - expect: URL remains '/'
+    - expect: Error alert text is exactly 'Epic sadface: Username and password do not match any user in this service'
+    - expect: Both fields carry the CSS class 'error'
+
+#### 2.5. Valid username with wrong password shows the generic mismatch error
+
+**File:** `apps/saucedemo/tests/login/AC2-failed-login-messages.spec.ts`
+
+**Steps:**
+  1. Navigate to '/'
+    - expect: Login page displayed
+  2. Fill username with 'standard_user' and password with 'wrong_pass', click [data-test="login-button"]
+    - expect: URL remains '/'
+    - expect: Error text is exactly 'Epic sadface: Username and password do not match any user in this service'
+
+#### 2.6. Wrong username with the correct shared password shows the generic mismatch error
+
+**File:** `apps/saucedemo/tests/login/AC2-failed-login-messages.spec.ts`
+
+**Steps:**
+  1. Navigate to '/'
+    - expect: Login page displayed
+  2. Fill username with 'not_a_real_user' and password with 'secret_sauce', click [data-test="login-button"]
+    - expect: URL remains '/'
+    - expect: Error text is exactly 'Epic sadface: Username and password do not match any user in this service'
+
+#### 2.7. Username match is case-sensitive - 'Standard_User' is rejected
+
+**File:** `apps/saucedemo/tests/login/AC2-failed-login-messages.spec.ts`
+
+**Steps:**
+  1. Navigate to '/'
+    - expect: Login page displayed
+  2. Fill username with 'Standard_User' (capitalized) and password with 'secret_sauce', submit
+    - expect: Login does NOT succeed; URL remains '/'
+    - expect: Error text is exactly 'Epic sadface: Username and password do not match any user in this service'
     - expect: Confirms username matching is case-sensitive
 
-#### 2.6. Leading/trailing whitespace in credentials is not trimmed and causes login failure
+#### 2.8. Validation error highlights both username and password fields regardless of error type
 
-**File:** `apps/saucedemo/specs/AC2-failed-login-messages.spec.ts`
-
-**Steps:**
-  1. Navigate to '/'.
-    - expect: Login page is shown
-  2. Fill '[data-test="username"]' with ' standard_user ' (leading and trailing space) and '[data-test="password"]' with ' secret_sauce ' (leading and trailing space). Click '[data-test="login-button"]'.
-    - expect: URL remains '/' (no navigation)
-    - expect: Error alert shows text 'Epic sadface: Username and password do not match any user in this service'
-    - expect: Confirms the app takes credentials literally and does not trim whitespace
-
-#### 2.7. Password-only whitespace with valid username still fails
-
-**File:** `apps/saucedemo/specs/AC2-failed-login-messages.spec.ts`
+**File:** `apps/saucedemo/tests/login/AC2-failed-login-messages.spec.ts`
 
 **Steps:**
-  1. Navigate to '/'.
-    - expect: Login page is shown
-  2. Fill '[data-test="username"]' with 'standard_user' and '[data-test="password"]' with a single space ' '. Click '[data-test="login-button"]'.
-    - expect: URL remains '/' (no navigation)
-    - expect: Error alert shows text 'Epic sadface: Username and password do not match any user in this service' (password is non-empty so the required-field check is bypassed, but the value does not match)
+  1. Navigate to '/' and submit with empty username/password to trigger 'Username is required'
+    - expect: Both [data-test="username"] and [data-test="password"] className contains the token 'error' (in addition to the always-present 'input_error' token)
+  2. Repeat for the wrong-credentials mismatch case and the locked_out_user case
+    - expect: In every error scenario, both fields carry the 'error' class token, confirming consistent field-level error marking across all AC2/AC3 error types
 
-### 3. AC3 - Locked-Out User
+### 3. AC3 - Locked-out User
 
 **Seed:** `apps/saucedemo/seed.spec.ts`
 
-#### 3.1. locked_out_user cannot log in and sees locked-out message
+#### 3.1. Locked-out user sees the lockout error and remains on the login page
 
-**File:** `apps/saucedemo/specs/AC3-locked-out-user.spec.ts`
-
-**Steps:**
-  1. Navigate to '/'.
-    - expect: Login page is shown
-  2. Fill '[data-test="username"]' with 'locked_out_user' and '[data-test="password"]' with 'secret_sauce'. Click '[data-test="login-button"]'.
-    - expect: URL remains '/' (no navigation to '/inventory.html')
-    - expect: Error alert '[data-test="error"]' is visible with exact text 'Epic sadface: Sorry, this user has been locked out.'
-    - expect: Typed username and password values remain visible in the respective fields
-
-#### 3.2. locked_out_user via Enter key also fails with locked-out message
-
-**File:** `apps/saucedemo/specs/AC3-locked-out-user.spec.ts`
+**File:** `apps/saucedemo/tests/login/AC3-locked-out-user.spec.ts`
 
 **Steps:**
-  1. Navigate to '/'.
-    - expect: Login page is shown
-  2. Fill '[data-test="username"]' with 'locked_out_user'. Click into '[data-test="password"]', type 'secret_sauce', press Enter.
-    - expect: URL remains '/' (no navigation)
-    - expect: Error alert shows text 'Epic sadface: Sorry, this user has been locked out.'
+  1. Navigate to '/'
+    - expect: Login page displayed
+  2. Fill username with 'locked_out_user' and password with 'secret_sauce', click [data-test="login-button"]
+    - expect: URL remains '/' (no navigation to /inventory.html)
+    - expect: [data-test="error"] alert text is exactly 'Epic sadface: Sorry, this user has been locked out.'
+    - expect: Both username and password fields carry the 'error' CSS class
 
-#### 3.3. Re-attempting login as locked_out_user after dismissing the error still fails
+#### 3.2. Locked-out user cannot access the protected inventory page even via direct navigation
 
-**File:** `apps/saucedemo/specs/AC3-locked-out-user.spec.ts`
+**File:** `apps/saucedemo/tests/login/AC3-locked-out-user.spec.ts`
 
 **Steps:**
-  1. Navigate to '/'. Fill in 'locked_out_user' / 'secret_sauce' and click Login.
-    - expect: Locked-out error is shown
-  2. Click the dismiss (X) button '[data-test="error-button"]', then click '[data-test="login-button"]' again without changing any field.
-    - expect: Error alert reappears with the same locked-out message
-    - expect: User remains on '/'
+  1. Navigate to '/', attempt login with locked_out_user/secret_sauce and observe the lockout error
+    - expect: Lockout error shown, user remains unauthenticated
+  2. Navigate directly to '/inventory.html'
+    - expect: Browser is redirected back to '/'
+    - expect: Error alert text is exactly "Epic sadface: You can only access '/inventory.html' when you are logged in." (confirms the failed locked-out attempt did not create a session)
+
+#### 3.3. Locked-out error can be dismissed and the user can retry (and still fails)
+
+**File:** `apps/saucedemo/tests/login/AC3-locked-out-user.spec.ts`
+
+**Steps:**
+  1. Navigate to '/', submit locked_out_user/secret_sauce to trigger the lockout error
+    - expect: Lockout error visible
+  2. Click [data-test="error-button"] to dismiss the error
+    - expect: Error alert disappears
+    - expect: 'error' CSS class removed from both fields
+    - expect: Username/password text values remain in the inputs
+  3. Click [data-test="login-button"] again without changing the fields
+    - expect: The exact same lockout error reappears: 'Epic sadface: Sorry, this user has been locked out.'
+    - expect: User still remains on '/'
 
 ### 4. AC4 - Error Message Dismissal
 
 **Seed:** `apps/saucedemo/seed.spec.ts`
 
-#### 4.1. Dismissing a required-field error clears the message and field error styling
+#### 4.1. Dismissing the 'Username is required' error clears the alert and field error styling
 
-**File:** `apps/saucedemo/specs/AC4-error-dismissal.spec.ts`
-
-**Steps:**
-  1. Navigate to '/'. Click '[data-test="login-button"]' with both fields empty to trigger the 'Username is required' error.
-    - expect: Error alert '[data-test="error"]' is visible
-    - expect: Both input fields carry the error class token
-  2. Click the dismiss button '[data-test="error-button"]' (the X icon inside the alert).
-    - expect: Error alert '[data-test="error"]' is no longer present/visible
-    - expect: Username field class no longer contains the 'error' token
-    - expect: Password field class no longer contains the 'error' token
-
-#### 4.2. Dismissing a mismatch error preserves already-typed field values
-
-**File:** `apps/saucedemo/specs/AC4-error-dismissal.spec.ts`
+**File:** `apps/saucedemo/tests/login/AC4-error-dismissal.spec.ts`
 
 **Steps:**
-  1. Navigate to '/'. Fill username 'wrong_user' and password 'wrong_pass'. Click Login.
-    - expect: Error alert is visible with the 'do not match any user' message
-  2. Click '[data-test="error-button"]' to dismiss the error.
+  1. Navigate to '/' and click [data-test="login-button"] with empty fields to trigger 'Username is required'
+    - expect: Error alert and field error classes present
+  2. Click [data-test="error-button"] (the X icon)
+    - expect: [data-test="error"] alert is no longer present in the DOM/visible
+    - expect: Neither username nor password field carries the 'error' CSS class any more
+
+#### 4.2. Dismissing the 'Password is required' error clears the alert
+
+**File:** `apps/saucedemo/tests/login/AC4-error-dismissal.spec.ts`
+
+**Steps:**
+  1. Navigate to '/', fill username only, submit to trigger 'Password is required'
+    - expect: Error alert visible
+  2. Click [data-test="error-button"]
     - expect: Error alert disappears
-    - expect: Username field still contains 'wrong_user'
-    - expect: Password field still contains 'wrong_pass'
-    - expect: User remains on '/'
+    - expect: Field error classes cleared
+    - expect: Username value 'standard_user' (or whatever was typed) is still present in the username field
 
-#### 4.3. Dismissing the locked-out error allows retyping credentials without a stale error reappearing
+#### 4.3. Dismissing the credential-mismatch error preserves previously typed field values
 
-**File:** `apps/saucedemo/specs/AC4-error-dismissal.spec.ts`
+**File:** `apps/saucedemo/tests/login/AC4-error-dismissal.spec.ts`
 
 **Steps:**
-  1. Navigate to '/'. Log in with 'locked_out_user' / 'secret_sauce'.
-    - expect: Locked-out error alert is visible
-  2. Click '[data-test="error-button"]' to dismiss.
+  1. Navigate to '/', fill username 'bad_user' and password 'bad_pass', submit to trigger the mismatch error
+    - expect: Error alert 'Epic sadface: Username and password do not match any user in this service' visible
+  2. Click [data-test="error-button"]
     - expect: Error alert disappears
-  3. Clear the username field and fill it with 'standard_user', keep password 'secret_sauce', click Login.
-    - expect: Login succeeds and navigates to '/inventory.html'
-    - expect: No locked-out error is shown at any point during or after this new attempt
+    - expect: Username field value is still 'bad_user'
+    - expect: Password field value is still 'bad_pass'
+    - expect: Error CSS class removed from both fields
+
+#### 4.4. Dismissing the locked-out error clears the alert and allows editing the form
+
+**File:** `apps/saucedemo/tests/login/AC4-error-dismissal.spec.ts`
+
+**Steps:**
+  1. Navigate to '/', submit locked_out_user/secret_sauce to trigger the lockout error
+    - expect: Lockout error visible
+  2. Click [data-test="error-button"]
+    - expect: Error alert disappears, field error classes removed
+  3. Clear fields and fill with standard_user/secret_sauce, then submit
+    - expect: Login now succeeds and navigates to /inventory.html, confirming the dismissed error did not leave the form in a broken state
+
+#### 4.5. Error alert is not present on a freshly loaded login page
+
+**File:** `apps/saucedemo/tests/login/AC4-error-dismissal.spec.ts`
+
+**Steps:**
+  1. Navigate to '/' in a brand-new context (no prior error triggered)
+    - expect: [data-test="error"] element is not present/visible
+    - expect: Neither field carries the 'error' CSS class
+    - expect: This is the baseline negative check that the X button test relies on by contrast
 
 ### 5. AC5 - Protected Pages and Logout
 
 **Seed:** `apps/saucedemo/seed.spec.ts`
 
-#### 5.1. Direct navigation to /inventory.html while logged out redirects to login with protected-page error
+#### 5.1. Direct navigation to a protected page while logged out redirects to login with the correct error
 
-**File:** `apps/saucedemo/specs/AC5-protected-pages-logout.spec.ts`
-
-**Steps:**
-  1. Using a fresh, unauthenticated browser context, navigate directly to '/inventory.html' (do not go through the login form).
-    - expect: Browser is redirected to '/' (login page), NOT '/inventory.html'
-    - expect: Error alert '[data-test="error"]' is visible with exact text "Epic sadface: You can only access '/inventory.html' when you are logged in."
-    - expect: Login form fields are empty
-
-#### 5.2. Logged-in user can log out via the side menu and returns to the login page
-
-**File:** `apps/saucedemo/specs/AC5-protected-pages-logout.spec.ts`
+**File:** `apps/saucedemo/tests/login/AC5-protected-pages-and-logout.spec.ts`
 
 **Steps:**
-  1. Navigate to '/'. Log in with 'standard_user' / 'secret_sauce'.
-    - expect: Navigation to '/inventory.html' succeeds, heading shows 'Products'
-  2. Click the menu button via getByRole('button', { name: 'Open Menu' }) (do not use '[data-test="open-menu"]' or a JS click).
-    - expect: Side menu opens and becomes visible (not aria-hidden)
-    - expect: '[data-test="logout-sidebar-link"]' is visible with text 'Logout'
-  3. Click '[data-test="logout-sidebar-link"]'.
-    - expect: Browser navigates back to '/' (login page)
-    - expect: No error alert is shown
-    - expect: Username and password fields are empty
-    - expect: Login button is visible
+  1. In a fresh, logged-out context, navigate directly to '/inventory.html'
+    - expect: Browser URL is redirected to '/'
+    - expect: [data-test="error"] alert text is exactly "Epic sadface: You can only access '/inventory.html' when you are logged in."
+    - expect: No product grid/content is rendered - only the login form is visible
 
-#### 5.3. Browser Back after logout does not restore the products page
+#### 5.2. Authenticated user can access the inventory page and sees the product catalog
 
-**File:** `apps/saucedemo/specs/AC5-protected-pages-logout.spec.ts`
+**File:** `apps/saucedemo/tests/login/AC5-protected-pages-and-logout.spec.ts`
 
 **Steps:**
-  1. Navigate to '/'. Log in with 'standard_user' / 'secret_sauce' to reach '/inventory.html'.
-    - expect: Products page is shown
-  2. Open the side menu via getByRole('button', { name: 'Open Menu' }) and click '[data-test="logout-sidebar-link"]' to log out.
-    - expect: Returns to login page '/'
-  3. Press the browser Back button (page.goBack()).
-    - expect: Page does NOT show the products grid or '/inventory.html' content
-    - expect: URL resolves to '/' (login page)
-    - expect: Error alert '[data-test="error"]' is visible with text "Epic sadface: You can only access '/inventory.html' when you are logged in."
-    - expect: This confirms the session is fully invalidated and cached pages are not served after logout
+  1. Navigate to '/', log in with standard_user/secret_sauce
+    - expect: Navigated to /inventory.html
+    - expect: Page heading '.title' shows 'Products'
+    - expect: Product cards are rendered (e.g. 'Sauce Labs Backpack' visible)
 
-#### 5.4. After logout, direct re-navigation to /inventory.html is blocked again
+#### 5.3. Logout via the side menu returns the user to the login page
 
-**File:** `apps/saucedemo/specs/AC5-protected-pages-logout.spec.ts`
+**File:** `apps/saucedemo/tests/login/AC5-protected-pages-and-logout.spec.ts`
 
 **Steps:**
-  1. Navigate to '/'. Log in with 'standard_user' / 'secret_sauce', then log out via the side menu.
-    - expect: Returns to login page '/'
-  2. Navigate directly to '/inventory.html' again by URL.
-    - expect: Redirected to '/' (login page)
-    - expect: Protected-page error message is shown
-    - expect: Confirms logout fully revokes access, not just for the Back button case
+  1. Navigate to '/', log in with standard_user/secret_sauce to reach /inventory.html
+    - expect: On inventory page
+  2. Open the side menu using page.getByRole('button', { name: 'Open Menu' }) (do NOT click [data-test="open-menu"] directly - it is covered by the visual button and will time out)
+    - expect: Side menu panel opens showing 'All Items', 'Dynamic Catalog', 'About', 'Logout', 'Reset App State'
+  3. Click [data-test="logout-sidebar-link"] (the 'Logout' link)
+    - expect: Browser navigates back to '/'
+    - expect: A blank login form is displayed (no error alert)
+    - expect: No session/cart state is visible
 
-#### 5.5. Re-login after logout works normally
+#### 5.4. Browser Back button after logout does not restore the protected product page
 
-**File:** `apps/saucedemo/specs/AC5-protected-pages-logout.spec.ts`
+**File:** `apps/saucedemo/tests/login/AC5-protected-pages-and-logout.spec.ts`
 
 **Steps:**
-  1. Navigate to '/'. Log in, then log out via the side menu.
-    - expect: Returns to login page '/'
-  2. Fill in 'standard_user' / 'secret_sauce' again and click Login.
-    - expect: Login succeeds and navigates to '/inventory.html'
-    - expect: Heading '[data-test="title"]' shows 'Products'
-    - expect: Confirms the session state was cleanly reset and a fresh login is possible
+  1. Navigate to '/', log in with standard_user/secret_sauce to reach /inventory.html
+    - expect: On inventory page, Products heading visible
+  2. Open the side menu (getByRole button 'Open Menu') and click [data-test="logout-sidebar-link"] to log out
+    - expect: Back on '/' with blank login form
+  3. Press the browser Back button (page.goBack())
+    - expect: The product catalog is NOT shown (no cached authenticated page is served from history)
+    - expect: Browser ends up on '/' displaying the protected-page error: "Epic sadface: You can only access '/inventory.html' when you are logged in."
+    - expect: This is the key regression check for this story: logout must truly invalidate the session, not just visually return to login while leaving /inventory.html cached/accessible via history
+
+#### 5.5. Side menu Open/Close controls work correctly around the logout action
+
+**File:** `apps/saucedemo/tests/login/AC5-protected-pages-and-logout.spec.ts`
+
+**Steps:**
+  1. Navigate to '/', log in with standard_user/secret_sauce
+    - expect: On inventory page
+  2. Click getByRole('button', { name: 'Open Menu' })
+    - expect: Menu panel becomes visible with 'Logout' link visible and not aria-hidden
+  3. Click getByRole('button', { name: 'Close Menu' }) without logging out
+    - expect: Menu panel closes; product grid remains visible and the user is still logged in (re-opening the menu still shows Logout, confirming session persisted through an open/close cycle)
+  4. Re-open the menu and click [data-test="logout-sidebar-link"]
+    - expect: User is logged out and returned to '/'
+
+#### 5.6. Directly re-navigating to '/inventory.html' immediately after logout still shows the protected-page error
+
+**File:** `apps/saucedemo/tests/login/AC5-protected-pages-and-logout.spec.ts`
+
+**Steps:**
+  1. Navigate to '/', log in with standard_user/secret_sauce, then log out via the side menu
+    - expect: Back on '/' login form
+  2. Navigate directly (page.goto) to '/inventory.html' again
+    - expect: Redirected to '/'
+    - expect: Error alert exactly "Epic sadface: You can only access '/inventory.html' when you are logged in." is shown, confirming no residual session/cookie allows access post-logout
