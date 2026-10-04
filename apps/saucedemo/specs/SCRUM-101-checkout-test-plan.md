@@ -1,61 +1,39 @@
-# SauceDemo Checkout E2E Test Plan (SCRUM-101)
+# SCRUM-101 E-commerce Checkout Process Test Plan
 
 ## Application Overview
 
-## Application Under Test
-SauceDemo (https://www.saucedemo.com) - a demo e-commerce site used for test automation practice.
+This test plan covers the end-to-end checkout flow of the SauceDemo (Swag Labs) application at https://www.saucedemo.com, corresponding to user story SCRUM-101 (E-commerce Checkout Process). All scenarios assume the tester begins already logged in as `standard_user` on `/inventory.html` (via the shared seed `apps/saucedemo/seed.spec.ts`, credentials `standard_user` / `secret_sauce`), with an empty cart unless a scenario states otherwise. Each item must be added to the cart within the test itself.
 
-## Scope
-End-to-end checkout workflow covering: Cart Review, Checkout Information entry, Order Overview, Order Completion, and related error handling / edge cases, per user story SCRUM-101.
+Element locators use the stable `data-test` attribute convention: `page.locator('[data-test="..."]')`. The side menu must be opened using `getByRole('button', { name: 'Open Menu' })` — never via a direct/JS click on `[data-test="open-menu"]`.
 
-## Starting State / Assumptions
-- All scenarios assume a fresh browser session that has already authenticated as `standard_user` / `secret_sauce` and landed on `/inventory.html` (see seed file `apps/saucedemo/seed.spec.ts`).
-- `baseURL` is configured in `playwright.config.ts`; all navigation in generated tests should use relative paths (e.g. `/cart.html`, `/checkout-step-one.html`).
-- Unless a scenario states otherwise, the cart is assumed empty at the start of each scenario (use "Reset App State" from the burger menu, or remove items, to guarantee isolation between tests).
+Key flow/URL map discovered during exploration:
+- Products: `/inventory.html`
+- Cart: `/cart.html`
+- Checkout Step One (information): `/checkout-step-one.html`
+- Checkout Step Two (overview): `/checkout-step-two.html`
+- Checkout Complete: `/checkout-complete.html`
 
-## Key Stable Locators Discovered (data-test attributes)
+Key locators discovered:
+- Header: `[data-test="open-menu"]` (do not click directly — use role-based "Open Menu" button), `[data-test="shopping-cart-link"]`, `[data-test="shopping-cart-badge"]` (only present when cart is non-empty; shows item count)
+- Inventory page: `[data-test="inventory-item-name"]`, `[data-test="inventory-item-desc"]`, `[data-test="inventory-item-price"]`, `[data-test="add-to-cart-sauce-labs-backpack"]` (and similar `add-to-cart-<slug>` ids per product, e.g. `add-to-cart-sauce-labs-bike-light`, `add-to-cart-sauce-labs-bolt-t-shirt`, `add-to-cart-sauce-labs-fleece-jacket`, `add-to-cart-sauce-labs-onesie`, `add-to-cart-test.allthethings()-t-shirt-(red)`), corresponding `remove-<slug>` buttons once added
+- Cart page: `[data-test="cart-list"]`, `[data-test="cart-quantity-label"]`, `[data-test="cart-desc-label"]`, `[data-test="inventory-item-name"]`, `[data-test="inventory-item-desc"]`, `[data-test="inventory-item-price"]`, `[data-test="item-quantity"]`, `[data-test="remove-<slug>"]`, `[data-test="continue-shopping"]`, `[data-test="checkout"]`. NOTE: the cart page does NOT display a subtotal/total value anywhere — totals first appear on checkout-step-two.
+- Checkout Step One: `[data-test="firstName"]`, `[data-test="lastName"]`, `[data-test="postalCode"]`, `[data-test="cancel"]`, `[data-test="continue"]`, error alert `[data-test="error"]`, error dismiss `[data-test="error-button"]`
+- Checkout Step Two: `[data-test="cart-list"]` (same item rows as cart, but without Remove buttons), `[data-test="payment-info-label"]`/`[data-test="payment-info-value"]` ("SauceCard #31337"), `[data-test="shipping-info-label"]`/`[data-test="shipping-info-value"]` ("Free Pony Express Delivery!"), `[data-test="total-info-label"]`, `[data-test="subtotal-label"]` ("Item total: $X.XX"), `[data-test="tax-label"]` ("Tax: $X.XX"), `[data-test="total-label"]` ("Total: $X.XX"), `[data-test="cancel"]`, `[data-test="finish"]`
+- Checkout Complete: `[data-test="checkout-complete-container"]`, `[data-test="pony-express"]` (image), `[data-test="complete-header"]` ("Thank you for your order!"), `[data-test="complete-text"]` ("Your order has been dispatched, and will arrive just as fast as the pony can get there!"), `[data-test="back-to-products"]` ("Back Home" button), `[data-test="generate-pdf-order"]`
 
-### Inventory page (`/inventory.html`)
-- `[data-test="add-to-cart-<item-slug>"]` / `[data-test="remove-<item-slug>"]` - e.g. `add-to-cart-sauce-labs-backpack`
-- `[data-test="shopping-cart-link"]` - cart icon/link in header
-- `[data-test="shopping-cart-badge"]` - item count badge (absent entirely when cart is empty)
-- `[data-test="inventory-item-name"]`, `[data-test="inventory-item-desc"]`, `[data-test="inventory-item-price"]`
+Exact validation error strings observed (data-test="error" alert, dismissible via data-test="error-button"):
+- Empty First Name: "Error: First Name is required"
+- Empty Last Name (first name filled): "Error: Last Name is required"
+- Empty Postal Code (first/last filled): "Error: Postal Code is required"
+- All fields empty: shows First Name error first (fields are validated in order: firstName, lastName, postalCode)
 
-### Cart page (`/cart.html`)
-- `[data-test="cart-list"]`, `[data-test="cart-quantity-label"]`, `[data-test="cart-desc-label"]`
-- `[data-test="inventory-item"]` (row), `[data-test="item-quantity"]`
-- `[data-test="inventory-item-name"]`, `[data-test="inventory-item-desc"]`, `[data-test="inventory-item-price"]`
-- `[data-test="remove-<item-slug>"]`
-- `[data-test="continue-shopping"]`, `[data-test="checkout"]`
-- NOTE: the cart page does NOT render a subtotal/total - totals only appear on the Overview page.
-
-### Checkout Step One - Information (`/checkout-step-one.html`)
-- `[data-test="firstName"]`, `[data-test="lastName"]`, `[data-test="postalCode"]`
-- `[data-test="cancel"]`, `[data-test="continue"]`
-- `[data-test="error"]` (error banner text), `[data-test="error-button"]` (dismiss "X")
-- Confirmed error copy: "Error: First Name is required", "Error: Last Name is required", "Error: Postal Code is required". Validation runs top-to-bottom; only the first missing field's error is shown at a time.
-- Known gap: a whitespace-only value (e.g. "   ") in First Name is NOT treated as empty and passes validation.
-
-### Checkout Step Two - Overview (`/checkout-step-two.html`)
-- `[data-test="checkout-summary-container"]`
-- `[data-test="cart-list"]`, `[data-test="item-quantity"]`, `[data-test="inventory-item-name"]`, `[data-test="inventory-item-desc"]`, `[data-test="inventory-item-price"]`
-- `[data-test="payment-info-label"]`, `[data-test="payment-info-value"]` (e.g. "SauceCard #31337")
-- `[data-test="shipping-info-label"]`, `[data-test="shipping-info-value"]` (e.g. "Free Pony Express Delivery!")
-- `[data-test="total-info-label"]`, `[data-test="subtotal-label"]` ("Item total: $X"), `[data-test="tax-label"]` ("Tax: $X"), `[data-test="total-label"]` ("Total: $X")
-- `[data-test="cancel"]`, `[data-test="finish"]`
-
-### Checkout Complete (`/checkout-complete.html`)
-- `[data-test="checkout-complete-container"]`, `[data-test="pony-express"]` (image)
-- `[data-test="complete-header"]` ("Thank you for your order!")
-- `[data-test="complete-text"]` ("Your order has been dispatched, and will arrive just as fast as the pony can get there!")
-- `[data-test="back-to-products"]`, `[data-test="generate-pdf-order"]`
-
-## Confirmed Navigation / Business Rules
-- Cancel on Step One -> returns to `/cart.html`, cart contents preserved.
-- Cancel on Step Two (Overview) -> returns to `/inventory.html`, cart contents preserved (badge count unchanged).
-- Finish on Overview -> navigates to `/checkout-complete.html` AND clears the cart (badge disappears).
-- "Back Home" on the complete page -> returns to `/inventory.html` with an empty cart.
-- The Checkout button and checkout flow remain accessible even when the cart is empty; Overview then shows "Item total: $0" / "Total: $0.00".
+Important actual-behavior findings (deviations from the idealized acceptance criteria that testers should be aware of and that the test plan codifies as expected/actual behavior rather than assumed behavior):
+1. The cart page (`/cart.html`) does not render any subtotal/total text; totals only appear on checkout-step-two. AC1's "sees total" expectation does not hold literally on the cart page in the live app — tests should assert item list + Continue Shopping/Checkout buttons only, and verify totals later on step two.
+2. Cancel behaves differently depending on which checkout step it's clicked from: Cancel on checkout-step-one returns to `/cart.html`; Cancel on checkout-step-two returns to `/inventory.html` (products), not to the cart.
+3. The Checkout button on the cart page is NOT disabled/hidden when the cart is empty — a user can click Checkout, fill valid info, and reach checkout-step-two showing "Item total: $0", "Tax: $0.00", "Total: $0.00", and successfully Finish. This contradicts the "cart cannot be empty" business rule as a hard block; tests should document actual behavior.
+4. Required-field validation only checks for an empty string, not trimmed content — entering a single space (" ") into First Name is accepted as "non-empty" and the form proceeds past validation.
+5. Tax is calculated at 8% of item total, rounded to 2 decimals (e.g. items totaling $39.98 produce Tax: $3.20, Total: $43.18).
+6. Completing checkout clears the cart (badge disappears / shows "Cart, empty") and clicking "Back Home" returns to `/inventory.html`.
 
 ## Test Scenarios
 
@@ -63,304 +41,446 @@ End-to-end checkout workflow covering: Cart Review, Checkout Information entry, 
 
 **Seed:** `apps/saucedemo/seed.spec.ts`
 
-#### 1.1. Cart displays correct item details, quantities, and supports navigation options
+#### 1.1. Cart displays single added item with name, description, price, quantity and action buttons
 
-**File:** `tests/checkout/cart-review.spec.ts`
-
-**Steps:**
-  1. Starting on /inventory.html (logged in), add 'Sauce Labs Backpack' ($29.99) and 'Sauce Labs Bike Light' ($9.99) to the cart using their Add to cart buttons.
-    - expect: The shopping cart badge shows '2'
-  2. Click the shopping cart link/icon in the header.
-    - expect: Page navigates to /cart.html
-    - expect: Page title/header reads 'Your Cart'
-  3. Inspect the cart list rows.
-    - expect: Sauce Labs Backpack row shows quantity '1', its description text, and price '$29.99'
-    - expect: Sauce Labs Bike Light row shows quantity '1', its description text, and price '$9.99'
-    - expect: Both 'Continue Shopping' and 'Checkout' buttons are visible and enabled
-
-#### 1.2. Continue Shopping returns to products page and preserves cart contents
-
-**File:** `tests/checkout/cart-review.spec.ts`
+**File:** `apps/saucedemo/specs/checkout/ac1-cart-review.spec.ts`
 
 **Steps:**
-  1. Add 'Sauce Labs Backpack' to the cart from /inventory.html, then open the cart page.
-    - expect: Cart badge shows '1' and the backpack appears in the cart list
-  2. Click 'Continue Shopping' (data-test=continue-shopping).
-    - expect: Page navigates back to /inventory.html
-    - expect: Cart badge still shows '1', confirming the cart item was not lost
+  1. Start on /inventory.html (seeded, logged in).
+    - expect: Inventory list is visible with 6 products.
+  2. Click [data-test="add-to-cart-sauce-labs-backpack"].
+    - expect: Button changes to 'Remove'.
+    - expect: Cart badge [data-test="shopping-cart-badge"] shows '1'.
+  3. Click [data-test="shopping-cart-link"].
+    - expect: Navigates to /cart.html.
+    - expect: Page header shows 'Your Cart'.
+  4. Inspect the cart row for Sauce Labs Backpack.
+    - expect: [data-test="inventory-item-name"] text is 'Sauce Labs Backpack'.
+    - expect: [data-test="inventory-item-desc"] text matches the product description from inventory.
+    - expect: [data-test="inventory-item-price"] text is '$29.99'.
+    - expect: [data-test="item-quantity"] text is '1'.
+  5. Inspect page-level controls.
+    - expect: [data-test="continue-shopping"] button is visible.
+    - expect: [data-test="checkout"] button is visible.
+    - expect: No subtotal/total element is rendered on this page (confirmed actual app behavior).
 
-#### 1.3. Removing an item from the cart updates the list and badge count
+#### 1.2. Cart displays multiple items each with correct name, description, price, quantity
 
-**File:** `tests/checkout/cart-review.spec.ts`
+**File:** `apps/saucedemo/specs/checkout/ac1-cart-review.spec.ts`
 
 **Steps:**
-  1. Add 'Sauce Labs Backpack' and 'Sauce Labs Bike Light' to the cart, then open /cart.html.
-    - expect: Both items are listed and badge shows '2'
-  2. Click 'Remove' (data-test=remove-sauce-labs-backpack) on the Backpack row.
-    - expect: The Backpack row disappears from the cart list
-    - expect: Only the Bike Light remains
-    - expect: Cart badge updates to '1'
+  1. From /inventory.html, click [data-test="add-to-cart-sauce-labs-backpack"] then [data-test="add-to-cart-sauce-labs-bike-light"].
+    - expect: Cart badge shows '2'.
+  2. Click [data-test="shopping-cart-link"] to open /cart.html.
+    - expect: Two cart item rows are rendered.
+  3. Verify row 1 (Sauce Labs Backpack): name, desc, price '$29.99', qty '1'. Verify row 2 (Sauce Labs Bike Light): name, desc, price '$9.99', qty '1'.
+    - expect: All fields match the product catalog values exactly.
+    - expect: Items appear in the order they were added (or per app's deterministic ordering).
+  4. Confirm [data-test="continue-shopping"] and [data-test="checkout"] are both present and enabled.
+    - expect: Both buttons clickable.
 
-#### 1.4. Checkout button navigates to the Information step, and remains accessible with an empty cart
+#### 1.3. Continue Shopping from cart returns to products page preserving cart contents
 
-**File:** `tests/checkout/cart-review.spec.ts`
+**File:** `apps/saucedemo/specs/checkout/ac1-cart-review.spec.ts`
 
 **Steps:**
-  1. With the cart empty, navigate to /cart.html.
-    - expect: No item rows are rendered
-    - expect: The 'Checkout' button is still visible and enabled
-  2. Click 'Checkout' (data-test=checkout).
-    - expect: Page navigates to /checkout-step-one.html showing the 'Checkout: Your Information' form
+  1. Add Sauce Labs Backpack to cart, navigate to /cart.html via [data-test="shopping-cart-link"].
+    - expect: Cart shows 1 item.
+  2. Click [data-test="continue-shopping"].
+    - expect: URL returns to /inventory.html.
+  3. Click [data-test="shopping-cart-link"] again.
+    - expect: Cart still shows the Sauce Labs Backpack with quantity 1 (cart state preserved across navigation).
 
-### 2. AC2 & AC5 - Checkout Information Entry and Validation
+#### 1.4. Removing an item from the cart page updates the list and badge
+
+**File:** `apps/saucedemo/specs/checkout/ac1-cart-review.spec.ts`
+
+**Steps:**
+  1. Add Sauce Labs Backpack and Sauce Labs Bike Light to cart; open /cart.html.
+    - expect: Two rows visible, badge shows '2'.
+  2. Click [data-test="remove-sauce-labs-backpack"].
+    - expect: Backpack row disappears from the list.
+    - expect: Badge updates to '1' (or disappears to 'Cart, empty' aria if it was the last item).
+  3. Remove the remaining item [data-test="remove-sauce-labs-bike-light"].
+    - expect: Cart list is empty.
+    - expect: Cart badge element [data-test="shopping-cart-badge"] is no longer rendered; cart button aria-label is 'Cart, empty'.
+
+### 2. AC2 - Checkout Information Entry & Validation
 
 **Seed:** `apps/saucedemo/seed.spec.ts`
 
-#### 2.1. Happy path: valid First Name, Last Name, and Zip proceed to Overview
+#### 2.1. Clicking Checkout from cart navigates to checkout-step-one with empty mandatory fields
 
-**File:** `tests/checkout/checkout-info.spec.ts`
-
-**Steps:**
-  1. Add any product to the cart and navigate to /checkout-step-one.html.
-    - expect: Form shows empty First Name, Last Name, and Zip/Postal Code fields plus Cancel/Continue buttons
-  2. Fill First Name = 'John', Last Name = 'Doe', Zip/Postal Code = '12345' (data-test=firstName/lastName/postalCode).
-    - expect: Fields reflect the entered values, no error banner is shown
-  3. Click 'Continue' (data-test=continue).
-    - expect: Page navigates to /checkout-step-two.html ('Checkout: Overview')
-    - expect: No validation error is displayed
-
-#### 2.2. Negative: empty First Name blocks submission with a field-specific error
-
-**File:** `tests/checkout/checkout-info-validation.spec.ts`
+**File:** `apps/saucedemo/specs/checkout/ac2-checkout-information.spec.ts`
 
 **Steps:**
-  1. Navigate to /checkout-step-one.html (with an item in cart). Leave First Name empty, fill Last Name = 'Doe', Zip = '12345'.
-    - expect: Form fields are populated as entered
-  2. Click 'Continue'.
-    - expect: URL remains /checkout-step-one.html (submission blocked)
-    - expect: An error banner (data-test=error) reads 'Error: First Name is required'
+  1. Add an item to cart and go to /cart.html.
+    - expect: Cart has 1 item.
+  2. Click [data-test="checkout"].
+    - expect: URL is /checkout-step-one.html.
+    - expect: Header text is 'Checkout: Your Information'.
+  3. Inspect the form.
+    - expect: [data-test="firstName"] textbox is visible and empty.
+    - expect: [data-test="lastName"] textbox is visible and empty.
+    - expect: [data-test="postalCode"] textbox is visible and empty.
+    - expect: [data-test="cancel"] and [data-test="continue"] buttons are visible.
 
-#### 2.3. Negative: empty Last Name blocks submission with a field-specific error
+#### 2.2. Empty First Name shows required error and blocks progress
 
-**File:** `tests/checkout/checkout-info-validation.spec.ts`
-
-**Steps:**
-  1. Navigate to /checkout-step-one.html (with an item in cart). Fill First Name = 'John', leave Last Name empty, fill Zip = '12345'.
-    - expect: Form fields are populated as entered
-  2. Click 'Continue'.
-    - expect: URL remains /checkout-step-one.html
-    - expect: Error banner reads 'Error: Last Name is required'
-
-#### 2.4. Negative: empty Zip/Postal Code blocks submission with a field-specific error
-
-**File:** `tests/checkout/checkout-info-validation.spec.ts`
+**File:** `apps/saucedemo/specs/checkout/ac2-checkout-information.spec.ts`
 
 **Steps:**
-  1. Navigate to /checkout-step-one.html (with an item in cart). Fill First Name = 'John', Last Name = 'Doe', leave Zip/Postal Code empty.
-    - expect: Form fields are populated as entered
-  2. Click 'Continue'.
-    - expect: URL remains /checkout-step-one.html
-    - expect: Error banner reads 'Error: Postal Code is required'
+  1. Add item to cart, navigate to /checkout-step-one.html via cart > Checkout.
+    - expect: On checkout-step-one.
+  2. Leave [data-test="firstName"] empty. Fill [data-test="lastName"]='Doe' and [data-test="postalCode"]='12345'.
+    - expect: Fields populated as entered.
+  3. Click [data-test="continue"].
+    - expect: URL remains /checkout-step-one.html (no navigation).
+    - expect: Error alert [data-test="error"] is visible with exact text 'Error: First Name is required'.
+    - expect: [data-test="error-button"] dismiss (x) control is visible within the alert.
 
-#### 2.5. Negative: all fields empty surfaces the first missing field's error
+#### 2.3. Empty Last Name shows required error and blocks progress
 
-**File:** `tests/checkout/checkout-info-validation.spec.ts`
-
-**Steps:**
-  1. Navigate to /checkout-step-one.html (with an item in cart) and immediately click 'Continue' without entering any data.
-    - expect: URL remains /checkout-step-one.html
-    - expect: Error banner reads 'Error: First Name is required' (the first field in form order), not a generic or multi-field message
-
-#### 2.6. Error banner can be dismissed via the close (X) control
-
-**File:** `tests/checkout/checkout-info-validation.spec.ts`
+**File:** `apps/saucedemo/specs/checkout/ac2-checkout-information.spec.ts`
 
 **Steps:**
-  1. On /checkout-step-one.html, click 'Continue' with all fields empty to trigger the error banner.
-    - expect: Error banner 'Error: First Name is required' is visible with a dismiss button (data-test=error-button)
-  2. Click the dismiss (X) button on the error banner.
-    - expect: The error banner is no longer visible
-    - expect: Form fields remain editable and empty
-  3. Fill all three fields with valid data and click Continue again.
-    - expect: Page proceeds to /checkout-step-two.html successfully
+  1. Add item to cart, navigate to /checkout-step-one.html.
+    - expect: On checkout-step-one.
+  2. Fill [data-test="firstName"]='John'. Leave [data-test="lastName"] empty. Fill [data-test="postalCode"]='12345'.
+    - expect: Fields populated as entered.
+  3. Click [data-test="continue"].
+    - expect: URL remains /checkout-step-one.html.
+    - expect: Error alert [data-test="error"] text is exactly 'Error: Last Name is required'.
 
-#### 2.7. Sequential correction: fixing one invalid field at a time reveals the next required field error
+#### 2.4. Empty Postal/Zip Code shows required error and blocks progress
 
-**File:** `tests/checkout/checkout-info-validation.spec.ts`
-
-**Steps:**
-  1. On /checkout-step-one.html with all fields empty, click Continue.
-    - expect: Error: 'Error: First Name is required' is shown
-  2. Fill First Name = 'John' only, click Continue again.
-    - expect: Error updates to 'Error: Last Name is required'
-  3. Fill Last Name = 'Doe', leave Zip empty, click Continue again.
-    - expect: Error updates to 'Error: Postal Code is required'
-  4. Fill Zip = '12345' and click Continue.
-    - expect: Page proceeds successfully to /checkout-step-two.html
-
-#### 2.8. Edge case: whitespace-only First Name is accepted (documents current validation gap)
-
-**File:** `tests/checkout/checkout-info-edgecases.spec.ts`
+**File:** `apps/saucedemo/specs/checkout/ac2-checkout-information.spec.ts`
 
 **Steps:**
-  1. On /checkout-step-one.html, fill First Name with only spaces ('   '), Last Name = 'Doe', Zip = '12345'.
-    - expect: Fields show the entered values
-  2. Click 'Continue'.
-    - expect: Current behavior: the app treats the whitespace value as non-empty and navigates to /checkout-step-two.html (no 'required' error is raised). Flag this as a known validation gap if stricter trimming is expected by the business.
+  1. Add item to cart, navigate to /checkout-step-one.html.
+    - expect: On checkout-step-one.
+  2. Fill [data-test="firstName"]='John' and [data-test="lastName"]='Doe'. Leave [data-test="postalCode"] empty.
+    - expect: Fields populated as entered.
+  3. Click [data-test="continue"].
+    - expect: URL remains /checkout-step-one.html.
+    - expect: Error alert [data-test="error"] text is exactly 'Error: Postal Code is required'.
 
-#### 2.9. Edge case: special characters and long values are accepted in text fields
+#### 2.5. All fields empty shows First Name required error (validation order)
 
-**File:** `tests/checkout/checkout-info-edgecases.spec.ts`
+**File:** `apps/saucedemo/specs/checkout/ac2-checkout-information.spec.ts`
 
 **Steps:**
-  1. On /checkout-step-one.html, fill First Name = "O'Brien-Test123", Last Name = a 100-character string, Zip = 'AB-123 456'.
-    - expect: Fields accept and display the entered values without truncation errors
-  2. Click 'Continue'.
-    - expect: Page proceeds to /checkout-step-two.html (no client-side format validation blocks special characters or long strings)
+  1. Add item to cart, navigate to /checkout-step-one.html. Leave all three fields empty.
+    - expect: Form is blank.
+  2. Click [data-test="continue"] immediately.
+    - expect: Error alert text is exactly 'Error: First Name is required' (confirms validation checks firstName first).
 
-### 3. AC3 - Order Overview
+#### 2.6. Dismissing the error alert clears the message without losing already-entered data
+
+**File:** `apps/saucedemo/specs/checkout/ac2-checkout-information.spec.ts`
+
+**Steps:**
+  1. Add item to cart, navigate to /checkout-step-one.html. Click [data-test="continue"] with empty form.
+    - expect: Error alert 'Error: First Name is required' is visible.
+  2. Click [data-test="error-button"] (dismiss / x icon inside the alert).
+    - expect: Error alert [data-test="error"] is no longer present in the DOM/visible.
+    - expect: Form fields remain as previously entered (empty in this case).
+
+#### 2.7. Re-submitting after fixing one field at a time progresses through each validation error sequentially
+
+**File:** `apps/saucedemo/specs/checkout/ac2-checkout-information.spec.ts`
+
+**Steps:**
+  1. Add item to cart, go to /checkout-step-one.html. Click Continue with all empty.
+    - expect: Error: 'Error: First Name is required'.
+  2. Fill firstName='John'. Click Continue again.
+    - expect: Error updates to 'Error: Last Name is required'.
+  3. Fill lastName='Doe'. Click Continue again.
+    - expect: Error updates to 'Error: Postal Code is required'.
+  4. Fill postalCode='12345'. Click Continue again.
+    - expect: Navigation succeeds to /checkout-step-two.html; no error shown.
+
+#### 2.8. Whitespace-only value in a required field bypasses required validation (edge case / actual-behavior)
+
+**File:** `apps/saucedemo/specs/checkout/ac2-checkout-information.spec.ts`
+
+**Steps:**
+  1. Add item to cart, go to /checkout-step-one.html.
+    - expect: On checkout-step-one.
+  2. Fill [data-test="firstName"] with a single space ' '. Fill [data-test="lastName"]='Tester' and [data-test="postalCode"]='11111'.
+    - expect: Fields contain entered values.
+  3. Click [data-test="continue"].
+    - expect: Navigation succeeds to /checkout-step-two.html (documents that required-check only tests for empty string, not trimmed content — not a hard block in the live app).
+
+#### 2.9. Special characters and unicode in Name/Postal fields are accepted
+
+**File:** `apps/saucedemo/specs/checkout/ac2-checkout-information.spec.ts`
+
+**Steps:**
+  1. Add item to cart, go to /checkout-step-one.html.
+    - expect: On checkout-step-one.
+  2. Fill [data-test="firstName"]="Jean-Luc O'Brien 测试", [data-test="lastName"]="Müller-Schmidt #2", [data-test="postalCode"]="A1B 2C3".
+    - expect: Fields accept and display the entered special characters.
+  3. Click [data-test="continue"].
+    - expect: No validation error is shown.
+    - expect: Navigation succeeds to /checkout-step-two.html.
+
+#### 2.10. Very long input values in Name/Postal fields are accepted without truncation error
+
+**File:** `apps/saucedemo/specs/checkout/ac2-checkout-information.spec.ts`
+
+**Steps:**
+  1. Add item to cart, go to /checkout-step-one.html.
+    - expect: On checkout-step-one.
+  2. Fill firstName and lastName with 100-character strings (e.g. repeated 'A'), postalCode with a 20-character numeric string.
+    - expect: Fields accept the long values (verify no character limit truncation causes mismatch, or note the max length if the app enforces one).
+  3. Click [data-test="continue"].
+    - expect: No validation error related to length; navigation proceeds to /checkout-step-two.html.
+
+#### 2.11. Cancel on checkout-step-one returns user to the cart page
+
+**File:** `apps/saucedemo/specs/checkout/ac2-checkout-information.spec.ts`
+
+**Steps:**
+  1. Add item to cart, go to /checkout-step-one.html.
+    - expect: On checkout-step-one.
+  2. Optionally partially fill firstName only. Click [data-test="cancel"].
+    - expect: URL returns to /cart.html.
+    - expect: The previously added cart item is still present (cart state unaffected by cancel).
+
+### 3. AC3 - Order Overview (checkout-step-two)
 
 **Seed:** `apps/saucedemo/seed.spec.ts`
 
-#### 3.1. Overview page shows item summary, payment/shipping info, and correct subtotal/tax/total
+#### 3.1. Valid info submission navigates to Overview and displays correct item summary
 
-**File:** `tests/checkout/order-overview.spec.ts`
-
-**Steps:**
-  1. Add 'Sauce Labs Backpack' ($29.99) to the cart, go to /checkout-step-one.html, fill valid First Name/Last Name/Zip, and click Continue.
-    - expect: Page navigates to /checkout-step-two.html ('Checkout: Overview')
-  2. Inspect the item summary section.
-    - expect: Row shows quantity '1', 'Sauce Labs Backpack' name, its description, and price '$29.99'
-  3. Inspect the Payment Information and Shipping Information sections.
-    - expect: Payment Information shows a value like 'SauceCard #31337'
-    - expect: Shipping Information shows 'Free Pony Express Delivery!'
-  4. Inspect the Price Total section.
-    - expect: 'Item total: $29.99' is shown
-    - expect: 'Tax: $2.40' is shown
-    - expect: 'Total: $32.39' is shown (item total + tax)
-    - expect: Both 'Cancel' and 'Finish' buttons are visible and enabled
-
-#### 3.2. Overview totals correctly aggregate multiple cart items
-
-**File:** `tests/checkout/order-overview.spec.ts`
+**File:** `apps/saucedemo/specs/checkout/ac3-order-overview.spec.ts`
 
 **Steps:**
-  1. Add 'Sauce Labs Backpack' ($29.99) and 'Sauce Labs Bike Light' ($9.99) to the cart and proceed through checkout info with valid data to reach /checkout-step-two.html.
-    - expect: Both items are listed in the overview with correct individual prices
-  2. Inspect the Item total line.
-    - expect: Item total equals $39.98 (sum of both item prices)
-  3. Inspect the Tax and Total lines.
-    - expect: Tax is calculated as a percentage of the item total
-    - expect: Total equals Item total + Tax, displayed to 2 decimal places
+  1. Add Sauce Labs Backpack ($29.99) and Sauce Labs Bike Light ($9.99) to cart. Go to /cart.html then click [data-test="checkout"].
+    - expect: On /checkout-step-one.html.
+  2. Fill firstName='Jane', lastName='Smith', postalCode='90210'. Click [data-test="continue"].
+    - expect: URL is /checkout-step-two.html.
+    - expect: Header text is 'Checkout: Overview'.
+  3. Inspect item rows in [data-test="cart-list"].
+    - expect: Two rows shown: Sauce Labs Backpack (qty 1, $29.99) and Sauce Labs Bike Light (qty 1, $9.99), each with name and description matching the product catalog.
+    - expect: No 'Remove' buttons are present on this summary (read-only view).
 
-#### 3.3. Edge case: Overview with an empty cart shows zeroed totals
+#### 3.2. Overview page displays Payment and Shipping information
 
-**File:** `tests/checkout/order-overview.spec.ts`
+**File:** `apps/saucedemo/specs/checkout/ac3-order-overview.spec.ts`
 
 **Steps:**
-  1. With the cart empty, navigate directly to /checkout-step-one.html, fill valid First Name/Last Name/Zip, and click Continue.
-    - expect: Page proceeds to /checkout-step-two.html despite no items in cart
-  2. Inspect the item list and totals.
-    - expect: No item rows are rendered
-    - expect: 'Item total: $0' is shown
-    - expect: 'Total: $0.00' is shown
-    - expect: 'Finish' button is still enabled
+  1. Add one item to cart and complete checkout-step-one with valid data to reach /checkout-step-two.html.
+    - expect: On Overview page.
+  2. Inspect [data-test="payment-info-label"] and [data-test="payment-info-value"].
+    - expect: Label text 'Payment Information:'.
+    - expect: Value text 'SauceCard #31337'.
+  3. Inspect [data-test="shipping-info-label"] and [data-test="shipping-info-value"].
+    - expect: Label text 'Shipping Information:'.
+    - expect: Value text 'Free Pony Express Delivery!'.
+
+#### 3.3. Overview page computes subtotal, tax (8%), and total correctly for multiple items
+
+**File:** `apps/saucedemo/specs/checkout/ac3-order-overview.spec.ts`
+
+**Steps:**
+  1. Add Sauce Labs Backpack ($29.99) and Sauce Labs Bike Light ($9.99) to cart (expected item total $39.98). Complete checkout-step-one with valid data.
+    - expect: On /checkout-step-two.html.
+  2. Read [data-test="subtotal-label"].
+    - expect: Text is exactly 'Item total: $39.98'.
+  3. Read [data-test="tax-label"].
+    - expect: Text is exactly 'Tax: $3.20' (8% of $39.98 = $3.1984, rounded to $3.20).
+  4. Read [data-test="total-label"].
+    - expect: Text is exactly 'Total: $43.18' (= item total + tax).
+
+#### 3.4. Overview page shows Cancel and Finish buttons
+
+**File:** `apps/saucedemo/specs/checkout/ac3-order-overview.spec.ts`
+
+**Steps:**
+  1. Complete checkout-step-one with valid data for a cart with 1 item.
+    - expect: On /checkout-step-two.html.
+  2. Verify presence of [data-test="cancel"] and [data-test="finish"] buttons.
+    - expect: Both buttons are visible and enabled.
+
+#### 3.5. Cancel on checkout-step-two returns to the Products page (not the cart)
+
+**File:** `apps/saucedemo/specs/checkout/ac3-order-overview.spec.ts`
+
+**Steps:**
+  1. Add item to cart and complete checkout-step-one with valid data to reach /checkout-step-two.html.
+    - expect: On Overview page.
+  2. Click [data-test="cancel"].
+    - expect: URL is /inventory.html (Products page) — this differs from step-one's Cancel which returns to /cart.html.
+    - expect: Cart badge still reflects the previously added item (order was not completed, so cart is retained).
+
+#### 3.6. Single-item order overview math sanity check
+
+**File:** `apps/saucedemo/specs/checkout/ac3-order-overview.spec.ts`
+
+**Steps:**
+  1. Add only Sauce Labs Onesie ($7.99) to cart, complete checkout-step-one with valid data.
+    - expect: On /checkout-step-two.html.
+  2. Read subtotal/tax/total labels.
+    - expect: Item total: $7.99.
+    - expect: Tax equals 8% of $7.99 rounded to 2 decimals ($0.64).
+    - expect: Total equals $8.63 (sum of the two).
 
 ### 4. AC4 - Order Completion
 
 **Seed:** `apps/saucedemo/seed.spec.ts`
 
-#### 4.1. Clicking Finish completes the order, shows the confirmation message, and clears the cart
+#### 4.1. End-to-end happy path: single item checkout completes successfully
 
-**File:** `tests/checkout/order-completion.spec.ts`
-
-**Steps:**
-  1. Add 'Sauce Labs Backpack' to the cart and complete the checkout info form with valid data to reach /checkout-step-two.html.
-    - expect: Overview page is displayed with the backpack listed
-  2. Click 'Finish' (data-test=finish).
-    - expect: Page navigates to /checkout-complete.html
-    - expect: Header (data-test=complete-header) reads 'Thank you for your order!'
-    - expect: Body text (data-test=complete-text) reads 'Your order has been dispatched, and will arrive just as fast as the pony can get there!'
-    - expect: A pony express image (data-test=pony-express) is visible
-    - expect: 'Back Home' button (data-test=back-to-products) is visible
-  3. Check the header cart icon.
-    - expect: The shopping cart badge is no longer present (cart has been cleared)
-
-#### 4.2. Back Home button returns to the products page with an empty cart
-
-**File:** `tests/checkout/order-completion.spec.ts`
+**File:** `apps/saucedemo/specs/checkout/ac4-order-completion.spec.ts`
 
 **Steps:**
-  1. Complete a full checkout (add item, fill info, finish) to reach /checkout-complete.html.
-    - expect: Confirmation page is shown
-  2. Click 'Back Home' (data-test=back-to-products).
-    - expect: Page navigates to /inventory.html
-    - expect: Cart badge is absent, confirming the cart remains empty after order completion
+  1. From /inventory.html, click [data-test="add-to-cart-sauce-labs-backpack"].
+    - expect: Cart badge shows '1'.
+  2. Click [data-test="shopping-cart-link"], then [data-test="checkout"].
+    - expect: On /checkout-step-one.html.
+  3. Fill firstName='John', lastName='Doe', postalCode='12345'. Click [data-test="continue"].
+    - expect: On /checkout-step-two.html showing 1 item, Item total: $29.99, Tax: $2.40, Total: $32.39.
+  4. Click [data-test="finish"].
+    - expect: URL is /checkout-complete.html.
+    - expect: Header 'Checkout: Complete!' is shown.
+  5. Inspect completion content.
+    - expect: [data-test="complete-header"] text is 'Thank you for your order!'.
+    - expect: [data-test="complete-text"] text is 'Your order has been dispatched, and will arrive just as fast as the pony can get there!'.
+    - expect: [data-test="pony-express"] image is visible.
+    - expect: [data-test="back-to-products"] button ('Back Home') is visible.
 
-### 5. Navigation Flow - Cancel, Back, and End-to-End Happy Path
+#### 4.2. End-to-end happy path: multiple items checkout completes successfully
+
+**File:** `apps/saucedemo/specs/checkout/ac4-order-completion.spec.ts`
+
+**Steps:**
+  1. Add Sauce Labs Backpack, Sauce Labs Bike Light, and Sauce Labs Bolt T-Shirt to cart.
+    - expect: Cart badge shows '3'.
+  2. Go to /cart.html, verify 3 rows, click [data-test="checkout"].
+    - expect: On /checkout-step-one.html.
+  3. Fill valid firstName/lastName/postalCode, click [data-test="continue"].
+    - expect: On /checkout-step-two.html with 3 item rows and correct Item total/Tax/Total ($55.97 / $4.48 / $60.45).
+  4. Click [data-test="finish"].
+    - expect: On /checkout-complete.html with success message.
+
+#### 4.3. Back Home button navigates to Products page after completion
+
+**File:** `apps/saucedemo/specs/checkout/ac4-order-completion.spec.ts`
+
+**Steps:**
+  1. Complete a full checkout for 1 item to reach /checkout-complete.html.
+    - expect: Completion page visible.
+  2. Click [data-test="back-to-products"].
+    - expect: URL is /inventory.html.
+    - expect: Products grid is visible again.
+
+#### 4.4. Cart is cleared after order completion
+
+**File:** `apps/saucedemo/specs/checkout/ac4-order-completion.spec.ts`
+
+**Steps:**
+  1. Add 2 items to cart, complete checkout through Finish to reach /checkout-complete.html.
+    - expect: [data-test="shopping-cart-badge"] is not present on the completion page; cart button aria-label is 'Cart, empty'.
+  2. Click [data-test="back-to-products"] to return to /inventory.html.
+    - expect: All Add to cart buttons read 'Add to cart' again (no items remain 'Remove').
+    - expect: Cart badge remains absent / 'Cart, empty'.
+  3. Navigate directly to [data-test="shopping-cart-link"] > /cart.html.
+    - expect: Cart list is empty; no item rows rendered.
+
+#### 4.5. Generate PDF order control is present on completion page (non-blocking UI check)
+
+**File:** `apps/saucedemo/specs/checkout/ac4-order-completion.spec.ts`
+
+**Steps:**
+  1. Complete a checkout to reach /checkout-complete.html.
+    - expect: Completion page visible.
+  2. Verify [data-test="generate-pdf-order"] button is present alongside [data-test="back-to-products"].
+    - expect: Button is visible (click behavior out of scope for this story; presence only).
+
+### 5. AC5 / Business Rules - Edge Cases, Navigation, and Error Handling
 
 **Seed:** `apps/saucedemo/seed.spec.ts`
 
-#### 5.1. End-to-end happy path: Inventory to Cart to Info to Overview to Completion
+#### 5.1. Checkout button remains accessible with an empty cart and overview shows $0 totals (actual-behavior edge case)
 
-**File:** `tests/checkout/e2e-happy-path.spec.ts`
-
-**Steps:**
-  1. From /inventory.html, add 'Sauce Labs Backpack' and 'Sauce Labs Bike Light' to the cart.
-    - expect: Cart badge shows '2'
-  2. Open the cart via the cart icon.
-    - expect: Both items are listed on /cart.html with correct details
-  3. Click 'Checkout'.
-    - expect: Page navigates to /checkout-step-one.html
-  4. Fill First Name = 'Jane', Last Name = 'Smith', Zip = '94107', then click 'Continue'.
-    - expect: Page navigates to /checkout-step-two.html showing both items, payment/shipping info, and correct totals
-  5. Click 'Finish'.
-    - expect: Page navigates to /checkout-complete.html with the 'Thank you for your order!' confirmation and cleared cart
-  6. Click 'Back Home'.
-    - expect: Page returns to /inventory.html with an empty cart, ready for a new order
-
-#### 5.2. Cancel on Checkout Information page returns to Cart and preserves items
-
-**File:** `tests/checkout/navigation-cancel.spec.ts`
+**File:** `apps/saucedemo/specs/checkout/ac5-edge-cases.spec.ts`
 
 **Steps:**
-  1. Add 'Sauce Labs Backpack' to the cart and navigate to /checkout-step-one.html.
-    - expect: Checkout information form is displayed
-  2. Optionally fill some fields, then click 'Cancel' (data-test=cancel).
-    - expect: Page navigates back to /cart.html
-    - expect: 'Sauce Labs Backpack' is still listed in the cart (no data loss)
+  1. Navigate to /cart.html directly with no items added (fresh seeded state).
+    - expect: Cart list is empty.
+    - expect: [data-test="checkout"] button is still visible and enabled despite empty cart.
+  2. Click [data-test="checkout"].
+    - expect: Navigates to /checkout-step-one.html without any error about an empty cart.
+  3. Fill firstName='Empty', lastName='Cart', postalCode='00000'. Click [data-test="continue"].
+    - expect: Navigates to /checkout-step-two.html.
+    - expect: [data-test="subtotal-label"] text is 'Item total: $0'.
+    - expect: [data-test="tax-label"] text is 'Tax: $0.00'.
+    - expect: [data-test="total-label"] text is 'Total: $0.00'.
+    - expect: No item rows are rendered in the summary.
+  4. Click [data-test="finish"].
+    - expect: Navigates to /checkout-complete.html and shows the standard success message even though the order contained zero items (documents actual app behavior vs. the 'cart cannot be empty' business rule).
 
-#### 5.3. Cancel on Order Overview page returns to Products and preserves cart contents
+#### 5.2. Navigating directly to checkout-step-one URL while logged in and cart has items
 
-**File:** `tests/checkout/navigation-cancel.spec.ts`
-
-**Steps:**
-  1. Add 'Sauce Labs Backpack' to the cart, complete the checkout info form with valid data, and reach /checkout-step-two.html.
-    - expect: Overview page is displayed with the backpack listed
-  2. Click 'Cancel' on the overview page.
-    - expect: Page navigates to /inventory.html (not back to the info form)
-    - expect: Cart badge still shows '1', confirming the order was not submitted and the cart item is preserved
-
-### 6. UI Element Validation
-
-**Seed:** `apps/saucedemo/seed.spec.ts`
-
-#### 6.1. All expected UI elements are present and correctly labeled across the checkout flow
-
-**File:** `tests/checkout/ui-validation.spec.ts`
+**File:** `apps/saucedemo/specs/checkout/ac5-edge-cases.spec.ts`
 
 **Steps:**
-  1. On /cart.html (with at least one item), inspect the page structure.
-    - expect: Column headers 'QTY' and 'Description' are visible
-    - expect: 'Continue Shopping' and 'Checkout' buttons are present with correct, clickable state
-  2. Navigate to /checkout-step-one.html.
-    - expect: Page heading reads 'Checkout: Your Information'
-    - expect: First Name, Last Name, and Zip/Postal Code inputs are present with correct placeholder text
-    - expect: 'Cancel' and 'Continue' buttons are present and enabled
-  3. Complete the form and proceed to /checkout-step-two.html.
-    - expect: Page heading reads 'Checkout: Overview'
-    - expect: Payment Information and Shipping Information section labels are present
-    - expect: Price Total section shows item total, tax, and total labels
-    - expect: 'Cancel' and 'Finish' buttons are present and enabled
-  4. Click 'Finish' to reach /checkout-complete.html.
-    - expect: Confirmation header, body text, pony express image, and 'Back Home' button are all present and visible
+  1. Add an item to cart via inventory page.
+    - expect: Cart badge shows '1'.
+  2. Use browser navigation to go directly to https://www.saucedemo.com/checkout-step-one.html (bypassing the cart page click).
+    - expect: Page loads normally showing the empty information form (app does not block direct URL navigation for a logged-in user).
+
+#### 5.3. Full navigation loop: Products -> Cart -> Checkout Step One -> Cancel -> Cart -> Checkout -> Step Two -> Cancel -> Products
+
+**File:** `apps/saucedemo/specs/checkout/ac5-edge-cases.spec.ts`
+
+**Steps:**
+  1. Add item to cart from /inventory.html.
+    - expect: Cart badge '1'.
+  2. Go to /cart.html via [data-test="shopping-cart-link"].
+    - expect: Cart shows the item.
+  3. Click [data-test="checkout"] to reach /checkout-step-one.html, then click [data-test="cancel"].
+    - expect: Returns to /cart.html; item still present.
+  4. Click [data-test="checkout"] again, fill valid info, click [data-test="continue"] to reach /checkout-step-two.html, then click [data-test="cancel"].
+    - expect: Returns to /inventory.html; item still present in cart (badge '1').
+
+#### 5.4. Item quantity cannot be changed from cart or overview (no quantity input) — UI validation
+
+**File:** `apps/saucedemo/specs/checkout/ac5-edge-cases.spec.ts`
+
+**Steps:**
+  1. Add one item to cart and go to /cart.html.
+    - expect: [data-test="item-quantity"] shows '1' as plain text, not an editable input/select.
+  2. Proceed through checkout to /checkout-step-two.html.
+    - expect: Quantity on the overview page is also plain text '1', confirming quantity is fixed at 1 per add-to-cart action and not adjustable in this flow.
+
+#### 5.5. Attempting checkout while adding the same item twice only reflects one 'Remove' state (no duplicate line, qty stays 1)
+
+**File:** `apps/saucedemo/specs/checkout/ac5-edge-cases.spec.ts`
+
+**Steps:**
+  1. Click [data-test="add-to-cart-sauce-labs-backpack"] once; observe button becomes 'Remove' (data-test becomes remove-sauce-labs-backpack) so a second click is not possible via the same button.
+    - expect: Cart badge shows '1', confirming no duplicate-add path exists through the UI for the same product.
+
+#### 5.6. Error message disappears automatically once valid data is submitted (no stale error on success)
+
+**File:** `apps/saucedemo/specs/checkout/ac5-edge-cases.spec.ts`
+
+**Steps:**
+  1. Add item to cart, go to /checkout-step-one.html, click [data-test="continue"] with empty form.
+    - expect: Error 'Error: First Name is required' visible.
+  2. Fill all three fields with valid data (firstName='Valid', lastName='User', postalCode='54321') and click [data-test="continue"].
+    - expect: Navigation succeeds to /checkout-step-two.html.
+    - expect: No error alert is present anywhere on the new page.
+
+#### 5.7. Returning to checkout-step-one after Cancel from step-two retains or clears previously entered personal info (data retention check)
+
+**File:** `apps/saucedemo/specs/checkout/ac5-edge-cases.spec.ts`
+
+**Steps:**
+  1. Add item to cart, go to /checkout-step-one.html, fill firstName='Retain', lastName='Test', postalCode='99999', click Continue to reach /checkout-step-two.html.
+    - expect: On Overview page.
+  2. Click [data-test="cancel"] to return to /inventory.html, then navigate back to /cart.html > [data-test="checkout"] to reach /checkout-step-one.html again.
+    - expect: Form fields [data-test="firstName"], [data-test="lastName"], [data-test="postalCode"] are empty (fresh form), confirming the app does not persist previously entered info across a cancelled session.
