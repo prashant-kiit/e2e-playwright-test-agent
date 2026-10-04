@@ -51,6 +51,7 @@ apps/<app>/
 | `{BASE_URL}`, `{TARGET_REPO}`, `{TARGET_BRANCH}` | `baseURL`, `targetRepo`, `targetBranch` from `app.json` |
 | `{BRANCH}` | `qa/{STORY_ID}-{SLUG}` |
 | `{PR_TITLE}` | `{STORY_ID}: {STORY_TITLE} E2E test suite` |
+| `{RUN_ID}` | Unattended only: the `Run-ID:` line in the kick-off prompt (e.g. `20261004-180531-saucedemo`). Empty for interactive runs |
 
 Rules that follow from this layout:
 - `npx playwright test {TEST_DIR}` already runs exactly the app's 4 browser projects, so no `--project` filter is needed for the cross-browser run.
@@ -61,16 +62,19 @@ To add a story: drop `<STORY_ID>-<slug>.md` into `apps/<app>/user-stories/`. To 
 
 ### Unattended (batch) runs
 
-`run-stories.sh` starts one headless session per story, several at once, with `Mode: unattended` in the kick-off prompt. All stories in a batch belong to the same app, so parallel runs share one target repo. In that mode:
+`run-stories.sh` starts one headless session per story, several at once, with `Mode: unattended` and a `Run-ID:` line in the kick-off prompt. All stories in a batch belong to the same app, so parallel runs share one target repo. In that mode:
 
 1. **Never ask the user.** Nobody can answer, and asking ends the session. Wherever this prompt says "stop and ask", apply the default below and record it under "Unattended decisions" in the report.
    - Story file not found, or more than one match: end the run with a one-line error. Do nothing else.
-   - `{BRANCH}` already exists in the target repo: use `{BRANCH}-<YYYYMMDD-HHMM>` (UTC) instead.
    - Anything else unclear: make the most conservative choice that lets the run finish, and note it.
-2. **Other stories are running in this repo at the same time.** Write only your own story's files (`{PLAN_FILE}`, `{TEST_DIR}`, `{REPORT_FILE}`, `{EVIDENCE}`). Never edit `playwright.config.ts`, any `app.json`, any seed or another story's files, and never delete other folders (e.g. `test-results/`, `runs/`).
-3. Playwright output goes to the per-story folder in `QA_RUN_DIR` automatically. Run the commands exactly as written in the steps.
-4. Step 7 runs without approval prompts (the batch script allows the GitHub MCP tools).
-5. End with a short summary as your final message: story, app, test counts per browser project, open defects, and the PR URL (or the reason delivery didn't happen). The batch script collects this.
+2. **The run-id makes a rerun safe and traceable.** The script wipes this story's old generated files before restarting it, so you always start clean (never merge leftovers from an earlier attempt). Put the run-id into the artifacts you produce:
+   - a `**Run-ID:** {RUN_ID}` line near the top of `{REPORT_FILE}`,
+   - the same line in the PR body.
+3. **Reuse the stable branch `{BRANCH}` — do not add a run-id or timestamp suffix.** In step 7: if `{BRANCH}` already exists, update it to match the current artifacts (push the files onto it) rather than creating a new branch; if an open PR from `{BRANCH}` already exists, update that PR instead of opening a second one. This keeps one branch and one PR per story across reruns.
+4. **Other stories are running in this repo at the same time.** Write only your own story's files (`{PLAN_FILE}`, `{TEST_DIR}`, `{REPORT_FILE}`, `{EVIDENCE}`). Never edit `playwright.config.ts`, any `app.json`, any seed or another story's files, and never delete other folders (e.g. `test-results/`, `runs/`).
+5. Playwright output goes to the per-story folder in `QA_RUN_DIR` automatically. Run the commands exactly as written in the steps.
+6. Step 7 runs without approval prompts (the batch script allows the GitHub MCP tools).
+7. End with a short summary as your final message: story, app, test counts per browser project, open defects, and the PR URL (or the reason delivery didn't happen). The batch script reads the PR URL from this to mark the story delivered.
 
 ### Fixed conventions
 
@@ -376,8 +380,9 @@ git commands and do not commit to this workspace repository.
    If that push fails because {TARGET_BRANCH} now exists (a parallel run bootstrapped it
    first), skip the bootstrap and continue.
 
-2. Check that {BRANCH} doesn't already exist in the target repo. If it does, stop and
-   ask the user for a new branch name (unattended: append -<YYYYMMDD-HHMM>, UTC). Then create {BRANCH} from {TARGET_BRANCH}.
+2. If {BRANCH} doesn't exist, create it from {TARGET_BRANCH}. If it already exists
+   (e.g. a rerun of this story), reuse it: push the current artifacts onto it, and if an
+   open PR from it already exists, update that PR instead of opening another.
 
 3. Push these files to that branch, at the same paths as in the workspace:
    - {STORY_FILE}

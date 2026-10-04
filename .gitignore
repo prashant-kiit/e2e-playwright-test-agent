@@ -233,3 +233,4 @@ node_modules/
 
 # Batch runs (run-stories.sh): logs and per-story Playwright output
 /runs/
+/.qa-state.json

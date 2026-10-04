@@ -41,14 +41,21 @@ Nothing else changes: `playwright.config.ts` discovers the folder, and the promp
 ./run-stories.sh SCRUM-201 SCRUM-202 SCRUM-205     # specific stories of one app
 ./run-stories.sh practice-target                   # every story of an app
 ./run-stories.sh -j 2 -w 1 saucedemo               # 2 sessions at a time, 1 Playwright worker each
+./run-stories.sh --force SCRUM-201                 # redo a story already marked done
 ./run-stories.sh --dry-run practice-target         # show what would run; costs nothing
 ```
 
 - Defaults: 3 sessions at a time (`-j`), 2 Playwright workers per session (`-w`), sessions started 5 s apart. Each session costs as much as an interactive run.
-- Each session gets `qa_user_prompt.md` with its own `Active story:` line plus `Mode: unattended`. The prompt's "Unattended (batch) runs" rules apply: no questions (safe defaults, recorded in the report), only its own story's files, branch-name collision → timestamp suffix.
+- Each session gets `qa_user_prompt.md` with its own `Active story:`, `Mode: unattended` and `Run-ID:` lines. The prompt's "Unattended (batch) runs" rules apply: no questions (safe defaults, recorded in the report), only its own story's files, and the run-id stamped into the report and PR body.
+- **Reruns are safe (e.g. after a session limit).** State is tracked per story in `.qa-state.json` (git-ignored, survives deleting `runs/`). On a rerun:
+  - a story already **delivered** (PR recorded in state, or its report already committed) is **skipped** — add `--force` to redo it;
+  - any other story has its previous generated files (plan, tests, report, evidence) **wiped, then regenerated from scratch**, so a story's artifacts never mix two runs;
+  - the branch stays `qa/<STORY_ID>-<slug>` and is updated in place (one branch and one PR per story across reruns).
+- Artifacts stay at their stable paths (`apps/<app>/specs|tests|reports/`); the run-id is metadata (in the report, the PR body and `.qa-state.json`), so CI and step 7 are unaffected.
+- The `--dry-run` output shows, per story, whether it would `run` or `skip` and why.
 - **Step 7 is pre-approved** for these sessions (`--allowedTools mcp__github`), so they push and open PRs without asking. Interactive sessions still ask.
 - Sessions share this folder. Each story writes only its own files, and each session's Playwright output goes to `runs/<timestamp>-<app>/<STORY_ID>/` (via `QA_RUN_DIR`), so parallel test runs can't wipe each other.
-- Per story: `session.jsonl` (full transcript, stream-json), `stderr.log`, `result.md` (the session's final summary), `test-results/`, `playwright-report/`. Overall: `runs/<timestamp>-<app>/summary.md` with status, minutes, cost and PR link per story. "finished" means the session ended normally; the PR column and `result.md` show the QA outcome.
+- Per story: `session.jsonl` (full transcript, stream-json), `stderr.log`, `result.md` (the session's final summary), `clean.log` (files wiped before the redo), `test-results/`, `playwright-report/`. Overall: `runs/<timestamp>-<app>/summary.md`, one row per story with status, minutes, cost and PR link. Status: **done** = PR opened; **incomplete** = session ended but no PR (rerun to finish); **failed** = session errored (e.g. hit the limit); **skipped** = already delivered.
 - Headless sessions deny tool calls that aren't allowed in `.claude/settings.json` (or by the script) instead of asking. If a story stalls, search its `session.jsonl` for denied calls.
 - Ctrl-C stops all running sessions. `GITHUB_PAT` is loaded from `.env` if it isn't already set.
 
