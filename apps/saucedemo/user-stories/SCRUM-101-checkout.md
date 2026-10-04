@@ -1,10 +1,10 @@
 # User Story: SCRUM-101 - E-commerce Checkout Process
 
 ## Story Title
-As a customer, I want to complete my purchase through a checkout process so that I can order products online.
+As a customer, I want to complete my purchase through checkout so that I can order products online.
 
 ## Story Description
-Implement a complete checkout flow that allows customers to review their cart, enter shipping information, select payment method, and confirm their order. The checkout process should be intuitive, secure, and provide clear feedback at each step.
+From a cart with items, the customer goes through checkout information, an order overview with totals, and an order confirmation. (Trimmed scope: happy path end to end, plus mandatory-field validation.)
 
 ## Application URL
 https://www.saucedemo.com
@@ -15,62 +15,31 @@ https://www.saucedemo.com
 
 ## Acceptance Criteria
 
-### AC1: Cart Review
-- GIVEN I am a logged-in user with items in my cart
-- WHEN I navigate to the cart page
-- THEN I should see all added items with their details (name, description, price, quantity)
-- AND I should see the total price calculation
-- AND I should have options to continue shopping or proceed to checkout
+### AC1: Complete a Purchase (happy path)
+- GIVEN I am logged in with an item in my cart
+- WHEN I open the cart, click Checkout, enter First Name, Last Name and Zip, click Continue, then click Finish
+- THEN each step should advance (cart → `/checkout-step-one.html` → `/checkout-step-two.html` → `/checkout-complete.html`)
+- AND the overview should show item total, tax and a total equal to item total + tax
+- AND the confirmation page should show "Thank you for your order!" and a Back Home button
+- AND the cart badge should be cleared after completion
 
-### AC2: Checkout Information Entry
-- GIVEN I am on the cart page with items
-- WHEN I click the "Checkout" button
-- THEN I should be redirected to the checkout information page
-- AND I should see form fields for First Name, Last Name, and Zip/Postal Code
-- AND all fields should be mandatory
-- WHEN I leave any field empty and click Continue
-- THEN I should see an error message indicating which field is required
-
-### AC3: Order Overview
-- GIVEN I have entered valid checkout information
-- WHEN I click the "Continue" button
-- THEN I should be redirected to the checkout overview page
-- AND I should see a summary of all items in my order
-- AND I should see payment and shipping information
-- AND I should see the subtotal, tax, and total amount
-- AND I should have options to Cancel or Finish the order
-
-### AC4: Order Completion
-- GIVEN I am on the checkout overview page
-- WHEN I click the "Finish" button
-- THEN I should be redirected to the order confirmation page
-- AND I should see a success message confirming my order
-- AND I should see a "Back Home" button to return to the products page
-
-### AC5: Error Handling
-- GIVEN I am on the checkout information page
-- WHEN I enter invalid data (e.g., special characters, incomplete information)
-- THEN I should see appropriate validation error messages
-- AND I should not be able to proceed until all fields are valid
+### AC2: Mandatory Field Validation (key negative)
+- GIVEN I am on the checkout information page with all fields empty
+- WHEN I click Continue
+- THEN I should see the error "Error: First Name is required" and stay on the page
+- AND filling First Name then continuing with Last Name empty should show "Error: Last Name is required"
 
 ## Business Rules
-1. All checkout form fields are mandatory
-2. Users must be logged in to access checkout
-3. Cart cannot be empty when proceeding to checkout
-4. Order confirmation should clear the cart
-5. Users can cancel checkout at any step and return to cart
+1. All three checkout fields are mandatory
+2. Order confirmation clears the cart
 
 ## Technical Notes
-- Use Playwright for test automation
-- Test across Chrome, Firefox, and Safari browsers
-- Ensure mobile responsiveness in checkout flow
-- Validate all form validation messages
-- Test navigation flow and back button behavior
+- Use Playwright. Locators use `data-test` attributes: `add-to-cart-sauce-labs-backpack`, `shopping-cart-link`, `checkout`, `firstName`, `lastName`, `postalCode`, `continue`, `finish`, `error`, `complete-header`, `back-to-products`, `shopping-cart-badge`
+- Relative URLs (baseURL is in playwright.config.ts)
+- The agent generates and heals on Chromium only to save tokens; the target repo's CI runs the suite on all browser projects
 
 ## Definition of Done
-- [x] All acceptance criteria have test cases
-- [x] Manual exploratory testing completed
-- [x] Automated test scripts created and passing
-- [x] Test results documented
-- [x] Bugs logged for any failures
-- [x] Code committed to repository
+- [ ] Acceptance criteria have test cases
+- [ ] Automated test scripts created and passing on Chromium
+- [ ] Test results documented
+- [ ] Code committed to repository

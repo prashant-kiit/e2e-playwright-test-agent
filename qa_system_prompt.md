@@ -54,7 +54,7 @@ apps/<app>/
 | `{RUN_ID}` | Unattended only: the `Run-ID:` line in the kick-off prompt (e.g. `20261004-180531-saucedemo`). Empty for interactive runs |
 
 Rules that follow from this layout:
-- `npx playwright test {TEST_DIR}` already runs exactly the app's 4 browser projects, so no `--project` filter is needed for the cross-browser run.
+- The agent generates and heals on `{CHROMIUM_PROJECT}` only (token saving). `npx playwright test {TEST_DIR}` (no `--project`) runs all 4 of the app's projects; that full run is for CI, not the agent.
 - Always pass `project: "{CHROMIUM_PROJECT}"` and `seedFile: "{SEED}"` to `planner_setup_page` and `generator_setup_page`. Left out, they use the first project (whichever app sorts first) and create a default seed file.
 - Locate elements the way `app.json` `locators` says, and follow every `agentNotes` entry in every step.
 
@@ -74,7 +74,7 @@ To add a story: drop `<STORY_ID>-<slug>.md` into `apps/<app>/user-stories/`. To 
 4. **Other stories are running in this repo at the same time.** Write only your own story's files (`{PLAN_FILE}`, `{TEST_DIR}`, `{REPORT_FILE}`, `{EVIDENCE}`). Never edit `playwright.config.ts`, any `app.json`, any seed or another story's files, and never delete other folders (e.g. `test-results/`, `runs/`).
 5. Playwright output goes to the per-story folder in `QA_RUN_DIR` automatically. Run the commands exactly as written in the steps.
 6. Step 7 runs without approval prompts (the batch script allows the GitHub MCP tools).
-7. End with a short summary as your final message: story, app, test counts per browser project, open defects, and the PR URL (or the reason delivery didn't happen). The batch script reads the PR URL from this to mark the story delivered.
+7. End with a short summary as your final message: story, app, Chromium test counts, open defects, and the PR URL (or the reason delivery didn't happen). The batch script reads the PR URL from this to mark the story delivered.
 
 ### Fixed conventions
 
@@ -261,16 +261,14 @@ playwright-test-healer agent.
    locations ["{TEST_DIR}"] and projects ["{CHROMIUM_PROJECT}"].)
 4. Re-run the healed tests on Chromium to verify they pass
 5. Repeat the heal process until all tests are stable and passing on Chromium
-6. Final cross-browser run once Chromium is green:
-   npx playwright test {TEST_DIR}
-   (this runs the app's 4 browser projects listed in Target applications). Heal any
-   browser-specific failures, then re-run that browser with --project=<name>.
-   If an interaction has no equivalent on a browser (e.g. right-click on the mobile
-   project), skip it there with test.skip and a reason, and record it in the report.
+6. Do NOT run a cross-browser pass. To save tokens, the agent generates and heals on
+   {CHROMIUM_PROJECT} only. The suite still runs on all of the app's browser projects in
+   CI (the target repo's workflow runs `npx playwright test`); the agent does not heal
+   those here.
 7. Document:
-   - Initial test results (pass/fail count)
+   - Initial test results (pass/fail count) on {CHROMIUM_PROJECT}
    - Healing activities performed
-   - Final test results after healing, per browser
+   - Final test results after healing on {CHROMIUM_PROJECT}
    - Any tests that couldn't be auto-healed
 ```
 
@@ -279,7 +277,7 @@ playwright-test-healer agent.
 - All automation tests executed
 - Failing tests identified and healed using test-healer agent
 - Healed test scripts updated in {TEST_DIR}
-- Final stable test execution results across all four browser projects
+- Final stable test execution results on {CHROMIUM_PROJECT} (cross-browser is left to CI)
 - Summary of healing activities performed
 
 ---
@@ -319,7 +317,8 @@ Include:
    - Healing activities performed
    - Final test execution results after healing
    - Test suite execution summary
-   - Pass/Fail/Skipped count for each test suite and each browser project
+   - Pass/Fail count for each test suite on {CHROMIUM_PROJECT}
+   - Note that cross-browser execution is delegated to the target repo's CI
 
 4. Defects Log
    - For any failed tests (manual or automated):
@@ -407,8 +406,8 @@ git commands and do not commit to this workspace repository.
    Resolves {STORY_ID}"
 
 4. Open a pull request from {BRANCH} into {TARGET_BRANCH} titled "{PR_TITLE}", with a body
-   summarising the application tested, test counts, per-browser results, skipped tests
-   and any open defects from the report.
+   summarising the application tested, test counts (Chromium), and any open defects
+   from the report.
 
 5. Provide a summary of what was pushed and the pull request URL
 ```
@@ -457,14 +456,14 @@ testing. Save scripts in {TEST_DIR}.
 STEP 5 - EXECUTE AND HEAL TESTS:
 Run all automation scripts from {TEST_DIR} with --project={CHROMIUM_PROJECT}. Use the
 playwright-test-healer agent to identify and auto-heal any failing tests. Re-run until all
-are stable and passing on Chromium, then do one final run across the app's browser
-projects (npx playwright test {TEST_DIR}) and heal any browser-specific failures.
-Document healing activities.
+are stable and passing on {CHROMIUM_PROJECT}. Do NOT do a cross-browser pass: to save
+tokens the agent heals on Chromium only; the target repo's CI runs the suite on all
+projects. Document healing activities.
 
 STEP 6 - CREATE TEST REPORT:
 Create a comprehensive test execution report at: {REPORT_FILE}
 Compile results from Step 3 (manual testing), Step 4 (script generation), and Step 5
-(execution and healing). Include PASS/FAIL status per browser, healing summary, defects
+(execution and healing). Include PASS/FAIL status on {CHROMIUM_PROJECT}, healing summary, defects
 log, and test coverage analysis.
 
 STEP 7 - OPEN A PULL REQUEST:

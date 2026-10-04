@@ -30,7 +30,7 @@ The work is done by **Claude Code**, using three Playwright sub-agents (planner,
 1. Copy [apps/_template/](apps/_template/) to `apps/<new-app>/` (lower-case, no spaces; it becomes the project prefix).
 2. Fill in `app.json`: `name`, `baseURL`, `targetRepo`, `targetBranch`, `locators`, `agentNotes`.
 3. Write `seed.spec.ts` (bring the app to the starting state every agent session needs, e.g. logged in).
-4. Add stories as `user-stories/<STORY_ID>-<slug>.md`. Story IDs must be unique across all apps.
+4. Add stories as `user-stories/<STORY_ID>-<slug>.md`. Story IDs must be unique across all apps. Keep each story lean (~2 acceptance criteria: one happy path + one key negative) to control token cost; see `apps/_template/user-stories/`.
 5. Check it: `npx playwright test apps/<new-app>/seed.spec.ts` should pass on the 4 new `<new-app>-*` projects.
 
 Nothing else changes: `playwright.config.ts` discovers the folder, and the prompt derives every path (plan, tests, report, evidence, branch, PR title) from the story file.
@@ -74,7 +74,7 @@ apps/<app>/user-stories/<STORY_ID>-<slug>.md      (+ apps/<app>/app.json)
 │                       (explores the live app in a browser)               │
 │                ──► 3 Exploratory testing (main session, MCP browser tools)│
 │                ──► 4 playwright-test-generator ──► apps/<app>/tests/<slug>/
-│                ──► 5 playwright-test-healer (Chromium loop, then all 4 browsers)
+│                ──► 5 playwright-test-healer (Chromium only; CI runs all 4)       
 │                ──► 6 Report ──► apps/<app>/reports/                      │
 │                ──► 7 GitHub MCP ──► branch + PR in app.json targetRepo   │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -96,7 +96,7 @@ apps/<app>/user-stories/<STORY_ID>-<slug>.md      (+ apps/<app>/app.json)
 | 2 Create test plan | `playwright-test-planner` | `apps/<app>/specs/<STORY_ID>-<slug>-test-plan.md` (scenarios with steps, expected results and the stable locators found) |
 | 3 Exploratory testing | main session + Playwright MCP | Findings, screenshots, the locators that worked |
 | 4 Generate scripts | `playwright-test-generator` | `apps/<app>/tests/<slug>/*.spec.ts`, verified on `<app>-chromium` |
-| 5 Execute and heal | `playwright-test-healer` | Green on Chromium first, then one run on the app's 4 projects with browser-specific fixes |
+| 5 Execute and heal | `playwright-test-healer` | Green on the app's Chromium project. Cross-browser is left to the target repo's CI (token saving) |
 | 6 Report | main session | `apps/<app>/reports/<STORY_ID>-<slug>-test-report.md` (+ `reports/evidence/<STORY_ID>-*.png`) |
 | 7 Deliver | main session + GitHub MCP | Bootstraps the target repo if empty, pushes to `qa/<STORY_ID>-<slug>`, opens a PR into `targetBranch` |
 
@@ -155,6 +155,9 @@ apps/<app>/user-stories/<STORY_ID>-<slug>.md      (+ apps/<app>/app.json)
 `.gitignore` is a large Python template with a Playwright and a Claude Code section appended at the end.
 
 ### Generated test suite (`apps/saucedemo/tests/checkout/`)
+
+> This table describes the **original** SCRUM-101 delivery (22 tests, 4 browsers). The stories have since been trimmed to a lean ~2-AC scope and the agent now generates/heals on Chromium only, so a re-run (`--force`) produces a smaller suite. The table is kept as a reference of the generator's output shape.
+
 
 | File | Tests | Covers |
 |---|---|---|
@@ -329,7 +332,7 @@ These rules are defined in [qa_system_prompt.md](qa_system_prompt.md) step 7. Ke
 2. **If the target repo has no commits**, push one bootstrap commit straight to `targetBranch` containing `package.json`, `package-lock.json`, `playwright.config.ts`, `.gitignore`, `.github/workflows/playwright.yml`, `apps/<app>/app.json` and `apps/<app>/seed.spec.ts`. Commit message: `chore: bootstrap Playwright project`. A PR can't be opened against an empty repo.
 3. Create `qa/<STORY_ID>-<slug>` from `targetBranch`. Stop and ask if it already exists.
 4. Push the story's files (story, plan, tests, report, evidence) at the same paths under `apps/<app>/`. Also push `playwright.config.ts`, `app.json` and the seed if they're missing or differ. Never push another app's folder: the target repo's config then discovers only its own app.
-5. Open a PR into `targetBranch` titled `<STORY_ID>: <story title> E2E test suite`, with test counts, per-browser results and open defects in the body.
+5. Open a PR into `targetBranch` titled `<STORY_ID>: <story title> E2E test suite`, with Chromium test counts and open defects in the body.
 
 App-specific delivery facts live in that app's `agentNotes`. Currently: the SauceDemo repo has history (bootstrap done, PR #1 merged, branch `qa/SCRUM-101-checkout` exists) and still has the pre-refactor paths (`user-stories/scrum-latest.md`, `specs/saucedemo-checkout-test-plan.md`, `tests/seed.spec.ts`, `tests/saucedemo-checkout/`, `reports/SCRUM-101-checkout-test-report.md`), which the next SauceDemo delivery should delete. The Practice Target repo is empty, so its first delivery does the bootstrap.
 
