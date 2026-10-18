@@ -6,13 +6,19 @@ import { Spinner } from "../components.jsx";
 export default function Projects() {
   const [projects, setProjects] = useState(null);
   const [targets, setTargets] = useState([]);
+  const [apps, setApps] = useState({}); // app folder -> { repoUrl }
   const [newProject, setNewProject] = useState("");
   const [error, setError] = useState("");
 
   async function load() {
-    const [p, t] = await Promise.all([api.listProjects(), api.listTargets()]);
+    const [p, t, a] = await Promise.all([
+      api.listProjects(),
+      api.listTargets(),
+      api.listApps().catch(() => []),
+    ]);
     setProjects(p);
     setTargets(t);
+    setApps(Object.fromEntries(a.map((x) => [x.app, x])));
   }
   useEffect(() => {
     load().catch((e) => setError(String(e.message || e)));
@@ -53,6 +59,7 @@ export default function Projects() {
           key={p.id}
           project={p}
           targets={targets.filter((t) => t.project_id === p.id)}
+          apps={apps}
           onChange={load}
         />
       ))}
@@ -60,7 +67,7 @@ export default function Projects() {
   );
 }
 
-function ProjectCard({ project, targets, onChange }) {
+function ProjectCard({ project, targets, apps, onChange }) {
   const [app, setApp] = useState("");
   const [name, setName] = useState("");
   const [error, setError] = useState("");
@@ -83,7 +90,7 @@ function ProjectCard({ project, targets, onChange }) {
       <div className="targets">
         {targets.length === 0 && <p className="muted">No targets yet.</p>}
         {targets.map((t) => (
-          <TargetRow key={t.id} target={t} />
+          <TargetRow key={t.id} target={t} appInfo={apps[t.app]} />
         ))}
       </div>
       <form className="inline-form target-add" onSubmit={addTarget}>
@@ -102,12 +109,23 @@ function ProjectCard({ project, targets, onChange }) {
   );
 }
 
-function TargetRow({ target }) {
+function TargetRow({ target, appInfo }) {
   const navigate = useNavigate();
   const [story, setStory] = useState("");
+  const [stories, setStories] = useState([]);
   const [mode, setMode] = useState("full");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api
+      .listStories(target.app)
+      .then((s) => {
+        setStories(s);
+        if (s.length) setStory(s[0].story_id);
+      })
+      .catch(() => setStories([]));
+  }, [target.app]);
 
   async function start(e) {
     e.preventDefault();
@@ -127,14 +145,31 @@ function TargetRow({ target }) {
     <div className="target-row">
       <div className="target-meta">
         <strong>{target.name}</strong>
-        <code>{target.app}</code>
+        <span className="row-sub">
+          <code>{target.app}</code>
+          {appInfo?.repoUrl && (
+            <a href={appInfo.repoUrl} target="_blank" rel="noreferrer" className="code-link">
+              View target code ↗
+            </a>
+          )}
+        </span>
       </div>
       <form className="inline-form" onSubmit={start}>
-        <input
-          placeholder="story (e.g. SCRUM-201)"
-          value={story}
-          onChange={(e) => setStory(e.target.value)}
-        />
+        {Array.isArray(stories) && stories.length > 0 ? (
+          <select value={story} onChange={(e) => setStory(e.target.value)} title="User story">
+            {stories.map((s) => (
+              <option key={s.story_id} value={s.story_id}>
+                {s.story_id} — {s.title}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            placeholder="story (e.g. SCRUM-201)"
+            value={story}
+            onChange={(e) => setStory(e.target.value)}
+          />
+        )}
         <select value={mode} onChange={(e) => setMode(e.target.value)} title="Test mode">
           <option value="full">Full app</option>
           <option value="changed">Changed only</option>

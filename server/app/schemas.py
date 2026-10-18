@@ -49,6 +49,39 @@ class StepOut(BaseModel):
     finished_at: datetime | None
 
 
+class AppOut(BaseModel):
+    app: str
+    name: str
+    baseURL: str
+    targetRepo: str
+    targetBranch: str
+    repoUrl: str | None
+    storyCount: int
+
+
+class StoryOut(BaseModel):
+    story_id: str
+    slug: str
+    title: str
+    file: str
+
+
+class BootstrapBody(BaseModel):
+    app: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=200)
+    baseURL: str = ""
+    targetRepo: str = ""
+    targetBranch: str = "master"
+    locators: str = ""
+    agentNotes: list[str] = Field(default_factory=list)
+    do_bootstrap: bool = True
+
+
+class PromptOut(BaseModel):
+    name: str
+    content: str
+
+
 class ArtifactOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int

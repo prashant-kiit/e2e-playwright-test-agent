@@ -124,6 +124,21 @@ input:focus, select:focus { border-color: var(--accent); }
 
 .error { background: rgba(239,90,90,.12); border: 1px solid var(--red); color: var(--red); padding: 9px 12px; border-radius: 8px; margin: 8px 0; }
 
+/* M6: row sub-line, settings, bootstrap */
+.row-sub { display: flex; gap: 12px; align-items: center; }
+.row-sub code { color: var(--muted); font-size: 12px; }
+.code-link { font-size: 12px; }
+.banner.success { background: rgba(53,194,138,.12); border-color: var(--green); color: var(--green); }
+.kv { display: grid; grid-template-columns: 180px 1fr; gap: 8px 16px; margin: 0; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; }
+.prompt-list { display: flex; flex-direction: column; gap: 8px; }
+.prompt-head { width: 100%; display: flex; justify-content: space-between; align-items: center; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 10px 12px; border-radius: 8px; cursor: pointer; font: inherit; }
+.form-grid { display: flex; flex-direction: column; gap: 14px; max-width: 520px; }
+.form-grid textarea { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 9px 11px; font: inherit; resize: vertical; }
+.checkbox { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.checkbox input { width: auto; }
+
 @media (max-width: 720px) {
   .layout { grid-template-columns: 1fr; }
   .sidebar { flex-direction: row; align-items: center; }

@@ -49,12 +49,16 @@ services:
       S3_ACCESS_KEY: qa
       S3_SECRET_KEY: qa-secret
       S3_BUCKET: qa-artifacts
+      # The repo is mounted at /workspace so the backend can read apps/ and
+      # prompts/ and bootstrap new targets. Run working-dirs stay on a volume.
+      QA_REPO_ROOT: /workspace
       QA_RUNS_DIR: /data/runs
       # Orchestrator knobs (host-overridable): fake runner by default so the
       # stack runs token-free; QA_FAKE_DELAY slows fake steps for pause demos.
       QA_RUNNER: "${QA_RUNNER:-fake}"
       QA_FAKE_DELAY: "${QA_FAKE_DELAY:-0}"
     volumes:
+      - .:/workspace    # the repo: apps/, prompts/, scripts/ (read + bootstrap)
       - apidata:/data   # per-run working dirs (run logs + Playwright output)
     ports:
       - "8000:8000"
@@ -63,6 +67,16 @@ services:
         condition: service_healthy
       seaweedfs:
         condition: service_healthy
+
+  web:
+    # nginx serves the built SPA and reverse-proxies the API on one origin.
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
 
 volumes:
   pgdata:

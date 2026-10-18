@@ -56,4 +56,11 @@ export const api = {
   stopRun: (id) => req("POST", `/runs/${id}/stop`),
 
   artifactContentUrl: (id) => `/artifacts/${id}/content`,
+
+  // repo introspection + bootstrap + settings
+  listApps: () => req("GET", "/apps"),
+  listStories: (app) => req("GET", `/apps/${app}/stories`),
+  bootstrapApp: (body) => req("POST", "/apps/bootstrap", body),
+  getPrompts: () => req("GET", "/prompts"),
+  getSettings: () => req("GET", "/settings"),
 };

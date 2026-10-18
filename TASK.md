@@ -1,3 +1,19 @@
+# Status
+
+**Admin Portal (M0–M7) implemented** — see [README §0](README.md#0-admin-portal-web-ui).
+A React/FastAPI/Postgres/SeaweedFS portal (Dockerized) now wraps this harness:
+single-operator login, projects/targets, start a run in two modes, live step-level
+progress (SSE) with pause/resume/stop (lease-backed one-run-per-app lock), artifacts
+browsing, run history, bootstrap-a-target form, and a settings/prompts view. The
+orchestrator drives the same per-step Claude Code workflow; run state lives in Postgres
+(replaces `.qa-state.json`), artifacts in SeaweedFS. Backend `uv run pytest` + frontend
+Vitest are green. `QA_RUNNER=fake` by default (no tokens); wiring the real `claude` CLI
+into the run environment and prompt/config write-back from the UI remain open.
+
+The notes below are the original backlog that led here; kept for history.
+
+---
+
 1. Add Git Ignore Content for Current Tech Stack
 2. Use Opencode and OpenAI Model
 3. Move to Sandbox
@@ -71,6 +87,8 @@ custom mcp. legacy cleanup. parallel push may lead to git conflicts.
 there is only batch mode with Human Review
 what is the use playwright-test-report folder and its index.html file
 Add Interactivity in batch flow
+May be build QA optmized coding agetn using Opencode with Playwright agents as the Code not MD
+Remove the artificats from current repo after pushing them to target repo: State -> Repos -> Selective Reset
 
 ```bash
 set -a; source .env; set +a            # loads GITHUB_PAT (if not already set)
