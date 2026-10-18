@@ -15,8 +15,8 @@ The work is done by **Claude Code**, using three Playwright sub-agents (planner,
 | Agent runtime | Claude Code (CLI). OpenCode was used earlier and removed because it hung on complex Playwright work |
 | Test framework | `@playwright/test` ^1.63 (TypeScript, no build step, no `tsconfig`) |
 | Applications under test | One folder per app under [apps/](apps/). Each `apps/<app>/app.json` holds everything app-specific (URL, target repo, locator style, agent notes). Currently:<br>**[saucedemo](apps/saucedemo/)**, `https://www.saucedemo.com` (public demo shop, `standard_user` / `secret_sauce`) → [`prashant-kiit/e2e-playwright-agent-test-target`](https://github.com/prashant-kiit/e2e-playwright-agent-test-target)<br>**[practice-target](apps/practice-target/)**, `https://custom-test-target-app.vercel.app` (static UI sandbox; mock login `demo` / `password123` for `/dashboard` only) → [`prashant-kiit/e2e-playwright-test-custom-target`](https://github.com/prashant-kiit/e2e-playwright-test-custom-target) (still empty; the first run bootstraps it) |
-| Input | One **active story** per run, named in [qa_user_prompt.md](qa_user_prompt.md) (`Active story: SCRUM-xxx`). The app is wherever `apps/*/user-stories/SCRUM-xxx-*.md` lives.<br>saucedemo: **SCRUM-101…107** (checkout, login, product catalog, product details, shopping cart, menu & navigation, dynamic catalog)<br>practice-target: **SCRUM-201…208** (auth, forms, buttons, modals, dropdowns, table, dynamic content, navigation) |
-| Workflow definition | [qa_system_prompt.md](qa_system_prompt.md) (5 working steps + a stop-for-review step; the agent never delivers; all paths derived from the active story); kick-off prompt in [qa_user_prompt.md](qa_user_prompt.md) |
+| Input | One **active story** per run, named in [qa_user_prompt.md](prompts/qa_user_prompt.md) (`Active story: SCRUM-xxx`). The app is wherever `apps/*/user-stories/SCRUM-xxx-*.md` lives.<br>saucedemo: **SCRUM-101…107** (checkout, login, product catalog, product details, shopping cart, menu & navigation, dynamic catalog)<br>practice-target: **SCRUM-201…208** (auth, forms, buttons, modals, dropdowns, table, dynamic content, navigation) |
+| Workflow definition | [qa_system_prompt.md](prompts/qa_system_prompt.md) (5 working steps + a stop-for-review step; the agent never delivers; all paths derived from the active story); kick-off prompt in [qa_user_prompt.md](prompts/qa_user_prompt.md) |
 | This repo | `prashant-kiit/e2e-playwright-test-agent` (default branch `master`) |
 | Current state | Only SCRUM-101 has been run: 22 test cases × 4 browser projects = 88/88 passing, 1 test healed, delivered as PR #1 to the SauceDemo target repo (merged). The other 14 stories have no plans or tests yet |
 
@@ -24,7 +24,7 @@ The work is done by **Claude Code**, using three Playwright sub-agents (planner,
 
 ## 2. Adding or switching an application
 
-**Switch to another story or app:** change the `Active story:` line in [qa_user_prompt.md](qa_user_prompt.md). That's all.
+**Switch to another story or app:** change the `Active story:` line in [qa_user_prompt.md](prompts/qa_user_prompt.md). That's all.
 
 **Add a new app:**
 1. Copy [apps/_template/](apps/_template/) to `apps/<new-app>/` (lower-case, no spaces; it becomes the project prefix).
@@ -46,7 +46,7 @@ Nothing else changes: `playwright.config.ts` discovers the folder, and the promp
 ```
 
 - Defaults: 3 sessions at a time (`-j`), 2 Playwright workers per session (`-w`), sessions started 5 s apart. Each session costs as much as a full agent run (planning + exploration + generation + healing).
-- Each session gets `qa_user_prompt.md` with its own `Active story:`, `Mode: unattended` and `Run-ID:` lines. The prompt's "Run contract" applies: no questions (safe defaults, recorded in the session's final summary), only its own story's files, and no delivery (the agent stops after healing; the run-id is stamped into `.qa-state.json`).
+- Each session gets `prompts/qa_user_prompt.md` with its own `Active story:`, `Mode: unattended` and `Run-ID:` lines. The prompt's "Run contract" applies: no questions (safe defaults, recorded in the session's final summary), only its own story's files, and no delivery (the agent stops after healing; the run-id is stamped into `.qa-state.json`).
 - **Reruns are safe (e.g. after a session limit).** State is tracked per story in `.qa-state.json` (git-ignored, survives deleting `runs/`). On a rerun:
   - a story already **generated** (marked `ready` in state, or whose test suite is already committed) is **skipped** — add `--force` to redo it;
   - any other story has its previous generated files (plan, tests) **wiped, then regenerated from scratch**, so a story's artifacts never mix two runs.
@@ -91,7 +91,7 @@ apps/<app>/user-stories/<STORY_ID>-<slug>.md      (+ apps/<app>/app.json)
 - **Sub-agents can't call other sub-agents.** All hand-offs happen through files on disk (`apps/<app>/specs/`, `tests/`) and through the main session.
 - Steps 2, 4 and 5 are delegated to the sub-agents in [.claude/agents/](.claude/agents/).
 
-### The steps (summary of qa_system_prompt.md)
+### The steps (summary of prompts/qa_system_prompt.md)
 
 Steps 1–6 are the agent's work; it stops at step 6. Delivery is a separate human step (below the table).
 
@@ -144,8 +144,9 @@ Steps 1–6 are the agent's work; it stops at step 6. Delivery is a separate hum
 │       ├── seed.spec.ts                # opens / (not logged in)
 │       └── user-stories/SCRUM-20x-*.md # SCRUM-201…208 (specs/, tests/ appear when run; no agent report)
 ├── playwright.config.ts                # discovers apps/*/app.json → <app>-<browser> projects; timeouts, reporters
-├── qa_system_prompt.md                 # THE workflow: 5 steps + stop-for-review, path conventions
-├── qa_user_prompt.md                   # kick-off prompt: names the active story
+├── prompts/                            # the workflow prompts
+│   ├── qa_system_prompt.md             # THE workflow: 5 steps + stop-for-review, path conventions
+│   └── qa_user_prompt.md               # kick-off prompt: names the active story
 ├── TASK.md                             # the owner's running backlog / roadmap (see §11)
 ├── package.json / package-lock.json    # only devDeps: @playwright/test, @types/node; no npm scripts
 └── LICENSE
@@ -446,7 +447,7 @@ App-specific delivery facts live in that app's `agentNotes`. Currently: the Sauc
 
 ## 12. Rules for agents working in this repo
 
-- Treat [qa_system_prompt.md](qa_system_prompt.md) as the source of truth for the workflow and file paths. If you change the folder convention, update the prompt, the config, `.claude/settings.json` permissions and this README together.
+- Treat [qa_system_prompt.md](prompts/qa_system_prompt.md) as the source of truth for the workflow and file paths. If you change the folder convention, update the prompt, the config, `.claude/settings.json` permissions and this README together.
 - Don't hard-code secrets. `GITHUB_PAT` comes from the environment only.
 - Keep the action/navigation timeouts. App-specific settings belong in `apps/<app>/app.json`, never in the config or the prompt.
 - Generated artifacts belong in `apps/<app>/specs/` and `apps/<app>/tests/<slug>/`. The results report is generated by CI (§4.5), not written here. Don't hand-edit generated tests unless you're acting as the healer.

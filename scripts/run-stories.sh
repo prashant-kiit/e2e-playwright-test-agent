@@ -18,8 +18,8 @@
 # mix two runs. Use --force to redo a skipped story. .qa-state.json tracks, per story, the last
 # run-id and status.
 #
-# Each session gets the kick-off prompt from qa_user_prompt.md with its own "Active story:",
-# "Mode: unattended" and "Run-ID:" lines (see "Unattended (batch) runs" in qa_system_prompt.md).
+# Each session gets the kick-off prompt from prompts/qa_user_prompt.md with its own "Active story:",
+# "Mode: unattended" and "Run-ID:" lines (see "Run contract" in prompts/qa_system_prompt.md).
 # Artifacts stay at stable paths (apps/<app>/specs|tests); the run-id is metadata only.
 # The batch refuses to start unless the app's target repo is already bootstrapped
 # (./scripts/check-bootstrapped.sh); if not, run ./scripts/bootstrap-target.sh <app> first.
@@ -105,7 +105,7 @@ RUN_ID="$(basename "$RUN_ROOT")"
 
 kickoff_for() { # $1=STORY_ID
   printf 'Mode: unattended\nRun-ID: %s\n' "$RUN_ID"
-  sed -E "s/^Active story:.*/Active story: $1/" qa_user_prompt.md
+  sed -E "s/^Active story:.*/Active story: $1/" prompts/qa_user_prompt.md
 }
 
 state_get() { jq -r --arg id "$1" ".[\$id].$2 // \"\"" "$STATE_FILE" 2>/dev/null; }
