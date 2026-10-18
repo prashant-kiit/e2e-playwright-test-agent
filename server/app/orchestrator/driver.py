@@ -46,6 +46,18 @@ def run_pipeline(
     emit(f"=== run {run_key} started (begin at {start.value}) ===")
 
     for step in STEP_ORDER[step_index(start):]:
+        # Honour pause/stop requests at the step boundary (step-level granularity).
+        with session_factory() as s:
+            run = repo.get_run(s, run_id)
+            if run.stop_requested:
+                repo.stop_run(s, run_id)
+                emit(f"=== run {run_key} stopped ===")
+                return
+            if run.pause_requested:
+                repo.pause_run(s, run_id)
+                emit(f"=== run {run_key} paused (resume to continue at {step.value}) ===")
+                return
+
         emit(f"=== step: {step.value} ===")
         with session_factory() as s:
             repo.start_step(s, run_id, step)

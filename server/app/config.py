@@ -34,3 +34,12 @@ def runner_kind() -> str:
     (wired in a later milestone), and a safe default avoids accidental token
     spend. Set QA_RUNNER=claude where the CLI and repo are available."""
     return os.environ.get("QA_RUNNER", "fake").lower()
+
+
+def fake_delay() -> float:
+    """Seconds the FakeRunner sleeps per emitted line. 0 by default; raise it
+    (e.g. QA_FAKE_DELAY=1) to make runs slow enough to pause/stop in a demo."""
+    try:
+        return float(os.environ.get("QA_FAKE_DELAY", "0"))
+    except ValueError:
+        return 0.0

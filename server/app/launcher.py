@@ -19,7 +19,9 @@ from .orchestrator.runner import Runner
 
 
 def make_runner() -> Runner:
-    return FakeRunner() if config.runner_kind() == "fake" else ClaudeRunner()
+    if config.runner_kind() == "fake":
+        return FakeRunner(delay=config.fake_delay())
+    return ClaudeRunner()
 
 
 def launch_run(run_id: int) -> None:

@@ -172,6 +172,8 @@ def reap_expired(session: Session, now: datetime | None = None) -> list[int]:
     ).all()
     for lock in locks:
         run = session.get(Run, lock.run_id)
+        if run is not None and run.status is RunStatus.PAUSED:
+            continue  # a deliberate pause holds the lock; it is not a crash
         if run is not None and is_live(run.status):
             _fail_and_release(session, run, "lease expired (reaped)")
             reaped.append(run.id)
@@ -288,6 +290,74 @@ def fail_run(session: Session, run_id: int, reason: str) -> Run:
     session.commit()
     session.refresh(run)
     return run
+
+
+def request_pause(session: Session, run_id: int) -> Run:
+    """Ask a running run to pause at its next step boundary (no-op otherwise)."""
+    run = get_run(session, run_id)
+    if run.status is RunStatus.RUNNING:
+        run.pause_requested = True
+        session.commit()
+        session.refresh(run)
+    return run
+
+
+def request_stop(session: Session, run_id: int) -> Run:
+    """Ask a run to stop. A RUNNING run stops at its next boundary (flag only);
+    a PENDING or PAUSED run has no live thread, so it stops immediately."""
+    run = get_run(session, run_id)
+    run.stop_requested = True
+    if run.status in (RunStatus.PENDING, RunStatus.PAUSED):
+        _stop(session, run)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def pause_run(session: Session, run_id: int) -> Run:
+    """Driver-side: transition RUNNING -> PAUSED at a boundary. The app lock is
+    kept (the run still owns the app) but the lease is cleared, and the reaper
+    skips PAUSED runs, so a deliberate pause is never mistaken for a crash."""
+    run = get_run(session, run_id)
+    assert_transition(run.status, RunStatus.PAUSED)
+    run.status = RunStatus.PAUSED
+    run.pause_requested = False
+    run.lease_expires_at = None
+    run.current_step = None
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def stop_run(session: Session, run_id: int) -> Run:
+    """Driver-side: transition a live run -> STOPPED and release its app lock."""
+    run = get_run(session, run_id)
+    _stop(session, run)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def resume_run(session: Session, run_id: int) -> Run:
+    """Clear a paused run's flags so a fresh orchestrator can re-begin it.
+    The actual PAUSED -> RUNNING transition happens in begin_run."""
+    run = get_run(session, run_id)
+    if run.status is not RunStatus.PAUSED:
+        raise RepoError(f"run {run_id} is {run.status.value}, not paused; cannot resume")
+    run.pause_requested = False
+    run.stop_requested = False
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def _stop(session: Session, run: Run) -> None:
+    assert_transition(run.status, RunStatus.STOPPED)
+    run.status = RunStatus.STOPPED
+    run.stop_requested = False
+    run.current_step = None
+    run.lease_expires_at = None
+    _release_lock(session, run)
 
 
 def _touch_lease(session: Session, run: Run, now: datetime) -> None:

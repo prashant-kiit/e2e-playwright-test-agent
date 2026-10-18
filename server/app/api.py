@@ -97,6 +97,38 @@ def get_run(run_id: int, session: Session = Depends(get_session)):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/runs/{run_id}/pause", response_model=RunOut)
+def pause_run(run_id: int, session: Session = Depends(get_session)):
+    try:
+        return repo.request_pause(session, run_id)
+    except repo.NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/stop", response_model=RunOut)
+def stop_run(run_id: int, session: Session = Depends(get_session)):
+    try:
+        return repo.request_stop(session, run_id)
+    except repo.NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/runs/{run_id}/resume", response_model=RunOut)
+def resume_run(
+    run_id: int,
+    session: Session = Depends(get_session),
+    launcher: Callable[[int], None] = Depends(get_launcher),
+):
+    try:
+        run = repo.resume_run(session, run_id)
+    except repo.NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except repo.RepoError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    launcher(run.id)  # a fresh orchestrator re-begins from the last checkpoint
+    return run
+
+
 @router.get("/runs/{run_id}/steps", response_model=list[StepOut])
 def get_run_steps(run_id: int, session: Session = Depends(get_session)):
     try:

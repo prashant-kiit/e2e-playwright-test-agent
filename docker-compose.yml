@@ -25,6 +25,10 @@ services:
       dockerfile: docker/Dockerfile.server
     environment:
       DATABASE_URL: postgresql+psycopg://qa:qa@postgres:5432/qa
+      # Orchestrator knobs (host-overridable): fake runner by default so the
+      # stack runs token-free; QA_FAKE_DELAY slows fake steps for pause demos.
+      QA_RUNNER: "${QA_RUNNER:-fake}"
+      QA_FAKE_DELAY: "${QA_FAKE_DELAY:-0}"
     ports:
       - "8000:8000"
     depends_on:

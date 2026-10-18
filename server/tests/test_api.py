@@ -114,6 +114,48 @@ def test_run_steps_endpoint(client, session):
     assert steps[0]["status"] == "completed"
 
 
+def test_pause_sets_flag_on_running_run(client, session):
+    from app import repo
+
+    _, tid = _make_target(client)
+    run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
+    repo.begin_run(session, run["id"])  # make it RUNNING (launcher is a no-op in tests)
+    r = client.post(f"/runs/{run['id']}/pause")
+    assert r.status_code == 200
+    assert r.json()["pause_requested"] is True
+
+
+def test_stop_a_pending_run_via_api(client):
+    _, tid = _make_target(client)
+    run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
+    r = client.post(f"/runs/{run['id']}/stop")
+    assert r.status_code == 200
+    assert r.json()["status"] == "stopped"
+    # app is free again
+    again = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-202", "mode": "full"})
+    assert again.status_code == 201
+
+
+def test_resume_a_paused_run_relaunches(client, session):
+    from app import repo
+
+    _, tid = _make_target(client)
+    run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
+    repo.begin_run(session, run["id"])
+    repo.pause_run(session, run["id"])
+    client.launched.clear()
+    r = client.post(f"/runs/{run['id']}/resume")
+    assert r.status_code == 200
+    assert client.launched == [run["id"]]  # orchestrator re-launched
+
+
+def test_resume_a_non_paused_run_409(client):
+    _, tid = _make_target(client)
+    run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
+    r = client.post(f"/runs/{run['id']}/resume")  # still pending, not paused
+    assert r.status_code == 409
+
+
 def test_events_replays_history_of_a_finished_run(client, session):
     from app import repo
     from app.orchestrator.bus import bus
