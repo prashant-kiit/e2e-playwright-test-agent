@@ -23,8 +23,10 @@ def run_pipeline(
     run_id: int,
     runner: Runner,
     emit: Emit | None = None,
+    collect: Callable[[int, "object"], None] | None = None,
 ) -> None:
     emit = emit or (lambda line: None)
+    collect = collect or (lambda run_id, step: None)
 
     # Read the run's immutable facts and resume point.
     with session_factory() as s:
@@ -96,6 +98,10 @@ def run_pipeline(
 
         with session_factory() as s:
             repo.complete_step(s, run_id, step)
+        try:  # artifact collection is best-effort; never fail the run on it
+            collect(run_id, step)
+        except Exception as exc:
+            emit(f"=== step {step.value}: artifact collection failed: {exc} ===")
         emit(f"=== step {step.value} done ===")
 
     with session_factory() as s:

@@ -8,9 +8,24 @@ these never touch the dev database.
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api import get_launcher
+from app.api import get_launcher, get_storage
 from app.db import get_session
 from app.main import app
+
+
+class _FakeStorage:
+    def __init__(self):
+        self.objects = {}
+
+    def ensure_bucket(self):
+        pass
+
+    def put_file(self, key, path, content_type=None):
+        self.objects[key] = (path.read_bytes(), content_type or "application/octet-stream")
+
+    def get_stream(self, key):
+        data, ct = self.objects[key]
+        return iter([data]), ct
 
 
 @pytest.fixture()
@@ -154,6 +169,34 @@ def test_resume_a_non_paused_run_409(client):
     run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
     r = client.post(f"/runs/{run['id']}/resume")  # still pending, not paused
     assert r.status_code == 409
+
+
+def test_list_and_download_artifacts(client, session):
+    from app.models import Artifact
+
+    store = _FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: store
+
+    _, tid = _make_target(client)
+    run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
+    key = f"{run['run_key']}/report.html"
+    store.objects[key] = (b"<html>hi</html>", "text/html")
+    session.add(
+        Artifact(run_id=run["id"], step="heal", kind="report", s3_key=key, sha256="x" * 64, version=1)
+    )
+    session.commit()
+
+    arts = client.get(f"/runs/{run['id']}/artifacts").json()
+    assert len(arts) == 1 and arts[0]["kind"] == "report"
+
+    content = client.get(f"/artifacts/{arts[0]['id']}/content")
+    assert content.status_code == 200
+    assert content.content == b"<html>hi</html>"
+    assert content.headers["content-type"].startswith("text/html")
+
+
+def test_download_missing_artifact_404(client):
+    assert client.get("/artifacts/999/content").status_code == 404
 
 
 def test_events_replays_history_of_a_finished_run(client, session):

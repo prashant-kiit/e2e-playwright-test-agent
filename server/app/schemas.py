@@ -49,6 +49,18 @@ class StepOut(BaseModel):
     finished_at: datetime | None
 
 
+class ArtifactOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    run_id: int
+    step: str | None
+    kind: str
+    s3_key: str
+    sha256: str
+    version: int
+    created_at: datetime
+
+
 class RunOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int

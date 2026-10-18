@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import threading
 
-from . import config
+from . import config, repo, storage
+from .artifacts import ArtifactCollector
 from .db import SessionLocal
+from .domain.steps import Step
 from .orchestrator.bus import bus
 from .orchestrator.claude import ClaudeRunner
 from .orchestrator.driver import run_pipeline
@@ -24,12 +26,27 @@ def make_runner() -> Runner:
     return ClaudeRunner()
 
 
+def make_collector():
+    """A collect(run_id, step) callback that sweeps the run dir into storage."""
+    collector = ArtifactCollector(storage.from_env())
+
+    def collect(run_id: int, step: Step) -> None:
+        with SessionLocal() as s:
+            run = repo.get_run(s, run_id)
+            collector.collect(s, run, config.run_dir(run.run_key), step)
+
+    return collect
+
+
 def launch_run(run_id: int) -> None:
     """Start the pipeline for run_id on a daemon thread."""
+    collect = make_collector()
 
     def _target() -> None:
         try:
-            run_pipeline(SessionLocal, run_id, make_runner(), emit=bus.emitter(run_id))
+            run_pipeline(
+                SessionLocal, run_id, make_runner(), emit=bus.emitter(run_id), collect=collect
+            )
         finally:
             bus.close(run_id)
 

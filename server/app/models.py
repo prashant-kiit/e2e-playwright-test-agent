@@ -142,6 +142,7 @@ class Artifact(Base):
     step: Mapped[str | None] = mapped_column(String(20), nullable=True)
     kind: Mapped[str] = mapped_column(String(30), nullable=False)  # trace|video|screenshot|report
     s3_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

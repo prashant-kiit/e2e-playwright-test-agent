@@ -15,12 +15,16 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from . import repo
+from sqlalchemy import select
+
+from . import repo, storage
 from .db import get_session
 from .domain.status import is_terminal
 from .launcher import launch_run
+from .models import Artifact
 from .orchestrator.bus import DONE, bus
 from .schemas import (
+    ArtifactOut,
     ProjectCreate,
     ProjectOut,
     RunCreate,
@@ -29,6 +33,7 @@ from .schemas import (
     TargetCreate,
     TargetOut,
 )
+from .storage import Storage
 
 router = APIRouter()
 
@@ -36,6 +41,11 @@ router = APIRouter()
 def get_launcher() -> Callable[[int], None]:
     """The background run launcher. Overridden to a no-op in tests."""
     return launch_run
+
+
+def get_storage() -> Storage:
+    """The artifact blob store. Overridden with a fake in tests."""
+    return storage.from_env()
 
 
 @router.post("/projects", response_model=ProjectOut, status_code=201)
@@ -136,6 +146,37 @@ def get_run_steps(run_id: int, session: Session = Depends(get_session)):
     except repo.NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return sorted(run.steps, key=lambda s: s.id)
+
+
+@router.get("/runs/{run_id}/artifacts", response_model=list[ArtifactOut])
+def list_artifacts(run_id: int, session: Session = Depends(get_session)):
+    try:
+        repo.get_run(session, run_id)
+    except repo.NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return list(
+        session.scalars(
+            select(Artifact).where(Artifact.run_id == run_id).order_by(Artifact.id)
+        )
+    )
+
+
+@router.get("/artifacts/{artifact_id}/content")
+def artifact_content(
+    artifact_id: int,
+    session: Session = Depends(get_session),
+    store: Storage = Depends(get_storage),
+):
+    """Stream an artifact's bytes through the API (avoids presigned-URL host
+    mismatch between the container and the browser in local dev)."""
+    art = session.get(Artifact, artifact_id)
+    if art is None:
+        raise HTTPException(status_code=404, detail=f"no artifact {artifact_id}")
+    try:
+        chunks, content_type = store.get_stream(art.s3_key)
+    except Exception as exc:  # object missing / store down
+        raise HTTPException(status_code=502, detail=f"storage error: {exc}") from exc
+    return StreamingResponse(chunks, media_type=content_type)
 
 
 @router.get("/runs/{run_id}/events")
