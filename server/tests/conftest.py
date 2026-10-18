@@ -45,6 +45,23 @@ def pg_engine():
     engine.dispose()
 
 
+@pytest.fixture(autouse=True)
+def _clear_bus():
+    """Keep the in-memory log bus isolated between tests (run ids reset on
+    truncate, so history could otherwise leak across tests)."""
+    from app.orchestrator.bus import bus
+
+    bus.reset()
+    yield
+    bus.reset()
+
+
+def _truncate_all(engine):
+    tables = ", ".join(f'"{t.name}"' for t in reversed(Base.metadata.sorted_tables))
+    with engine.begin() as conn:
+        conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+
+
 @pytest.fixture()
 def session(pg_engine):
     """A clean session per test: truncate all tables afterwards."""
@@ -55,6 +72,15 @@ def session(pg_engine):
     finally:
         sess.rollback()
         sess.close()
-        tables = ", ".join(f'"{t.name}"' for t in reversed(Base.metadata.sorted_tables))
-        with pg_engine.begin() as conn:
-            conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+        _truncate_all(pg_engine)
+
+
+@pytest.fixture()
+def session_factory(pg_engine):
+    """A sessionmaker for code (like the orchestrator driver) that opens its own
+    short-lived sessions. Truncates all tables afterwards."""
+    Session = sessionmaker(bind=pg_engine, expire_on_commit=False, future=True)
+    try:
+        yield Session
+    finally:
+        _truncate_all(pg_engine)

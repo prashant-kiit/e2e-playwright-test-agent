@@ -1,0 +1,11 @@
+{
+  "identities": [
+    {
+      "name": "qa",
+      "credentials": [
+        { "accessKey": "qa", "secretKey": "qa-secret" }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

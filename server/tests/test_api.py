@@ -8,14 +8,37 @@ these never touch the dev database.
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api import get_launcher, get_storage
+from app.auth import require_auth
 from app.db import get_session
 from app.main import app
 
 
+class _FakeStorage:
+    def __init__(self):
+        self.objects = {}
+
+    def ensure_bucket(self):
+        pass
+
+    def put_file(self, key, path, content_type=None):
+        self.objects[key] = (path.read_bytes(), content_type or "application/octet-stream")
+
+    def get_stream(self, key):
+        data, ct = self.objects[key]
+        return iter([data]), ct
+
+
 @pytest.fixture()
 def client(session):
+    launched: list[int] = []
     app.dependency_overrides[get_session] = lambda: session
+    # No-op launcher: tests assert on DB state, not background execution.
+    app.dependency_overrides[get_launcher] = lambda: launched.append
+    # Bypass auth for the API tests (auth itself is tested in test_auth.py).
+    app.dependency_overrides[require_auth] = lambda: None
     c = TestClient(app)
+    c.launched = launched  # expose for assertions
     yield c
     app.dependency_overrides.clear()
 
@@ -48,13 +71,14 @@ def test_list_targets_filtered(client):
     assert len(r.json()) == 1
 
 
-def test_start_run_returns_pending(client):
+def test_start_run_returns_pending_and_launches(client):
     _, tid = _make_target(client)
     r = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"})
     assert r.status_code == 201
     body = r.json()
     assert body["status"] == "pending"
     assert body["mode"] == "full"
+    assert client.launched == [body["id"]]  # orchestrator was kicked off
 
 
 def test_second_live_run_same_app_409(client):
@@ -89,3 +113,109 @@ def test_get_and_list_runs(client):
 
 def test_get_missing_run_404(client):
     assert client.get("/runs/12345").status_code == 404
+
+
+def test_run_steps_endpoint(client, session):
+    from app import repo
+    from app.domain.steps import Step
+
+    _, tid = _make_target(client)
+    run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
+    repo.start_step(session, run["id"], Step.READ_STORY)
+    repo.complete_step(session, run["id"], Step.READ_STORY)
+
+    r = client.get(f"/runs/{run['id']}/steps")
+    assert r.status_code == 200
+    steps = r.json()
+    assert len(steps) == 1
+    assert steps[0]["step"] == "read_story"
+    assert steps[0]["status"] == "completed"
+
+
+def test_pause_sets_flag_on_running_run(client, session):
+    from app import repo
+
+    _, tid = _make_target(client)
+    run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
+    repo.begin_run(session, run["id"])  # make it RUNNING (launcher is a no-op in tests)
+    r = client.post(f"/runs/{run['id']}/pause")
+    assert r.status_code == 200
+    assert r.json()["pause_requested"] is True
+
+
+def test_stop_a_pending_run_via_api(client):
+    _, tid = _make_target(client)
+    run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
+    r = client.post(f"/runs/{run['id']}/stop")
+    assert r.status_code == 200
+    assert r.json()["status"] == "stopped"
+    # app is free again
+    again = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-202", "mode": "full"})
+    assert again.status_code == 201
+
+
+def test_resume_a_paused_run_relaunches(client, session):
+    from app import repo
+
+    _, tid = _make_target(client)
+    run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
+    repo.begin_run(session, run["id"])
+    repo.pause_run(session, run["id"])
+    client.launched.clear()
+    r = client.post(f"/runs/{run['id']}/resume")
+    assert r.status_code == 200
+    assert client.launched == [run["id"]]  # orchestrator re-launched
+
+
+def test_resume_a_non_paused_run_409(client):
+    _, tid = _make_target(client)
+    run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
+    r = client.post(f"/runs/{run['id']}/resume")  # still pending, not paused
+    assert r.status_code == 409
+
+
+def test_list_and_download_artifacts(client, session):
+    from app.models import Artifact
+
+    store = _FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: store
+
+    _, tid = _make_target(client)
+    run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
+    key = f"{run['run_key']}/report.html"
+    store.objects[key] = (b"<html>hi</html>", "text/html")
+    session.add(
+        Artifact(run_id=run["id"], step="heal", kind="report", s3_key=key, sha256="x" * 64, version=1)
+    )
+    session.commit()
+
+    arts = client.get(f"/runs/{run['id']}/artifacts").json()
+    assert len(arts) == 1 and arts[0]["kind"] == "report"
+
+    content = client.get(f"/artifacts/{arts[0]['id']}/content")
+    assert content.status_code == 200
+    assert content.content == b"<html>hi</html>"
+    assert content.headers["content-type"].startswith("text/html")
+
+
+def test_download_missing_artifact_404(client):
+    assert client.get("/artifacts/999/content").status_code == 404
+
+
+def test_events_replays_history_of_a_finished_run(client, session):
+    from app import repo
+    from app.orchestrator.bus import bus
+
+    _, tid = _make_target(client)
+    run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
+    rid = run["id"]
+    bus.publish(rid, "line one")
+    bus.publish(rid, "line two")
+    repo.begin_run(session, rid)
+    repo.complete_run(session, rid)  # terminal -> events stream should end, not block
+
+    r = client.get(f"/runs/{rid}/events")
+    assert r.status_code == 200
+    body = r.text
+    assert "line one" in body and "line two" in body
+    assert "event: end" in body

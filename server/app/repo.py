@@ -172,6 +172,8 @@ def reap_expired(session: Session, now: datetime | None = None) -> list[int]:
     ).all()
     for lock in locks:
         run = session.get(Run, lock.run_id)
+        if run is not None and run.status is RunStatus.PAUSED:
+            continue  # a deliberate pause holds the lock; it is not a crash
         if run is not None and is_live(run.status):
             _fail_and_release(session, run, "lease expired (reaped)")
             reaped.append(run.id)
@@ -193,3 +195,180 @@ def list_runs(session: Session, target_id: int | None = None) -> list[Run]:
     if target_id is not None:
         stmt = stmt.where(Run.target_id == target_id)
     return list(session.scalars(stmt))
+
+
+# --- run execution (driven by the orchestrator) -------------------------
+
+def begin_run(session: Session, run_id: int, now: datetime | None = None) -> Run:
+    """Move a run into RUNNING (from PENDING on first start, or from PAUSED on
+    resume) and refresh its lease."""
+    now = now or lease.utcnow()
+    run = get_run(session, run_id)
+    assert_transition(run.status, RunStatus.RUNNING)
+    run.status = RunStatus.RUNNING
+    _touch_lease(session, run, now)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def start_step(session: Session, run_id: int, step: Step, now: datetime | None = None) -> RunStep:
+    """Mark a step as running (creating its row, or bumping attempt on a retry)."""
+    now = now or lease.utcnow()
+    rs = session.scalars(
+        select(RunStep).where(RunStep.run_id == run_id, RunStep.step == step)
+    ).one_or_none()
+    if rs is None:
+        rs = RunStep(run_id=run_id, step=step, status="running", attempt=1, started_at=now)
+        session.add(rs)
+    else:
+        rs.attempt += 1
+        rs.status = "running"
+        rs.started_at = now
+        rs.finished_at = None
+    run = get_run(session, run_id)
+    run.current_step = step
+    _touch_lease(session, run, now)
+    session.commit()
+    session.refresh(rs)
+    return rs
+
+
+def complete_step(
+    session: Session, run_id: int, step: Step, now: datetime | None = None
+) -> RunStep:
+    """Mark a step completed and record it as the run's last completed step."""
+    now = now or lease.utcnow()
+    rs = session.scalars(
+        select(RunStep).where(RunStep.run_id == run_id, RunStep.step == step)
+    ).one()
+    rs.status = "completed"
+    rs.finished_at = now
+    run = get_run(session, run_id)
+    run.last_completed_step = step
+    _touch_lease(session, run, now)
+    session.commit()
+    session.refresh(rs)
+    return rs
+
+
+def fail_step(session: Session, run_id: int, step: Step, now: datetime | None = None) -> None:
+    """Mark a step failed (the run itself is failed separately via fail_run)."""
+    now = now or lease.utcnow()
+    rs = session.scalars(
+        select(RunStep).where(RunStep.run_id == run_id, RunStep.step == step)
+    ).one_or_none()
+    if rs is not None:
+        rs.status = "failed"
+        rs.finished_at = now
+    session.commit()
+
+
+def set_session_id(session: Session, run_id: int, session_id: str) -> None:
+    """Persist the Claude Code session id so later steps can --resume it."""
+    run = get_run(session, run_id)
+    run.claude_session_id = session_id
+    session.commit()
+
+
+def complete_run(session: Session, run_id: int) -> Run:
+    """Finish a run successfully and release its app lock."""
+    run = get_run(session, run_id)
+    assert_transition(run.status, RunStatus.COMPLETED)
+    run.status = RunStatus.COMPLETED
+    run.current_step = None
+    _release_lock(session, run)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def fail_run(session: Session, run_id: int, reason: str) -> Run:
+    """Fail a run (e.g. a step errored) and release its app lock."""
+    run = get_run(session, run_id)
+    _fail_and_release(session, run, reason)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def request_pause(session: Session, run_id: int) -> Run:
+    """Ask a running run to pause at its next step boundary (no-op otherwise)."""
+    run = get_run(session, run_id)
+    if run.status is RunStatus.RUNNING:
+        run.pause_requested = True
+        session.commit()
+        session.refresh(run)
+    return run
+
+
+def request_stop(session: Session, run_id: int) -> Run:
+    """Ask a run to stop. A RUNNING run stops at its next boundary (flag only);
+    a PENDING or PAUSED run has no live thread, so it stops immediately."""
+    run = get_run(session, run_id)
+    run.stop_requested = True
+    if run.status in (RunStatus.PENDING, RunStatus.PAUSED):
+        _stop(session, run)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def pause_run(session: Session, run_id: int) -> Run:
+    """Driver-side: transition RUNNING -> PAUSED at a boundary. The app lock is
+    kept (the run still owns the app) but the lease is cleared, and the reaper
+    skips PAUSED runs, so a deliberate pause is never mistaken for a crash."""
+    run = get_run(session, run_id)
+    assert_transition(run.status, RunStatus.PAUSED)
+    run.status = RunStatus.PAUSED
+    run.pause_requested = False
+    run.lease_expires_at = None
+    run.current_step = None
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def stop_run(session: Session, run_id: int) -> Run:
+    """Driver-side: transition a live run -> STOPPED and release its app lock."""
+    run = get_run(session, run_id)
+    _stop(session, run)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def resume_run(session: Session, run_id: int) -> Run:
+    """Clear a paused run's flags so a fresh orchestrator can re-begin it.
+    The actual PAUSED -> RUNNING transition happens in begin_run."""
+    run = get_run(session, run_id)
+    if run.status is not RunStatus.PAUSED:
+        raise RepoError(f"run {run_id} is {run.status.value}, not paused; cannot resume")
+    run.pause_requested = False
+    run.stop_requested = False
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def _stop(session: Session, run: Run) -> None:
+    assert_transition(run.status, RunStatus.STOPPED)
+    run.status = RunStatus.STOPPED
+    run.stop_requested = False
+    run.current_step = None
+    run.lease_expires_at = None
+    _release_lock(session, run)
+
+
+def _touch_lease(session: Session, run: Run, now: datetime) -> None:
+    new_exp = lease.new_expiry(now=now)
+    run.lease_expires_at = new_exp
+    lock = session.get(AppLock, run.target_id)
+    if lock is not None and lock.run_id == run.id:
+        lock.lease_expires_at = new_exp
+
+
+def _release_lock(session: Session, run: Run) -> None:
+    lock = session.get(AppLock, run.target_id)
+    if lock is not None and lock.run_id == run.id:
+        session.delete(lock)

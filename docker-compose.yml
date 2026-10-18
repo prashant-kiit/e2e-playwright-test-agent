@@ -19,17 +19,52 @@ services:
       timeout: 3s
       retries: 10
 
+  seaweedfs:
+    # Open-source, freely-pullable S3-compatible store (MinIO was dropped).
+    image: chrislusf/seaweedfs:latest
+    command: server -s3 -s3.config=/etc/seaweedfs/s3.json -dir=/data
+    volumes:
+      - seaweeddata:/data
+      - ./docker/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+    ports:
+      - "8333:8333"   # S3 API
+      - "8888:8888"   # filer
+      - "9333:9333"   # master
+    healthcheck:
+      # With S3 identities configured, GET / is 403 for anonymous; -o /dev/null
+      # without -f means "connected" (liveness), regardless of HTTP status.
+      test: ["CMD", "curl", "-s", "-o", "/dev/null", "http://localhost:8333/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
   api:
     build:
       context: .
       dockerfile: docker/Dockerfile.server
     environment:
       DATABASE_URL: postgresql+psycopg://qa:qa@postgres:5432/qa
+      S3_ENDPOINT: http://seaweedfs:8333
+      S3_ACCESS_KEY: qa
+      S3_SECRET_KEY: qa-secret
+      S3_BUCKET: qa-artifacts
+      QA_RUNS_DIR: /data/runs
+      # Orchestrator knobs (host-overridable): fake runner by default so the
+      # stack runs token-free; QA_FAKE_DELAY slows fake steps for pause demos.
+      QA_RUNNER: "${QA_RUNNER:-fake}"
+      QA_FAKE_DELAY: "${QA_FAKE_DELAY:-0}"
+    volumes:
+      - apidata:/data   # per-run working dirs (run logs + Playwright output)
     ports:
       - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
 
 volumes:
   pgdata:
+  seaweeddata:
+  apidata:
