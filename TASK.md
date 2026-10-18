@@ -70,6 +70,7 @@ Add 3 Tools in this reagrd:
 custom mcp. legacy cleanup. parallel push may lead to git conflicts.
 there is only batch mode with Human Review
 what is the use playwright-test-report folder and its index.html file
+Add Interactivity in batch flow
 
 ```bash
 set -a; source .env; set +a            # loads GITHUB_PAT (if not already set)

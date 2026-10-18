@@ -234,3 +234,8 @@ node_modules/
 # Batch runs (run-stories.sh): logs and per-story Playwright output
 /runs/
 /.qa-state.json
+
+# QA admin portal (server/ + web/)
+/web/dist/
+/web/.vite/
+/server/.pytest_cache/

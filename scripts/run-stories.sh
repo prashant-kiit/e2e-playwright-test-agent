@@ -2,15 +2,15 @@
 # Run the QA workflow for several stories of ONE app at once: one headless Claude Code session per story.
 # All stories in a batch must belong to the same app; a batch that mixes apps is refused.
 #
-#   ./run-stories.sh SCRUM-201 SCRUM-202 SCRUM-205     # specific stories of one app
-#   ./run-stories.sh practice-target                   # every story of an app
-#   ./run-stories.sh -j 2 -w 1 saucedemo               # 2 sessions at a time, 1 Playwright worker each
-#   ./run-stories.sh --force SCRUM-201                 # regenerate a story already marked ready
-#   ./run-stories.sh --dry-run practice-target         # show what would run, start nothing
+#   ./scripts/run-stories.sh SCRUM-201 SCRUM-202 SCRUM-205     # specific stories of one app
+#   ./scripts/run-stories.sh practice-target                   # every story of an app
+#   ./scripts/run-stories.sh -j 2 -w 1 saucedemo               # 2 sessions at a time, 1 Playwright worker each
+#   ./scripts/run-stories.sh --force SCRUM-201                 # regenerate a story already marked ready
+#   ./scripts/run-stories.sh --dry-run practice-target         # show what would run, start nothing
 #
 # Each session runs the QA flow up to the healed test suite, then STOPS for human review.
 # The agent does NOT deliver: after reviewing the generated tests, a human runs
-# ./push-artifacts.sh <app> <STORY_ID> to open the PR in the target repo.
+# ./scripts/push-artifacts.sh <app> <STORY_ID> to open the PR in the target repo.
 #
 # Reruns are safe (e.g. after a session limit): a story already generated (marked "ready" in
 # .qa-state.json, or whose tests are already committed) is SKIPPED; any other story has its
@@ -18,11 +18,11 @@
 # mix two runs. Use --force to redo a skipped story. .qa-state.json tracks, per story, the last
 # run-id and status.
 #
-# Each session gets the kick-off prompt from qa_user_prompt.md with its own "Active story:",
-# "Mode: unattended" and "Run-ID:" lines (see "Unattended (batch) runs" in qa_system_prompt.md).
+# Each session gets the kick-off prompt from prompts/qa_user_prompt.md with its own "Active story:",
+# "Mode: unattended" and "Run-ID:" lines (see "Run contract" in prompts/qa_system_prompt.md).
 # Artifacts stay at stable paths (apps/<app>/specs|tests); the run-id is metadata only.
 # The batch refuses to start unless the app's target repo is already bootstrapped
-# (./check-bootstrapped.sh); if not, run ./bootstrap-target.sh <app> first.
+# (./scripts/check-bootstrapped.sh); if not, run ./scripts/bootstrap-target.sh <app> first.
 #
 # Status: ready = tests generated+healed, awaiting human review/delivery · incomplete = session
 # ended cleanly but produced no test suite (rerun) · failed = session errored (e.g. limit) ·
@@ -33,7 +33,7 @@
 # Works with the bash 3.2 that ships with macOS.
 
 set -u
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."   # repo root (this script lives in scripts/)
 
 JOBS=3          # sessions running at the same time
 WORKERS=2       # Playwright workers per session (QA_WORKERS)
@@ -89,7 +89,7 @@ for s in "${stories[@]}"; do
   [ "$a" = "$APP" ] || die "all stories in a batch must belong to one app: ${stories[0]%%|*} is in '$APP' but ${s%%|*} is in '$a'. Run one batch per app."
 done
 
-# The bootstrap check (./check-bootstrapped.sh) needs GitHub auth: GITHUB_PAT or `gh` login.
+# The bootstrap check (./scripts/check-bootstrapped.sh) needs GitHub auth: GITHUB_PAT or `gh` login.
 # Sessions themselves no longer deliver, so a PAT is not required for the agent runs.
 if [ -z "${GITHUB_PAT:-}" ] && [ -f .env ]; then set -a; . ./.env; set +a; fi
 [ -n "${GITHUB_PAT:-}" ] || [ $DRY_RUN -eq 1 ] || echo "run-stories: note: GITHUB_PAT not set; the bootstrap check will rely on 'gh' login." >&2
@@ -98,14 +98,14 @@ command -v jq >/dev/null || die "jq not found (used to read session results and 
 [ -f "$STATE_FILE" ] || echo '{}' > "$STATE_FILE"
 
 # Gate: the app's target repo must be bootstrapped before any session starts.
-if ./check-bootstrapped.sh "$APP" >/dev/null 2>&1; then BOOTED=1; else BOOTED=0; fi
+if scripts/check-bootstrapped.sh "$APP" >/dev/null 2>&1; then BOOTED=1; else BOOTED=0; fi
 
 RUN_ROOT="runs/$(date '+%Y%m%d-%H%M%S')-$APP"
 RUN_ID="$(basename "$RUN_ROOT")"
 
 kickoff_for() { # $1=STORY_ID
   printf 'Mode: unattended\nRun-ID: %s\n' "$RUN_ID"
-  sed -E "s/^Active story:.*/Active story: $1/" qa_user_prompt.md
+  sed -E "s/^Active story:.*/Active story: $1/" prompts/qa_user_prompt.md
 }
 
 state_get() { jq -r --arg id "$1" ".[\$id].$2 // \"\"" "$STATE_FILE" 2>/dev/null; }
@@ -140,7 +140,7 @@ echo "App: $APP ($(jq -r .baseURL "apps/$APP/app.json") -> $(jq -r .targetRepo "
 echo "Run-ID: $RUN_ID${FORCE:+  (force: $( [ $FORCE = 1 ] && echo on || echo off ))}"
 if [ "$BOOTED" = 1 ]; then echo "Bootstrapped: yes"; else
   echo "Bootstrapped: NO"
-  [ $DRY_RUN -eq 1 ] || die "target repo for '$APP' is not bootstrapped. Run: ./bootstrap-target.sh $APP"
+  [ $DRY_RUN -eq 1 ] || die "target repo for '$APP' is not bootstrapped. Run: ./scripts/bootstrap-target.sh $APP"
 fi
 echo "Stories (${#stories[@]}), $JOBS at a time, $WORKERS Playwright worker(s) each:"
 for s in "${stories[@]}"; do
@@ -162,7 +162,7 @@ run_story() { # $1=STORY_ID $2=app $3=slug ; runs in a background subshell
   clean_artifacts "$app" "$id" "$slug" "$dir/clean.log"
   start=$(date +%s)
   # No --allowedTools for push-artifacts: the agent must NOT deliver. It stops after Step 5;
-  # a human runs ./push-artifacts.sh after review.
+  # a human runs ./scripts/push-artifacts.sh after review.
   QA_RUN_DIR="$dir" QA_WORKERS="$WORKERS" claude -p "$(kickoff_for "$id")" \
     --output-format stream-json --verbose \
     > "$dir/session.jsonl" 2> "$dir/stderr.log" < /dev/null
@@ -226,7 +226,7 @@ summary="$RUN_ROOT/summary.md"
   echo
   echo "status: **ready** = tests generated+healed, awaiting human review/delivery · **incomplete** = session ended but no test suite (rerun) · **failed** = session errored (e.g. limit) · **skipped** = already generated (use --force)"
   echo
-  echo "To deliver a ready story after review:  ./push-artifacts.sh $APP <STORY_ID>"
+  echo "To deliver a ready story after review:  ./scripts/push-artifacts.sh $APP <STORY_ID>"
   echo
   echo "| Story | App | Status | Minutes | Cost (USD) | Tests | Result |"
   echo "|---|---|---|---|---|---|---|"
