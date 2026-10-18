@@ -202,6 +202,35 @@ def test_download_missing_artifact_404(client):
     assert client.get("/artifacts/999/content").status_code == 404
 
 
+def test_list_apps_and_stories_from_repo(client):
+    apps = client.get("/apps").json()
+    assert "practice-target" in [a["app"] for a in apps]
+    stories = client.get("/apps/practice-target/stories").json()
+    assert any(s["story_id"] == "SCRUM-201" for s in stories)
+
+
+def test_settings_and_prompts(client):
+    s = client.get("/settings").json()
+    assert "runner" in s and "repo_root" in s
+    prompts = client.get("/prompts").json()
+    assert any(p["name"] == "qa_system_prompt.md" for p in prompts)
+
+
+def test_bootstrap_via_api(client, tmp_path, monkeypatch):
+    from app.api import get_bootstrap_runner
+
+    monkeypatch.setenv("QA_REPO_ROOT", str(tmp_path))
+    (tmp_path / "apps").mkdir()
+    calls = []
+    app.dependency_overrides[get_bootstrap_runner] = lambda: (
+        lambda a: calls.append(a) or {"rc": 0, "output": "ok"}
+    )
+    r = client.post("/apps/bootstrap", json={"app": "demoapp", "name": "Demo", "targetRepo": "o/r"})
+    assert r.status_code == 201
+    assert (tmp_path / "apps" / "demoapp" / "app.json").exists()
+    assert calls == ["demoapp"]
+
+
 def test_events_replays_history_of_a_finished_run(client, session):
     from app import repo
     from app.orchestrator.bus import bus

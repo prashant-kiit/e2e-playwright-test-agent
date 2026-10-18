@@ -17,19 +17,23 @@ from sqlalchemy.orm import Session
 
 from sqlalchemy import select
 
-from . import repo, storage
+from . import apphub, repo, storage
 from .db import get_session
 from .domain.status import is_terminal
 from .launcher import launch_run
 from .models import Artifact
 from .orchestrator.bus import DONE, bus
 from .schemas import (
+    AppOut,
     ArtifactOut,
+    BootstrapBody,
     ProjectCreate,
     ProjectOut,
+    PromptOut,
     RunCreate,
     RunOut,
     StepOut,
+    StoryOut,
     TargetCreate,
     TargetOut,
 )
@@ -49,6 +53,44 @@ def get_launcher() -> Callable[[int], None]:
 def get_storage() -> Storage:
     """The artifact blob store. Overridden with a fake in tests."""
     return storage.from_env()
+
+
+def get_bootstrap_runner() -> Callable[[str], dict]:
+    """The shell step of bootstrapping. Overridden in tests (no gh/git)."""
+    return apphub.run_bootstrap_script
+
+
+# --- repo introspection + bootstrap (M6) --------------------------------
+
+@router.get("/apps", response_model=list[AppOut])
+def list_apps():
+    return apphub.list_apps()
+
+
+@router.get("/apps/{app}/stories", response_model=list[StoryOut])
+def list_stories(app: str):
+    return apphub.list_stories(app)
+
+
+@router.post("/apps/bootstrap", status_code=201)
+def bootstrap_app(
+    body: BootstrapBody,
+    run=Depends(get_bootstrap_runner),
+):
+    try:
+        return apphub.bootstrap_app(body.model_dump(), run=run, do_bootstrap=body.do_bootstrap)
+    except apphub.BootstrapError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/prompts", response_model=list[PromptOut])
+def list_prompts():
+    return apphub.read_prompts()
+
+
+@router.get("/settings")
+def get_settings():
+    return apphub.settings()
 
 
 @router.post("/projects", response_model=ProjectOut, status_code=201)
