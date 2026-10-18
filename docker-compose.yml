@@ -1,0 +1,35 @@
+# Dev stack for the QA admin portal.
+#   M0 (this file): Postgres (state) + the API health endpoint.
+#   M4 adds the artifact store (choice pending — see the portal README/plan).
+#   M5/M7 add the web container.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: qa
+      POSTGRES_PASSWORD: qa
+      POSTGRES_DB: qa
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qa"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.server
+    environment:
+      DATABASE_URL: postgresql+psycopg://qa:qa@postgres:5432/qa
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
