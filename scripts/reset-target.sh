@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Tool: reset an app's target repo to a FRESH, EMPTY state (DESTRUCTIVE, agent repo untouched).
 #
-#   ./reset-target.sh <app> [--yes] [--dry-run]
+#   ./scripts/reset-target.sh <app> [--yes] [--dry-run]
 #
-# Wipes the app's target repo so a later ./bootstrap-target.sh <app> starts clean:
+# Wipes the app's target repo so a later ./scripts/bootstrap-target.sh <app> starts clean:
 #   - replaces <targetBranch> with a single empty commit (all files AND history gone)
 #   - deletes every other branch (e.g. qa/SCRUM-xxx-*), which closes their PRs
-# It does NOT re-bootstrap; run ./bootstrap-target.sh <app> afterwards. IRREVERSIBLE on the
+# It does NOT re-bootstrap; run ./scripts/bootstrap-target.sh <app> afterwards. IRREVERSIBLE on the
 # live GitHub repo. Asks you to type the repo name to confirm (skip with --yes). Reusable for
 # any app. Works with the bash 3.2 that ships with macOS.
 set -u
 QA_TOOL="reset-target"
-. "$(dirname "$0")/scripts/qa-lib.sh"
+. "$(dirname "$0")/qa-lib.sh"
 
 DRY=0; YES=0; APP_ARG=""
 for a in "$@"; do case "$a" in
@@ -31,7 +31,7 @@ echo "Target: $TARGET_REPO ($TARGET_BRANCH)"
 
 # Nothing to reset on an empty repo.
 if ! qa_repo_has_commits "$TARGET_REPO"; then
-  echo "already empty: $TARGET_REPO has no commits. Run ./bootstrap-target.sh $APP to set it up."
+  echo "already empty: $TARGET_REPO has no commits. Run ./scripts/bootstrap-target.sh $APP to set it up."
   exit 0
 fi
 
@@ -85,4 +85,4 @@ EOF
 fi
 
 echo
-echo "done. The repo is empty. Next: ./bootstrap-target.sh $APP"
+echo "done. The repo is empty. Next: ./scripts/bootstrap-target.sh $APP"

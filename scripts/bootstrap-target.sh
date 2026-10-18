@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tool: bootstrap (or re-bootstrap) an app's target repo. SYNC mode, agent repo = source of truth.
 #
-#   ./bootstrap-target.sh <app> [--dry-run]
+#   ./scripts/bootstrap-target.sh <app> [--dry-run]
 #
 # Pushes this repo's infra files to the app's target repo so they match the agent repo exactly:
 #   package.json, package-lock.json, playwright.config.ts, .gitignore,
@@ -12,7 +12,7 @@
 # It does NOT touch story artifacts (that's push-artifacts.sh). Reusable for any app.
 set -u
 QA_TOOL="bootstrap-target"
-. "$(dirname "$0")/scripts/qa-lib.sh"
+. "$(dirname "$0")/qa-lib.sh"
 
 DRY=0; APP_ARG=""
 for a in "$@"; do case "$a" in --dry-run) DRY=1;; -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0;; -*) qa_die "unknown option $a";; *) APP_ARG="$a";; esac; done

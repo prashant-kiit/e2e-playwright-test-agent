@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tool: deliver one story's artifacts to its app's target repo as a PR. SYNC mode, agent repo = source of truth.
 #
-#   ./push-artifacts.sh <app> <STORY_ID> [--body-file <file>] [--run-id <id>] [--dry-run]
+#   ./scripts/push-artifacts.sh <app> <STORY_ID> [--body-file <file>] [--run-id <id>] [--dry-run]
 #
 # Syncs the story, test plan and test suite from this repo onto branch qa/<STORY_ID>-<slug> of the
 # target repo (the story's tests folder is replaced wholesale, so deletions propagate), then opens
@@ -9,7 +9,7 @@
 # Requires the repo to be bootstrapped. Prints the PR URL on success. Reusable for any app/story.
 set -u
 QA_TOOL="push-artifacts"
-. "$(dirname "$0")/scripts/qa-lib.sh"
+. "$(dirname "$0")/qa-lib.sh"
 
 DRY=0; BODY_FILE=""; RUN_ID=""; APP_ARG=""; STORY_ID=""
 while [ $# -gt 0 ]; do
@@ -25,7 +25,7 @@ done
 
 qa_need jq; qa_need gh; qa_need git
 qa_resolve "$APP_ARG"
-[ -n "$STORY_ID" ] || qa_die "usage: ./push-artifacts.sh <app> <STORY_ID>"
+[ -n "$STORY_ID" ] || qa_die "usage: ./scripts/push-artifacts.sh <app> <STORY_ID>"
 qa_load_env
 
 # Locate the story in the agent repo and derive its paths.
@@ -51,7 +51,7 @@ echo "Sync:   $REL_STORY, $REL_PLAN, $REL_TESTS/"
 
 # Must be bootstrapped first.
 qa_is_bootstrapped "$TARGET_REPO" "$APP" "$TARGET_BRANCH" \
-  || qa_die "target not bootstrapped. Run: ./bootstrap-target.sh $APP"
+  || qa_die "target not bootstrapped. Run: ./scripts/bootstrap-target.sh $APP"
 
 if [ $DRY -eq 1 ]; then echo "(dry-run) would push the above onto $BRANCH and open/update a PR into $TARGET_BRANCH titled \"$PR_TITLE\""; exit 0; fi
 
