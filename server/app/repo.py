@@ -193,3 +193,112 @@ def list_runs(session: Session, target_id: int | None = None) -> list[Run]:
     if target_id is not None:
         stmt = stmt.where(Run.target_id == target_id)
     return list(session.scalars(stmt))
+
+
+# --- run execution (driven by the orchestrator) -------------------------
+
+def begin_run(session: Session, run_id: int, now: datetime | None = None) -> Run:
+    """Move a run into RUNNING (from PENDING on first start, or from PAUSED on
+    resume) and refresh its lease."""
+    now = now or lease.utcnow()
+    run = get_run(session, run_id)
+    assert_transition(run.status, RunStatus.RUNNING)
+    run.status = RunStatus.RUNNING
+    _touch_lease(session, run, now)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def start_step(session: Session, run_id: int, step: Step, now: datetime | None = None) -> RunStep:
+    """Mark a step as running (creating its row, or bumping attempt on a retry)."""
+    now = now or lease.utcnow()
+    rs = session.scalars(
+        select(RunStep).where(RunStep.run_id == run_id, RunStep.step == step)
+    ).one_or_none()
+    if rs is None:
+        rs = RunStep(run_id=run_id, step=step, status="running", attempt=1, started_at=now)
+        session.add(rs)
+    else:
+        rs.attempt += 1
+        rs.status = "running"
+        rs.started_at = now
+        rs.finished_at = None
+    run = get_run(session, run_id)
+    run.current_step = step
+    _touch_lease(session, run, now)
+    session.commit()
+    session.refresh(rs)
+    return rs
+
+
+def complete_step(
+    session: Session, run_id: int, step: Step, now: datetime | None = None
+) -> RunStep:
+    """Mark a step completed and record it as the run's last completed step."""
+    now = now or lease.utcnow()
+    rs = session.scalars(
+        select(RunStep).where(RunStep.run_id == run_id, RunStep.step == step)
+    ).one()
+    rs.status = "completed"
+    rs.finished_at = now
+    run = get_run(session, run_id)
+    run.last_completed_step = step
+    _touch_lease(session, run, now)
+    session.commit()
+    session.refresh(rs)
+    return rs
+
+
+def fail_step(session: Session, run_id: int, step: Step, now: datetime | None = None) -> None:
+    """Mark a step failed (the run itself is failed separately via fail_run)."""
+    now = now or lease.utcnow()
+    rs = session.scalars(
+        select(RunStep).where(RunStep.run_id == run_id, RunStep.step == step)
+    ).one_or_none()
+    if rs is not None:
+        rs.status = "failed"
+        rs.finished_at = now
+    session.commit()
+
+
+def set_session_id(session: Session, run_id: int, session_id: str) -> None:
+    """Persist the Claude Code session id so later steps can --resume it."""
+    run = get_run(session, run_id)
+    run.claude_session_id = session_id
+    session.commit()
+
+
+def complete_run(session: Session, run_id: int) -> Run:
+    """Finish a run successfully and release its app lock."""
+    run = get_run(session, run_id)
+    assert_transition(run.status, RunStatus.COMPLETED)
+    run.status = RunStatus.COMPLETED
+    run.current_step = None
+    _release_lock(session, run)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def fail_run(session: Session, run_id: int, reason: str) -> Run:
+    """Fail a run (e.g. a step errored) and release its app lock."""
+    run = get_run(session, run_id)
+    _fail_and_release(session, run, reason)
+    session.commit()
+    session.refresh(run)
+    return run
+
+
+def _touch_lease(session: Session, run: Run, now: datetime) -> None:
+    new_exp = lease.new_expiry(now=now)
+    run.lease_expires_at = new_exp
+    lock = session.get(AppLock, run.target_id)
+    if lock is not None and lock.run_id == run.id:
+        lock.lease_expires_at = new_exp
+
+
+def _release_lock(session: Session, run: Run) -> None:
+    lock = session.get(AppLock, run.target_id)
+    if lock is not None and lock.run_id == run.id:
+        session.delete(lock)

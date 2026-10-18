@@ -8,14 +8,19 @@ these never touch the dev database.
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api import get_launcher
 from app.db import get_session
 from app.main import app
 
 
 @pytest.fixture()
 def client(session):
+    launched: list[int] = []
     app.dependency_overrides[get_session] = lambda: session
+    # No-op launcher: tests assert on DB state, not background execution.
+    app.dependency_overrides[get_launcher] = lambda: launched.append
     c = TestClient(app)
+    c.launched = launched  # expose for assertions
     yield c
     app.dependency_overrides.clear()
 
@@ -48,13 +53,14 @@ def test_list_targets_filtered(client):
     assert len(r.json()) == 1
 
 
-def test_start_run_returns_pending(client):
+def test_start_run_returns_pending_and_launches(client):
     _, tid = _make_target(client)
     r = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"})
     assert r.status_code == 201
     body = r.json()
     assert body["status"] == "pending"
     assert body["mode"] == "full"
+    assert client.launched == [body["id"]]  # orchestrator was kicked off
 
 
 def test_second_live_run_same_app_409(client):
@@ -89,3 +95,39 @@ def test_get_and_list_runs(client):
 
 def test_get_missing_run_404(client):
     assert client.get("/runs/12345").status_code == 404
+
+
+def test_run_steps_endpoint(client, session):
+    from app import repo
+    from app.domain.steps import Step
+
+    _, tid = _make_target(client)
+    run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
+    repo.start_step(session, run["id"], Step.READ_STORY)
+    repo.complete_step(session, run["id"], Step.READ_STORY)
+
+    r = client.get(f"/runs/{run['id']}/steps")
+    assert r.status_code == 200
+    steps = r.json()
+    assert len(steps) == 1
+    assert steps[0]["step"] == "read_story"
+    assert steps[0]["status"] == "completed"
+
+
+def test_events_replays_history_of_a_finished_run(client, session):
+    from app import repo
+    from app.orchestrator.bus import bus
+
+    _, tid = _make_target(client)
+    run = client.post(f"/targets/{tid}/runs", json={"story_id": "SCRUM-201", "mode": "full"}).json()
+    rid = run["id"]
+    bus.publish(rid, "line one")
+    bus.publish(rid, "line two")
+    repo.begin_run(session, rid)
+    repo.complete_run(session, rid)  # terminal -> events stream should end, not block
+
+    r = client.get(f"/runs/{rid}/events")
+    assert r.status_code == 200
+    body = r.text
+    assert "line one" in body and "line two" in body
+    assert "event: end" in body

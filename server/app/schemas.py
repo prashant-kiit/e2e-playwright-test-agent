@@ -40,6 +40,15 @@ class RunCreate(BaseModel):
     mode: str = Field(pattern="^(changed|full)$")
 
 
+class StepOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    step: Step
+    status: str
+    attempt: int
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
 class RunOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
