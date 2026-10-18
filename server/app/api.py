@@ -33,9 +33,12 @@ from .schemas import (
     TargetCreate,
     TargetOut,
 )
+from .auth import AuthDep
 from .storage import Storage
 
-router = APIRouter()
+# Everything on this router requires a valid session cookie (tests override
+# require_auth to a no-op). Health and /auth/* live off this router.
+router = APIRouter(dependencies=[AuthDep])
 
 
 def get_launcher() -> Callable[[int], None]:

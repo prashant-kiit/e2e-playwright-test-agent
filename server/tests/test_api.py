@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api import get_launcher, get_storage
+from app.auth import require_auth
 from app.db import get_session
 from app.main import app
 
@@ -34,6 +35,8 @@ def client(session):
     app.dependency_overrides[get_session] = lambda: session
     # No-op launcher: tests assert on DB state, not background execution.
     app.dependency_overrides[get_launcher] = lambda: launched.append
+    # Bypass auth for the API tests (auth itself is tested in test_auth.py).
+    app.dependency_overrides[require_auth] = lambda: None
     c = TestClient(app)
     c.launched = launched  # expose for assertions
     yield c
