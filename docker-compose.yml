@@ -68,6 +68,16 @@ services:
       seaweedfs:
         condition: service_healthy
 
+  web:
+    # nginx serves the built SPA and reverse-proxies the API on one origin.
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+
 volumes:
   pgdata:
   seaweeddata:

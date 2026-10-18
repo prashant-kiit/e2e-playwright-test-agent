@@ -8,6 +8,48 @@ The work is done by **Claude Code**, using three Playwright sub-agents (planner,
 
 ---
 
+## 0. Admin Portal (web UI)
+
+There are now two ways to drive this harness: the original shell flow (`scripts/run-stories.sh`, documented below) and a **single-operator web portal** that wraps it. The portal does not replace the harness — it orchestrates the same per-step Claude Code workflow, keeps run state in a database, and stores artifacts in an object store so you can watch, pause/resume/stop and browse runs from a browser.
+
+**Architecture** (all Dockerized; `docker-compose.yml`):
+
+| Piece | Tech | Role |
+|---|---|---|
+| `web/` | React + Vite, served by nginx | The portal UI (login, projects/targets, live run view, artifacts, history, bootstrap, settings) |
+| `server/` | FastAPI + uvicorn (uv) | API + orchestrator: drives the 5 steps one at a time, checkpoints each, streams the log (SSE) |
+| Postgres | — | **Authoritative run state**: runs, steps, the lease-based per-app lock, history (replaces `.qa-state.json`) |
+| SeaweedFS | S3-compatible | **Artifact blobs** (evidence/report/logs), indexed by the `artifacts` table (MinIO was dropped; it is no longer freely pullable) |
+
+**One owner per concern:** Postgres owns run *status*, SeaweedFS owns artifact *blobs*, the target git repo owns the test *code* (still delivered by `scripts/push-artifacts.sh`), and files under `apps/`/`prompts/` own *config*.
+
+**Quick start:**
+
+```bash
+docker compose up -d --build          # postgres + seaweedfs + api (migrates on boot) + web
+open http://localhost:8080            # log in — password is QA_ADMIN_PASSWORD (default: admin)
+```
+
+- The API container runs `alembic upgrade head` on boot (schema lives in `server/alembic/`), then uvicorn.
+- `QA_RUNNER` selects the agent: **`fake`** (default — synthetic steps, no tokens, for demos/CI) or `claude` (the real per-step runner; needs the `claude` CLI in the execution environment). `QA_FAKE_DELAY` slows the fake runner so you can exercise pause/stop.
+- The repo is mounted at `/workspace` (`QA_REPO_ROOT`) so the backend can read `apps/`/`prompts/` and bootstrap new targets.
+
+**Run modes:** *Full app* (test the whole app) or *Changed only* (focus on the acceptance criteria that changed in the user story since the last tested version — a story diff, since we have the live URL and story, not the app's source).
+
+**Concurrency:** at most one live run per app, enforced by a lease-backed lock (not a boolean); a crashed run's lease expires and a reaper frees the app. A *paused* run keeps its lock until resumed or stopped and is never reaped.
+
+**Developing the portal:**
+
+```bash
+# backend
+cd server && uv run pytest                 # needs Postgres (docker compose up -d postgres); skips if absent
+# frontend
+cd web && npm install && npm test          # Vitest
+cd web && npm run dev                       # Vite dev server on :5173, proxies the API to :8000
+```
+
+---
+
 ## 1. At a glance
 
 | Item | Value |

@@ -16,12 +16,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import models  # noqa: F401  (register ORM tables on Base.metadata)
 from .api import router
 from .auth_api import auth_router
-from .db import Base, engine
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(engine)
+    # Schema is managed by Alembic (the container entrypoint runs
+    # `alembic upgrade head` before uvicorn); tests create tables from metadata.
     yield
 
 
