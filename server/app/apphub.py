@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import config
@@ -118,26 +119,40 @@ class BootstrapError(Exception):
     pass
 
 
-def run_bootstrap(app: str) -> dict:
+@dataclass(frozen=True)
+class BootstrapOutcome:
+    """The portal-facing result of the target-repo bootstrap step.
+
+    This replaces the shell-shaped {"rc": int, "output": str} the step returned
+    while it was still a script: `ok` is the outcome, `output` is the text the
+    form shows. A DeliveryError is an outcome, not a server error, so the form
+    can report a failed bootstrap next to the app it did create.
+    """
+
+    ok: bool
+    output: str
+
+
+def run_bootstrap(app: str, *, tools=None) -> BootstrapOutcome:
     """Bootstrap the app's target repo through app/delivery (was a shell script).
 
-    The shape of the return value is kept ({"rc", "output"}) so the portal's
-    bootstrap form and its tests do not change: the form reports an outcome and
-    some text, and a DeliveryError is an outcome, not a server error.
+    `tools` is the delivery seam (GitHub client + git + token + workspace); left
+    unset it is built from the environment. Tests pass one backed by a bare repo
+    on disk, so this needs neither network nor credentials.
     """
     from .delivery import DeliveryError, bootstrap_target
 
     try:
-        result = bootstrap_target(app)
+        result = bootstrap_target(app, tools=tools)
     except DeliveryError as exc:
-        return {"rc": 1, "output": str(exc)}
+        return BootstrapOutcome(ok=False, output=str(exc))
     lines = [
         f"App:    {result.app}",
         f"Target: {result.repo} ({result.branch})",
-        *( [result.changes.strip()] if result.changes.strip() else [] ),
+        *([result.changes.strip()] if result.changes.strip() else []),
         result.message,
     ]
-    return {"rc": 0, "output": "\n".join(lines)}
+    return BootstrapOutcome(ok=True, output="\n".join(lines))
 
 
 def bootstrap_app(data: dict, run=run_bootstrap, do_bootstrap: bool = True) -> dict:

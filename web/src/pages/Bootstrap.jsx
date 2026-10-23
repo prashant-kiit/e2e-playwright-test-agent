@@ -87,8 +87,10 @@ export default function Bootstrap() {
           <div className="banner success">
             Created <code>apps/{result.app}</code>.
             {result.bootstrap
-              ? ` Bootstrap rc=${result.bootstrap.rc}.`
-              : " (bootstrap script skipped)"}
+              ? result.bootstrap.ok
+                ? " Target repo bootstrapped."
+                : " Target-repo bootstrap failed — the app folder was still created."
+              : " (target-repo bootstrap skipped)"}
             {result.bootstrap?.output && <pre className="log">{result.bootstrap.output}</pre>}
           </div>
         )}

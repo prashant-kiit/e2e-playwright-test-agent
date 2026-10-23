@@ -77,6 +77,21 @@ class BootstrapBody(BaseModel):
     do_bootstrap: bool = True
 
 
+class BootstrapOutcomeOut(BaseModel):
+    """The target-repo step's outcome. `ok=False` with the reason in `output` is
+    a normal response: apps/<app>/ was created even if the sync did not land."""
+
+    model_config = ConfigDict(from_attributes=True)
+    ok: bool
+    output: str
+
+
+class BootstrapAppOut(BaseModel):
+    app: str
+    created: bool
+    bootstrap: BootstrapOutcomeOut | None = None
+
+
 class PromptOut(BaseModel):
     name: str
     content: str

@@ -26,6 +26,7 @@ from .orchestrator.bus import DONE, bus
 from .schemas import (
     AppOut,
     ArtifactOut,
+    BootstrapAppOut,
     BootstrapBody,
     BootstrappedOut,
     DeliverBody,
@@ -58,7 +59,7 @@ def get_storage() -> Storage:
     return storage.from_env()
 
 
-def get_bootstrap_runner() -> Callable[[str], dict]:
+def get_bootstrap_runner() -> Callable[[str], apphub.BootstrapOutcome]:
     """The target-repo step of bootstrapping. Overridden in tests (no git/network)."""
     return apphub.run_bootstrap
 
@@ -93,7 +94,7 @@ def list_stories(app: str):
     return apphub.list_stories(app)
 
 
-@router.post("/apps/bootstrap", status_code=201)
+@router.post("/apps/bootstrap", status_code=201, response_model=BootstrapAppOut)
 def bootstrap_app(
     body: BootstrapBody,
     run=Depends(get_bootstrap_runner),
