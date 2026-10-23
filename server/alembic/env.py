@@ -17,11 +17,11 @@ from __future__ import annotations
 import os
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from app.db import Base, database_url
 import app.models  # noqa: F401  (register tables on Base.metadata)
+from alembic import context
+from app.db import Base, database_url
 
 config = context.config
 
