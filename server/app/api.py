@@ -11,12 +11,12 @@ import json
 import queue
 from collections.abc import Callable
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import apphub, delivery, repo, storage
+from . import apphub, delivery, repo, revisions, storage
 from .auth import AuthDep
 from .db import get_session
 from .domain.status import is_terminal
@@ -31,18 +31,22 @@ from .schemas import (
     BootstrappedOut,
     DeliverBody,
     DeliveryOut,
+    FileIndexOut,
+    ParityOut,
     ProjectCreate,
     ProjectOut,
     PromptOut,
     ResetBody,
+    RevisionOut,
     RunCreate,
     RunOut,
+    SnapshotOut,
     StepOut,
     StoryOut,
     TargetCreate,
     TargetOut,
 )
-from .storage import Storage
+from .storage import Storage, content_type_for
 
 # Everything on this router requires a valid session cookie (tests override
 # require_auth to a no-op). Health and /auth/* live off this router.
@@ -234,6 +238,137 @@ def _target_or_404(session: Session, target_id: int):
         return repo.get_target(session, target_id)
     except repo.NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# --- revisions / file_index / parity (P2) --------------------------------
+#
+# Read-only, except the snapshot action. Nothing here reads the revision tables
+# to make a decision -- `apps/` is still authoritative for the whole of P2, and
+# a route that started deciding from these rows would remove the safety net the
+# phase exists to keep (DESIGN.md §13).
+#
+# Every route resolves through a row and filters by the request's tenant, so a
+# blob is never served by key alone (DESIGN.md §9). The tenant is always 1
+# today; filtering anyway is the structural half of P5.
+
+def _revision_out(rev) -> RevisionOut:
+    return RevisionOut(
+        id=rev.id,
+        rev=rev.rev,
+        parent_rev=rev.parent_rev,
+        tree_hash=rev.tree_hash,
+        produced_by_run_id=rev.produced_by_run_id,
+        author=rev.author,
+        created_at=rev.created_at,
+        file_count=len(rev.files),
+    )
+
+
+@router.post("/targets/{target_id}/revisions/snapshot", response_model=SnapshotOut)
+def snapshot_target_tree(
+    target_id: int,
+    response: Response,
+    session: Session = Depends(get_session),
+    store: Storage = Depends(get_storage),
+):
+    """Snapshot a target's tracked tree right now, outside any run.
+
+    **P2-only scaffolding.** It exists so an operator can give a never-run
+    target a head revision to compare parity against. In P3 the filesystem is
+    not authoritative and "snapshot the disk" stops meaning anything, so this
+    route goes away with the mount it reads.
+
+    An unchanged tree commits nothing and answers 200 with the existing head;
+    a new revision answers 201.
+    """
+    target = _target_or_404(session, target_id)
+    try:
+        committed = revisions.snapshot_target(session, target, store, author="operator")
+    except Exception as exc:  # the blob store is down, or the tree is unreadable
+        raise HTTPException(status_code=502, detail=f"snapshot failed: {exc}") from exc
+
+    if committed is None:
+        head = revisions.head_revision(session, target_id)
+        if head is None:  # an empty tracked tree hashes to a new revision, so
+            raise HTTPException(  # this is unreachable in practice
+                status_code=500, detail="snapshot committed nothing and there is no head"
+            )
+        response.status_code = 200
+        return SnapshotOut(created=False, revision=_revision_out(head))
+
+    response.status_code = 201
+    return SnapshotOut(created=True, revision=_revision_out(committed))
+
+
+@router.get("/targets/{target_id}/revisions", response_model=list[RevisionOut])
+def list_target_revisions(target_id: int, session: Session = Depends(get_session)):
+    _target_or_404(session, target_id)
+    return [_revision_out(r) for r in revisions.list_revisions(session, target_id)]
+
+
+@router.get("/targets/{target_id}/parity", response_model=ParityOut)
+def target_parity(target_id: int, session: Session = Depends(get_session)):
+    """Whether the head revision agrees with the files on disk.
+
+    The phase's evidence, and strictly read-only: parity never repairs or
+    re-snapshots, because a self-healing check would hide the drift it exists
+    to surface.
+    """
+    target = _target_or_404(session, target_id)
+    parity = revisions.target_parity(session, target)
+    return ParityOut(
+        has_revision=parity.has_revision,
+        in_sync=parity.in_sync,
+        rev=parity.rev,
+        tree_hash=parity.tree_hash,
+        only_in_db=list(parity.diff.only_in_db),
+        only_on_disk=list(parity.diff.only_on_disk),
+        modified=list(parity.diff.modified),
+    )
+
+
+def _revision_or_404(session: Session, revision_id: int):
+    rev = revisions.get_revision(session, revision_id)
+    if rev is None:
+        raise HTTPException(status_code=404, detail=f"no revision {revision_id}")
+    return rev
+
+
+@router.get("/revisions/{revision_id}/files", response_model=list[FileIndexOut])
+def list_revision_files(revision_id: int, session: Session = Depends(get_session)):
+    _revision_or_404(session, revision_id)
+    return revisions.list_files(session, revision_id)
+
+
+@router.get("/revisions/{revision_id}/file")
+def revision_file_content(
+    revision_id: int,
+    path: str,
+    session: Session = Depends(get_session),
+    store: Storage = Depends(get_storage),
+):
+    """Stream one tracked file's bytes out of blob storage.
+
+    `path` is a query parameter rather than a wildcard path segment so tracked
+    paths with slashes need no escaping scheme.
+
+    The row is found first and its tenant checked, and only then is the blob it
+    names read: knowing a blob key is not enough to read bytes.
+    """
+    _revision_or_404(session, revision_id)
+    row = revisions.get_file(session, revision_id, path)
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail=f"revision {revision_id} has no file {path!r}"
+        )
+    try:
+        chunks, _ = store.get_stream(row.blob_key)
+    except Exception as exc:  # object missing / store down
+        raise HTTPException(status_code=502, detail=f"storage error: {exc}") from exc
+    # Blobs are stored untyped (the key is a content hash with no extension), so
+    # the media type comes from the path that referenced it.
+    return StreamingResponse(chunks, media_type=content_type_for(path))
+
 
 
 @router.post("/targets/{target_id}/runs", response_model=RunOut, status_code=201)

@@ -23,6 +23,7 @@ class Storage(Protocol):
     def ensure_bucket(self) -> None: ...
     def put_file(self, key: str, path: Path, content_type: str | None = None) -> None: ...
     def get_stream(self, key: str) -> tuple[Iterator[bytes], str]: ...
+    def exists(self, key: str) -> bool: ...
 
 
 class S3Storage:
@@ -64,6 +65,21 @@ class S3Storage:
                 Body=fh,
                 ContentType=content_type or content_type_for(key),
             )
+
+    def exists(self, key: str) -> bool:
+        """Whether an object is already stored under `key`.
+
+        Content addressing makes this the dedup check: a blob key *is* its
+        content hash, so an object that exists holds exactly the bytes about to
+        be uploaded. A missing bucket is simply "no".
+        """
+        from botocore.exceptions import ClientError
+
+        try:
+            self._client.head_object(Bucket=self.bucket, Key=key)
+        except ClientError:
+            return False
+        return True
 
     def get_stream(self, key: str) -> tuple[Iterator[bytes], str]:
         obj = self._client.get_object(Bucket=self.bucket, Key=key)

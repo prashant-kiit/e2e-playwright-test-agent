@@ -24,6 +24,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401  (register the ORM tables on Base.metadata)
 from app.db import Base, database_url
+from app.tenancy import DEFAULT_TENANT_ID
 
 TEST_DB = "qa_test"
 SERVER_DIR = Path(__file__).resolve().parents[1]
@@ -100,7 +101,9 @@ def _clear_bus():
 # `tenants` is deliberately not truncated: its single row is seeded by the
 # migration, so it is schema-level reference data rather than test state. Wiping
 # it would leave every tenant_id FK dangling and make the fixture describe a
-# database production never has.
+# database production never has. Any *extra* tenant a test adds (to prove the
+# tenant filter does real work) is still cleaned up, so the next test starts
+# from exactly the state the migration left.
 _PRESERVED_TABLES = frozenset({"tenants"})
 
 
@@ -112,6 +115,11 @@ def _truncate_all(engine):
     )
     with engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+        conn.execute(
+            text("DELETE FROM tenants WHERE id <> :seeded").bindparams(
+                seeded=DEFAULT_TENANT_ID
+            )
+        )
 
 
 @pytest.fixture()

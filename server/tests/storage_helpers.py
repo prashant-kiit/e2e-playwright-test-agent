@@ -32,3 +32,6 @@ class FakeStorage:
     def get_stream(self, key: str) -> tuple[Iterator[bytes], str]:
         data, ct = self.objects[key]
         return iter([data]), ct
+
+    def exists(self, key: str) -> bool:
+        return key in self.objects

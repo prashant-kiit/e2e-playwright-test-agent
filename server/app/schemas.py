@@ -155,3 +155,55 @@ class DeliveryOut(BaseModel):
     pr_url: str = ""
     pr_number: int | None = None
     detail: dict = {}
+
+
+# --- revisions / file_index / parity (P2) --------------------------------
+#
+# All read-only except the snapshot action. These describe the dual-written
+# revision model; nothing in the system reads them to make a decision in P2.
+
+class RevisionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    rev: int
+    parent_rev: int | None
+    tree_hash: str
+    produced_by_run_id: int | None
+    author: str
+    created_at: datetime
+    file_count: int
+
+
+class SnapshotOut(BaseModel):
+    """The outcome of a manual snapshot.
+
+    `created=False` with the unchanged head in `revision` is a normal response,
+    not a failure: a tree whose hash already matches the head commits nothing,
+    because `rev` counts real changes rather than counting attempts.
+    """
+
+    created: bool
+    revision: RevisionOut
+
+
+class FileIndexOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    path: str
+    blob_key: str
+    size: int
+
+
+class ParityOut(BaseModel):
+    """Whether a target's head revision agrees with the files on disk.
+
+    `has_revision=False` is its own state: a never-snapshotted target is not
+    "in sync", and is not an error either.
+    """
+
+    has_revision: bool
+    in_sync: bool
+    rev: int | None
+    tree_hash: str | None
+    only_in_db: list[str]
+    only_on_disk: list[str]
+    modified: list[str]

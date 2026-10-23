@@ -4,6 +4,10 @@ This module owns the naming contract the whole harness is built on -- the
 derivations that scripts/qa-lib.sh and scripts/push-artifacts.sh did with jq and
 shell parameter expansion. app/apphub.py imports the regexes from here so there
 is exactly one definition of "what a story file is called".
+
+P2's tracked tree lives here for the same reason: snapshotting and delivery must
+not drift about what the product versions, and this module already owns the
+infra list and the story-file naming both of them need.
 """
 
 from __future__ import annotations
@@ -41,6 +45,97 @@ INFRA_COMMON: tuple[str, ...] = (
 
 def infra_files(app: str) -> tuple[str, ...]:
     return INFRA_COMMON + (f"apps/{app}/app.json", f"apps/{app}/seed.spec.ts")
+
+
+# --- the tracked tree (P2) ----------------------------------------------
+#
+# What a revision versions, for one target. The infra files above are shared on
+# disk across every app but are **logically per-target**: each target's revision
+# carries its own copy, which content addressing makes free.
+
+# The app's own tree content, target-relative. Single files, then whole trees.
+TRACKED_APP_FILES: tuple[str, ...] = ("seed.spec.ts",)
+TRACKED_APP_TREES: tuple[str, ...] = ("user-stories", "specs", "tests")
+
+# Never tree content, even though they sit inside apps/<app>/ (DESIGN.md §4):
+#   app.json      SaaS-internal config, rendered from Postgres in P3, and it
+#                 must never become something a revision delivers;
+#   reports/      the agent's reports and evidence screenshots -- run output,
+#                 which is why push.py already declines to deliver them;
+#   the rest      run artifacts, keyed by run in the artifacts table instead.
+UNTRACKED_APP_PATHS: frozenset[str] = frozenset(
+    {
+        "app.json",
+        "session.jsonl",
+        "reports",
+        "node_modules",
+        "test-results",
+        "playwright-report",
+    }
+)
+
+
+def app_dir(app: str) -> Path:
+    return config.repo_root() / "apps" / app
+
+
+def tracked_path_on_disk(app: str, path: str) -> Path:
+    """Where a target-relative tracked path lives in today's monorepo layout.
+
+    The one mapping function between the stored shape and the on-disk shape --
+    and the same one P3's hydrate needs, run the other way. Stored paths are
+    target-relative on purpose: the revision is a whole-worktree snapshot of one
+    target, so baking this repo's apps/<app>/ layout into the durable record
+    would put a path migration in front of P3.
+    """
+    if path in INFRA_COMMON:
+        return config.repo_root() / path
+    return app_dir(app) / path
+
+
+def tracked_tree(app: str) -> list[tuple[str, Path]]:
+    """Every tracked file for `app`, as (target-relative path, path on disk).
+
+    Sorted by path and free of directory iteration order, so two walks of the
+    same tree agree. A tracked file that does not exist is omitted rather than
+    an error: the tree describes what is there, and a target missing its
+    workflow file is a bootstrap problem, not a snapshot failure.
+    """
+    found: dict[str, Path] = {}
+
+    for rel in INFRA_COMMON:
+        path = config.repo_root() / rel
+        if path.is_file():
+            found[rel] = path
+
+    base = app_dir(app)
+    for rel in TRACKED_APP_FILES:
+        path = base / rel
+        if path.is_file() and rel not in UNTRACKED_APP_PATHS:
+            found[rel] = path
+
+    for tree in TRACKED_APP_TREES:
+        root = base / tree
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(base).as_posix()
+            if _is_untracked(rel):
+                continue
+            found[rel] = path
+
+    return sorted(found.items())
+
+
+def _is_untracked(rel: str) -> bool:
+    """True if any segment of a target-relative path is an untracked name.
+
+    Checked per segment rather than per prefix so a `node_modules/` nested
+    inside a test folder is excluded too.
+    """
+    return any(part in UNTRACKED_APP_PATHS for part in rel.split("/"))
 
 
 def app_json_path(app: str) -> Path:

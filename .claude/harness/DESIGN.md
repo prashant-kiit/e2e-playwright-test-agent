@@ -120,13 +120,18 @@ What is versioned, bundled and delivered — versus what is a run artifact:
 | `specs/` (plans) | `test-results/` |
 | `seed.spec.ts` | `playwright-report/` |
 | `tests/` | traces, videos, screenshots |
-| `playwright.config.ts` *(generated)* | `session.jsonl` |
+| `playwright.config.ts` *(generated from P3)* | `session.jsonl` |
 | `package.json` + lockfile | |
 | `.gitignore` | |
 | `.github/workflows/playwright.yml` | |
 
 `session.jsonl` is deliberately an **artifact keyed by run**, not tree content: Q2's
 resume needs it, but it must never reach a customer repo.
+
+**`playwright.config.ts` is generated from P3 onward, not before.** P2 tracks it as the
+hand-maintained file it still is, and snapshots its bytes like any other tracked file.
+It becomes generated with hydrate in P3, which makes it the one tracked file whose
+content *shape* changes; nothing in P2 anticipates that.
 
 **Config is not a tree file.** `app.json` no longer exists and is never delivered — it
 is SaaS-internal. At hydrate, config is *rendered* out of Postgres:
