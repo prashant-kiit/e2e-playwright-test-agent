@@ -47,6 +47,21 @@ describe("api wrapper", () => {
     expect(api.artifactContentUrl(7)).toBe("/artifacts/7/content");
   });
 
+  it("refuses an HTML document where data was expected", async () => {
+    // The API paths collide with SPA routes, so a caching slip can hand the
+    // app its own index.html. Returning it as a string blanks the page with a
+    // cryptic "e.map is not a function"; this says what actually happened.
+    mockFetch(200, "<!doctype html><title>QA Portal</title>", "text/html");
+    await expect(api.listProjects()).rejects.toThrow(/unexpected html/i);
+  });
+
+  it("still allows a tracked file to come back as any content type", async () => {
+    // ...but the file route serves whatever the tracked path implies, which
+    // may legitimately be html, so it opts out of that guard.
+    mockFetch(200, "<h1>fixture</h1>", "text/html");
+    expect(await api.revisionFile(3, "tests/fixtures/page.html")).toBe("<h1>fixture</h1>");
+  });
+
   it("encodes a tracked path into the revision file query", async () => {
     mockFetch(200, "// cart\n", "text/plain");
     await api.revisionFile(3, "tests/checkout/cart.spec.ts");

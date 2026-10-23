@@ -251,7 +251,7 @@ def _target_or_404(session: Session, target_id: int):
 # blob is never served by key alone (DESIGN.md §9). The tenant is always 1
 # today; filtering anyway is the structural half of P5.
 
-def _revision_out(rev) -> RevisionOut:
+def _revision_out(rev, file_count: int) -> RevisionOut:
     return RevisionOut(
         id=rev.id,
         rev=rev.rev,
@@ -260,7 +260,7 @@ def _revision_out(rev) -> RevisionOut:
         produced_by_run_id=rev.produced_by_run_id,
         author=rev.author,
         created_at=rev.created_at,
-        file_count=len(rev.files),
+        file_count=file_count,
     )
 
 
@@ -294,16 +294,25 @@ def snapshot_target_tree(
                 status_code=500, detail="snapshot committed nothing and there is no head"
             )
         response.status_code = 200
-        return SnapshotOut(created=False, revision=_revision_out(head))
+        return SnapshotOut(
+            created=False,
+            revision=_revision_out(head, revisions.count_files(session, head.id)),
+        )
 
     response.status_code = 201
-    return SnapshotOut(created=True, revision=_revision_out(committed))
+    return SnapshotOut(
+        created=True,
+        revision=_revision_out(committed, revisions.count_files(session, committed.id)),
+    )
 
 
 @router.get("/targets/{target_id}/revisions", response_model=list[RevisionOut])
 def list_target_revisions(target_id: int, session: Session = Depends(get_session)):
     _target_or_404(session, target_id)
-    return [_revision_out(r) for r in revisions.list_revisions(session, target_id)]
+    return [
+        _revision_out(rev, count)
+        for rev, count in revisions.list_revisions_with_file_counts(session, target_id)
+    ]
 
 
 @router.get("/targets/{target_id}/parity", response_model=ParityOut)

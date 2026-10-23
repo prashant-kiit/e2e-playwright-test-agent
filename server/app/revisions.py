@@ -25,7 +25,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .delivery.render import tracked_tree
@@ -221,6 +221,34 @@ def list_revisions(session: Session, target_id: int) -> list[Revision]:
             .order_by(Revision.rev.desc())
         )
     )
+
+
+def list_revisions_with_file_counts(
+    session: Session, target_id: int
+) -> list[tuple[Revision, int]]:
+    """A target's history with each revision's file count, newest first.
+
+    The count comes from one aggregate rather than from `revision.files`, which
+    would lazy-load the whole file index of every revision in the list -- 41
+    rows per revision on a real target, to display one number.
+    """
+    rows = session.execute(
+        select(Revision, func.count(FileIndex.path))
+        .outerjoin(FileIndex, FileIndex.revision_id == Revision.id)
+        .where(
+            Revision.target_id == target_id,
+            Revision.tenant_id == current_tenant_id(),
+        )
+        .group_by(Revision.id)
+        .order_by(Revision.rev.desc())
+    ).all()
+    return [(rev, count) for rev, count in rows]
+
+
+def count_files(session: Session, revision_id: int) -> int:
+    return session.scalar(
+        select(func.count(FileIndex.path)).where(FileIndex.revision_id == revision_id)
+    ) or 0
 
 
 def get_revision(session: Session, revision_id: int) -> Revision | None:
