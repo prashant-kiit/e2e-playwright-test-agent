@@ -1,9 +1,7 @@
 // Thin fetch wrapper. Same-origin in dev (via the Vite proxy), so the session
 // cookie is sent automatically; `credentials: "include"` keeps prod safe too.
 
-// `anyContentType` opts out of the HTML guard below, for the one route that
-// serves a tracked file's own bytes.
-async function req(method, path, body, { anyContentType = false } = {}) {
+async function req(method, path, body) {
   const opts = { method, credentials: "include", headers: {} };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
@@ -24,7 +22,7 @@ async function req(method, path, body, { anyContentType = false } = {}) {
   // proxy slip can answer a data call with index.html. Handing that back as a
   // string turns into "e.map is not a function" three frames away and a blank
   // page; failing here says what actually happened.
-  if (!anyContentType && ct.includes("text/html")) {
+  if (ct.includes("text/html")) {
     throw new ApiError(
       `unexpected HTML from ${path} — expected data. The SPA shell was served ` +
         `for an API path; check the reverse proxy's Vary/Accept handling.`,
@@ -80,10 +78,10 @@ export const api = {
   revisionFiles: (revisionId) => req("GET", `/revisions/${revisionId}/files`),
   // A tracked path contains slashes, so it travels as a query parameter and
   // needs no escaping scheme beyond the usual encoding.
+  // Always text: the route serves every tracked path as text/plain so the
+  // bytes reach the viewer exactly as they were stored.
   revisionFile: (revisionId, path) =>
-    req("GET", `/revisions/${revisionId}/file?path=${encodeURIComponent(path)}`, undefined, {
-      anyContentType: true,
-    }),
+    req("GET", `/revisions/${revisionId}/file?path=${encodeURIComponent(path)}`),
 
   // repo introspection + bootstrap + settings
   listApps: () => req("GET", "/apps"),

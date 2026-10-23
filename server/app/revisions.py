@@ -209,20 +209,6 @@ def snapshot_target(
     return revision
 
 
-def list_revisions(session: Session, target_id: int) -> list[Revision]:
-    """A target's history, newest first. Read-only, tenant-filtered."""
-    return list(
-        session.scalars(
-            select(Revision)
-            .where(
-                Revision.target_id == target_id,
-                Revision.tenant_id == current_tenant_id(),
-            )
-            .order_by(Revision.rev.desc())
-        )
-    )
-
-
 def list_revisions_with_file_counts(
     session: Session, target_id: int
 ) -> list[tuple[Revision, int]]:
@@ -246,8 +232,13 @@ def list_revisions_with_file_counts(
 
 
 def count_files(session: Session, revision_id: int) -> int:
+    """How many files a revision holds. Tenant-filtered like every other read:
+    the count of another tenant's revision is not ours to report."""
     return session.scalar(
-        select(func.count(FileIndex.path)).where(FileIndex.revision_id == revision_id)
+        select(func.count(FileIndex.path)).where(
+            FileIndex.revision_id == revision_id,
+            FileIndex.tenant_id == current_tenant_id(),
+        )
     ) or 0
 
 

@@ -223,9 +223,10 @@ function RevisionFiles({ revision }) {
     setError("");
     try {
       // Byte-for-byte what the snapshot stored, served out of blob storage
-      // rather than read off the shared disk.
-      const text = await api.revisionFile(revision.id, path);
-      setContents(typeof text === "string" ? text : JSON.stringify(text, null, 2));
+      // rather than read off the shared disk. Never re-encode it: running a
+      // tracked package.json through JSON.stringify would show the operator
+      // reformatted text and call it the stored file.
+      setContents(await api.revisionFile(revision.id, path));
     } catch (e) {
       setError(String(e.message || e));
     }

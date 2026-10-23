@@ -22,7 +22,7 @@ from .db import SessionLocal
 from .domain.steps import Step
 from .orchestrator.bus import bus
 from .orchestrator.claude import ClaudeRunner
-from .orchestrator.driver import run_pipeline
+from .orchestrator.driver import SessionFactory, run_pipeline
 from .orchestrator.fake import FakeRunner
 from .orchestrator.runner import Emit, Runner
 from .reaper import heartbeat_during
@@ -39,10 +39,9 @@ def make_runner() -> Runner:
 
 
 def make_collector(
-    *, session_factory=None, store: Storage | None = None
+    *, session_factory: SessionFactory = SessionLocal, store: Storage | None = None
 ) -> BoundaryHalf:
     """A collect(run_id, step) callback that sweeps the run dir into storage."""
-    session_factory = session_factory or SessionLocal
     collector = ArtifactCollector(store or storage.from_env())
 
     def collect(run_id: int, step: Step) -> None:
@@ -54,14 +53,13 @@ def make_collector(
 
 
 def make_sync_out(
-    *, session_factory=None, store: Storage | None = None
+    *, session_factory: SessionFactory = SessionLocal, store: Storage | None = None
 ) -> BoundaryHalf:
     """A sync_out(run_id, step) callback that commits a revision of the tree.
 
     P2's dual-write: upload the tracked tree's blobs, then commit one revision
     naming them. A step that changed no tracked file commits nothing.
     """
-    session_factory = session_factory or SessionLocal
     store = store or storage.from_env()
 
     def sync_out(run_id: int, step: Step) -> None:
@@ -71,7 +69,8 @@ def make_sync_out(
                 s,
                 run.target,
                 store,
-                author=f"run:{run.run_key}"[:100],
+                # Fits Revision.author's 100 chars: run_key is at most 80.
+                author=f"run:{run.run_key}",
                 produced_by_run_id=run.id,
             )
 
@@ -81,7 +80,7 @@ def make_sync_out(
 def make_step_boundary_hook(
     emit: Emit,
     *,
-    session_factory=None,
+    session_factory: SessionFactory = SessionLocal,
     store: Storage | None = None,
     collect: BoundaryHalf | None = None,
     sync_out: BoundaryHalf | None = None,
@@ -103,6 +102,11 @@ def make_step_boundary_hook(
     once truth has moved into Postgres, a failed sync-out *has* to fail the run.
     Do not "fix" the swallowed exception before then.
     """
+    # Both halves talk to the same object store, so build the client once
+    # rather than once per half.
+    if store is None and (collect is None or sync_out is None):
+        store = storage.from_env()
+
     halves: tuple[tuple[str, BoundaryHalf], ...] = (
         (
             "artifact collection",
@@ -130,7 +134,7 @@ def ensure_baseline_revision(
     run_id: int,
     emit: Emit,
     *,
-    session_factory=None,
+    session_factory: SessionFactory = SessionLocal,
     store: Storage | None = None,
 ) -> None:
     """Give a target with no history a revision of the tree as it stands now.
@@ -147,7 +151,6 @@ def ensure_baseline_revision(
     Best-effort, for the same reason the step-boundary hook is: this is P2
     scaffolding and must not be able to stop a run.
     """
-    session_factory = session_factory or SessionLocal
     try:
         with session_factory() as s:
             run = repo.get_run(s, run_id)
@@ -171,7 +174,7 @@ def ensure_baseline_revision(
 def launch_run(run_id: int) -> None:
     """Start the pipeline for run_id on a daemon thread."""
     emit = bus.emitter(run_id)
-    collect = make_step_boundary_hook(emit)
+    on_step_boundary = make_step_boundary_hook(emit)
 
     def _target() -> None:
         try:
@@ -181,7 +184,7 @@ def launch_run(run_id: int) -> None:
             # longer than the TTL would look like a crash to the reaper.
             with heartbeat_during(run_id):
                 run_pipeline(
-                    SessionLocal, run_id, make_runner(), emit=emit, collect=collect
+                    SessionLocal, run_id, make_runner(), emit=emit, collect=on_step_boundary
                 )
         finally:
             bus.close(run_id)

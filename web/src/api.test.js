@@ -55,11 +55,12 @@ describe("api wrapper", () => {
     await expect(api.listProjects()).rejects.toThrow(/unexpected html/i);
   });
 
-  it("still allows a tracked file to come back as any content type", async () => {
-    // ...but the file route serves whatever the tracked path implies, which
-    // may legitimately be html, so it opts out of that guard.
-    mockFetch(200, "<h1>fixture</h1>", "text/html");
-    expect(await api.revisionFile(3, "tests/fixtures/page.html")).toBe("<h1>fixture</h1>");
+  it("returns a tracked json file verbatim, not re-encoded", async () => {
+    // The route serves every tracked path as text/plain precisely so this
+    // cannot become JSON.parse -> JSON.stringify, which is not the stored bytes.
+    const raw = '{"name":   "qa",\n  "private": true}\n';
+    mockFetch(200, raw, "text/plain; charset=utf-8");
+    expect(await api.revisionFile(3, "package.json")).toBe(raw);
   });
 
   it("encodes a tracked path into the revision file query", async () => {

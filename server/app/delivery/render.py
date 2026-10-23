@@ -53,9 +53,23 @@ def infra_files(app: str) -> tuple[str, ...]:
 # disk across every app but are **logically per-target**: each target's revision
 # carries its own copy, which content addressing makes free.
 
-# The app's own tree content, target-relative. Single files, then whole trees.
+# The app's own tree content, target-relative: single files, then directories
+# with the glob that defines what counts inside them. The globs are not `**`
+# by accident -- stories and plans are markdown, and anything else that lands
+# in those folders is somebody's scratch file, not something to version and
+# (in P3) hydrate back into a worktree.
 TRACKED_APP_FILES: tuple[str, ...] = ("seed.spec.ts",)
-TRACKED_APP_TREES: tuple[str, ...] = ("user-stories", "specs", "tests")
+TRACKED_APP_TREES: tuple[tuple[str, str], ...] = (
+    ("user-stories", "*.md"),
+    ("specs", "*.md"),
+    ("tests", "**/*"),
+)
+
+# Never tree content wherever they turn up. artifacts.py skips .DS_Store for the
+# same reason; a snapshot has more at stake, since a stray file here becomes
+# versioned content that a later phase writes back out.
+UNTRACKED_NAMES: frozenset[str] = frozenset({".DS_Store", "Thumbs.db", ".gitkeep"})
+UNTRACKED_SUFFIXES: tuple[str, ...] = ("~", ".swp", ".swo", ".orig", ".rej")
 
 # Never tree content, even though they sit inside apps/<app>/ (DESIGN.md §4):
 #   app.json      SaaS-internal config, rendered from Postgres in P3, and it
@@ -110,32 +124,34 @@ def tracked_tree(app: str) -> list[tuple[str, Path]]:
 
     base = app_dir(app)
     for rel in TRACKED_APP_FILES:
-        path = base / rel
-        if path.is_file() and rel not in UNTRACKED_APP_PATHS:
-            found[rel] = path
+        if not _is_untracked(rel) and (base / rel).is_file():
+            found[rel] = tracked_path_on_disk(app, rel)
 
-    for tree in TRACKED_APP_TREES:
+    for tree, pattern in TRACKED_APP_TREES:
         root = base / tree
         if not root.is_dir():
             continue
-        for path in root.rglob("*"):
+        for path in root.glob(pattern):
             if not path.is_file():
                 continue
             rel = path.relative_to(base).as_posix()
             if _is_untracked(rel):
                 continue
-            found[rel] = path
+            found[rel] = tracked_path_on_disk(app, rel)
 
     return sorted(found.items())
 
 
 def _is_untracked(rel: str) -> bool:
-    """True if any segment of a target-relative path is an untracked name.
+    """Whether a target-relative path is excluded from the tracked tree.
 
-    Checked per segment rather than per prefix so a `node_modules/` nested
-    inside a test folder is excluded too.
+    Checked per path segment rather than per prefix, so a `node_modules/`
+    nested inside a test folder is excluded as surely as one at the top.
     """
-    return any(part in UNTRACKED_APP_PATHS for part in rel.split("/"))
+    parts = rel.split("/")
+    if any(part in UNTRACKED_APP_PATHS or part in UNTRACKED_NAMES for part in parts):
+        return True
+    return parts[-1].endswith(UNTRACKED_SUFFIXES)
 
 
 def app_json_path(app: str) -> Path:

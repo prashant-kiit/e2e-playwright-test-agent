@@ -118,6 +118,32 @@ def test_a_file_is_served_byte_identical_out_of_blob_storage(client, target):
     assert r.content == on_disk.read_bytes()
 
 
+def test_a_json_tracked_file_survives_the_round_trip_byte_identical(client, target):
+    """A tracked file is source text to display, never a document to re-encode.
+
+    Served as application/json, package.json gets parsed and re-serialised by
+    the browser before it reaches the viewer -- different whitespace, different
+    key order, not the bytes that were stored. The route therefore declares a
+    text media type for every tracked path.
+    """
+    rev = client.post(f"/targets/{target.id}/revisions/snapshot").json()["revision"]
+    on_disk = client.workspace / "package.json"
+
+    r = client.get(f"/revisions/{rev['id']}/file", params={"path": "package.json"})
+    assert r.status_code == 200
+    assert r.content == on_disk.read_bytes()
+    assert r.headers["content-type"].startswith("text/plain")
+
+
+def test_every_tracked_path_is_served_as_text(client, target):
+    """Including .ts, which mimetypes otherwise guesses as video/mp2t."""
+    rev = client.post(f"/targets/{target.id}/revisions/snapshot").json()["revision"]
+    for path in ("playwright.config.ts", ".gitignore", "user-stories/SCRUM-1-checkout.md"):
+        r = client.get(f"/revisions/{rev['id']}/file", params={"path": path})
+        assert r.status_code == 200, path
+        assert r.headers["content-type"].startswith("text/plain"), path
+
+
 def test_a_path_the_revision_does_not_contain_is_refused(client, target):
     rev = client.post(f"/targets/{target.id}/revisions/snapshot").json()["revision"]
 

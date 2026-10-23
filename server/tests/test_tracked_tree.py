@@ -125,6 +125,52 @@ def test_a_missing_infra_file_is_skipped_not_an_error(tmp_path, monkeypatch):
     assert "package.json" in tracked
 
 
+def test_stories_and_plans_are_markdown_only(tmp_path, monkeypatch):
+    """The spec's table says `user-stories/*.md` and `specs/*.md`, not `**`.
+
+    Walking those folders wholesale would version whatever else landed in them
+    -- and in P3 hydrate would write it back into a worktree.
+    """
+    workspace = make_workspace(tmp_path, app="demo")
+    app_dir = workspace / "apps" / "demo"
+    (app_dir / "user-stories" / "notes.txt").write_text("scratch\n")
+    (app_dir / "specs" / "draft.docx").write_bytes(b"\x00binary")
+    monkeypatch.setenv("QA_REPO_ROOT", str(workspace))
+
+    tracked = set(_tracked(workspace))
+    assert "user-stories/notes.txt" not in tracked
+    assert "specs/draft.docx" not in tracked
+    assert "user-stories/SCRUM-1-checkout.md" in tracked
+    assert "specs/SCRUM-1-checkout-test-plan.md" in tracked
+
+
+def test_editor_and_os_junk_is_never_tracked(tmp_path, monkeypatch):
+    """artifacts.py skips .DS_Store for the same reason; a snapshot must too,
+    or a stray file becomes versioned tree content."""
+    workspace = make_workspace(tmp_path, app="demo")
+    tests_dir = workspace / "apps" / "demo" / "tests" / "checkout"
+    (tests_dir / ".DS_Store").write_bytes(b"junk")
+    (tests_dir / "cart.spec.ts~").write_text("// backup\n")
+    (tests_dir / ".cart.spec.ts.swp").write_bytes(b"vim")
+    monkeypatch.setenv("QA_REPO_ROOT", str(workspace))
+
+    tracked = set(_tracked(workspace))
+    assert ".DS_Store" not in {p.rsplit("/", 1)[-1] for p in tracked}
+    assert not any(p.endswith("~") for p in tracked)
+    assert not any(p.endswith(".swp") for p in tracked)
+    assert "tests/checkout/cart.spec.ts" in tracked
+
+
+def test_a_nested_node_modules_inside_the_suite_is_excluded(tmp_path, monkeypatch):
+    workspace = make_workspace(tmp_path, app="demo")
+    nested = workspace / "apps" / "demo" / "tests" / "checkout" / "node_modules" / "p"
+    nested.mkdir(parents=True)
+    (nested / "index.js").write_text("//\n")
+    monkeypatch.setenv("QA_REPO_ROOT", str(workspace))
+
+    assert not any("node_modules" in p for p in _tracked(workspace))
+
+
 def test_the_enumeration_is_sorted_and_stable(tmp_path, monkeypatch):
     workspace = make_workspace(tmp_path, app="demo")
     monkeypatch.setenv("QA_REPO_ROOT", str(workspace))

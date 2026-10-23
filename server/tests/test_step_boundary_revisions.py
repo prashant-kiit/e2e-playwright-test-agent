@@ -55,7 +55,7 @@ def _drive(session_factory, run_id, store, *, emit=None, collect_override=None):
 
 def _revs(session_factory, target_id):
     with session_factory() as s:
-        return revisions.list_revisions(s, target_id)
+        return [rev for rev, _count in revisions.list_revisions_with_file_counts(s, target_id)]
 
 
 def test_the_driver_still_takes_exactly_one_step_boundary_callable():

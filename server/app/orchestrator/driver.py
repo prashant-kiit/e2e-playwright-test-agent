@@ -105,10 +105,13 @@ def run_pipeline(
 
         with session_factory() as s:
             repo.complete_step(s, run_id, step)
-        try:  # artifact collection is best-effort; never fail the run on it
+        try:  # the step-boundary hook is best-effort; never fail the run on it
             collect(run_id, step)
         except Exception as exc:
-            emit(f"=== step {step.value}: artifact collection failed: {exc} ===")
+            # A backstop, not the usual path: the launcher's composed hook
+            # catches and reports each half itself, so reaching here means the
+            # composition raised rather than one of the halves.
+            emit(f"=== step {step.value}: step-boundary hook failed: {exc} ===")
         emit(f"=== step {step.value} done ===")
 
     with session_factory() as s:

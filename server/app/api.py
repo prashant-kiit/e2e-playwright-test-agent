@@ -46,7 +46,7 @@ from .schemas import (
     TargetCreate,
     TargetOut,
 )
-from .storage import Storage, content_type_for
+from .storage import Storage
 
 # Everything on this router requires a valid session cookie (tests override
 # require_auth to a no-op). Health and /auth/* live off this router.
@@ -251,6 +251,11 @@ def _target_or_404(session: Session, target_id: int):
 # blob is never served by key alone (DESIGN.md §9). The tenant is always 1
 # today; filtering anyway is the structural half of P5.
 
+# Tracked files are displayed as source, so they stream as text whatever their
+# extension implies. See revision_file_content.
+TRACKED_FILE_MEDIA_TYPE = "text/plain; charset=utf-8"
+
+
 def _revision_out(rev, file_count: int) -> RevisionOut:
     return RevisionOut(
         id=rev.id,
@@ -374,10 +379,13 @@ def revision_file_content(
         chunks, _ = store.get_stream(row.blob_key)
     except Exception as exc:  # object missing / store down
         raise HTTPException(status_code=502, detail=f"storage error: {exc}") from exc
-    # Blobs are stored untyped (the key is a content hash with no extension), so
-    # the media type comes from the path that referenced it.
-    return StreamingResponse(chunks, media_type=content_type_for(path))
-
+    # A tracked file is source text to read, never a document to re-encode, so
+    # it is always served as text rather than under the type its extension
+    # guesses. Two reasons, both found by review: `application/json` makes a
+    # browser parse package.json and re-serialise it, which is no longer the
+    # bytes that were stored (ticket 04 asks for byte-identical); and
+    # mimetypes guesses `video/mp2t` for .ts, which is the bulk of a suite.
+    return StreamingResponse(chunks, media_type=TRACKED_FILE_MEDIA_TYPE)
 
 
 @router.post("/targets/{target_id}/runs", response_model=RunOut, status_code=201)

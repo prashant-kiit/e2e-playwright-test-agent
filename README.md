@@ -18,10 +18,12 @@ The harness is driven from a **single-operator web portal**. It orchestrates the
 |---|---|---|
 | `web/` | React + Vite, served by nginx | The portal UI (login, projects/targets, live run view, artifacts, history, bootstrap, settings) |
 | `server/` | FastAPI + uvicorn (uv) | API + orchestrator: drives the 5 steps one at a time, checkpoints each, streams the log (SSE). Also owns target-repo delivery (`app/delivery/`) |
-| Postgres | — | **Authoritative run state**: runs, steps, the lease-based per-app lock, history (replaces `.qa-state.json`) |
-| SeaweedFS | S3-compatible | **Artifact blobs** (evidence/report/logs), indexed by the `artifacts` table (MinIO was dropped; it is no longer freely pullable) |
+| Postgres | — | **Authoritative run state**: runs, steps, the lease-based per-app lock, history (replaces `.qa-state.json`). Since P2 it also carries the *dual-written* revision model (`revisions`, `file_index`), which nothing reads to make a decision yet |
+| SeaweedFS | S3-compatible | **Artifact blobs** (evidence/report/logs), indexed by the `artifacts` table (MinIO was dropped; it is no longer freely pullable). Since P2 it also holds **content-addressed tree blobs** under `tenant/<id>/blobs/<sha256>` |
 
 **One owner per concern:** Postgres owns run *status*, SeaweedFS owns artifact *blobs*, the target git repo owns the test *code* (delivered by `app/delivery/push.py`), and files under `apps/`/`prompts/` own *config*.
+
+**Revisions (P2).** Every completed step boundary snapshots the target's **tracked tree** — stories, plans, seed, test suite and the five repo-level infra files, but never `app.json`, `reports/` or run artifacts — into content-addressed blobs, and commits one immutable `revision` row naming that tree. A step that changed no tracked file commits nothing, so `rev` counts real changes rather than steps; a target's first run therefore leaves *two* revisions, the baseline it inherited and then its own work. Each target gets a read-only **Revisions** panel showing the revision history, a revision's files, one file's contents fetched out of blob storage, and a **parity banner** answering "does the database still agree with the files on disk?". **This is dual-write only:** `apps/` remains authoritative, and nothing in the system reads these tables to make a decision until P3 ([DESIGN.md §13](.claude/harness/DESIGN.md), [VERIFICATION-P2.md](.claude/harness/VERIFICATION-P2.md)).
 
 **Quick start:**
 
@@ -38,7 +40,7 @@ open http://localhost:8080            # log in — password is QA_ADMIN_PASSWORD
 
 **Concurrency:** at most one live run per app, enforced by a lease-backed lock (not a boolean); a crashed run's lease expires and a reaper frees the app. A *paused* run keeps its lock until resumed or stopped and is never reaped. **A second run on an app that already has a live one is refused, not queued** — the portal says "This app already has a live run." There is no queue and no batching (see [§2](#2-adding-or-switching-an-application)).
 
-**What the portal does *not* cover yet:** delivery and reset exist as API routes (`POST /targets/<id>/deliver`, `POST /targets/<id>/reset`, `GET /targets/<id>/bootstrapped`) but have no UI; only the bootstrap-a-target form is wired up. Deliver from the CLI for now ([§5.6](#56-target-repo-delivery-appdelivery)).
+**What the portal does *not* cover yet:** delivery and reset exist as API routes (`POST /targets/<id>/deliver`, `POST /targets/<id>/reset`, `GET /targets/<id>/bootstrapped`) but have no UI; only the bootstrap-a-target form and the read-only revisions panel are wired up. Deliver from the CLI for now ([§5.6](#56-target-repo-delivery-appdelivery)).
 
 **Developing the portal:**
 
@@ -516,7 +518,11 @@ App-specific delivery facts live in that app's `agentNotes`. Currently: the Sauc
 
 ## 11. Roadmap and open questions
 
-The target architecture and the five-phase migration plan live in [.claude/harness/DESIGN.md](.claude/harness/DESIGN.md). **P1 (shell → Python, no architecture change) is done** — [VERIFICATION-P1.md](.claude/harness/VERIFICATION-P1.md) records what was tested live and what is only covered by fakes. P2 (revisions + `file_index` + content-addressed blobs, dual-written from `apps/`) is next and is the phase that de-risks the rest — specced in [SPEC-P2-revisions.md](.claude/harness/SPEC-P2-revisions.md).
+The target architecture and the five-phase migration plan live in [.claude/harness/DESIGN.md](.claude/harness/DESIGN.md).
+
+- **P1 (shell → Python, no architecture change) is done** — [VERIFICATION-P1.md](.claude/harness/VERIFICATION-P1.md) records what was tested live and what is only covered by fakes.
+- **P2 (revisions + `file_index` + content-addressed blobs, dual-written from `apps/`) is done** — specced in [SPEC-P2-revisions.md](.claude/harness/SPEC-P2-revisions.md), closed out in [VERIFICATION-P2.md](.claude/harness/VERIFICATION-P2.md). Every completed step boundary now snapshots the target's tracked tree into content-addressed blobs and commits an immutable `revision` row, and the portal shows a target's revision history, a revision's files, one file's contents out of blob storage, and whether the head revision still matches the files on disk. **It is dual-write only: `apps/` is still authoritative and nothing reads the new tables to make a decision** — that is what the phase was for.
+- **P3 (flip reads to the database and blobs, make the API stateless, delete the repo mount) is next.** It is the phase P2 de-risked: the revision model it stands on now exists and has been run against real agent work. P3 also takes on what P2 deliberately left: `delivered_sha` and the invariant-5 "is this in sync?" query, config rendered from Postgres into a generated `playwright.config.ts`, and the removal of `config.repo_root()`.
 
 Open themes, beyond the phased plan:
 
@@ -526,6 +532,7 @@ Open themes, beyond the phased plan:
 - **Human in the loop.** Questions the agent would ask should surface in the portal, with answers flowing back. Today runs are unattended, with safe defaults recorded in the session summary.
 - **Scope control.** Generate tests only for what changed; split agents into bounded scenarios; commit in batches rather than one bulk commit.
 - **Artifact hygiene.** A feature to clean up artifacts, and keeping only one version of each.
+- **Blob garbage collection.** P2 creates the reference graph (`revisions` + `file_index`) that DESIGN.md §9's mark-and-sweep needs, and deliberately leaves orphan blobs behind — "blob before row" guarantees them, and deleting a target drops its index rows but not its bytes. The sweep itself is unbuilt.
 - **Cost.** Keep the agent on a cheap model and the stories lean (~2 ACs) — each run costs a full agent session.
 - **Stale prompt text.** `prompts/qa_system_prompt.md` and `prompts/steps/5-heal.md` still tell the reader a human delivers with `./scripts/push-artifacts.sh`, which no longer exists (use `make deliver` / `python -m app.delivery push`). Prompt content was out of scope for the P1 closeout; see the known gaps in [VERIFICATION-P1.md](.claude/harness/VERIFICATION-P1.md).
 
