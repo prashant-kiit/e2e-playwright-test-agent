@@ -13,21 +13,8 @@ from app.api import get_launcher, get_storage
 from app.auth import require_auth
 from app.db import get_session
 from app.main import app
-
-
-class _FakeStorage:
-    def __init__(self):
-        self.objects = {}
-
-    def ensure_bucket(self):
-        pass
-
-    def put_file(self, key, path, content_type=None):
-        self.objects[key] = (path.read_bytes(), content_type or "application/octet-stream")
-
-    def get_stream(self, key):
-        data, ct = self.objects[key]
-        return iter([data]), ct
+from app.tenancy import current_tenant_id
+from tests.storage_helpers import FakeStorage
 
 
 @pytest.fixture()
@@ -178,7 +165,7 @@ def test_resume_a_non_paused_run_409(client):
 def test_list_and_download_artifacts(client, session):
     from app.models import Artifact
 
-    store = _FakeStorage()
+    store = FakeStorage()
     app.dependency_overrides[get_storage] = lambda: store
 
     _, tid = _make_target(client)
@@ -187,6 +174,7 @@ def test_list_and_download_artifacts(client, session):
     store.objects[key] = (b"<html>hi</html>", "text/html")
     session.add(
         Artifact(
+            tenant_id=current_tenant_id(),
             run_id=run["id"],
             step="heal",
             kind="report",

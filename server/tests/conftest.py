@@ -97,8 +97,19 @@ def _clear_bus():
     bus.reset()
 
 
+# `tenants` is deliberately not truncated: its single row is seeded by the
+# migration, so it is schema-level reference data rather than test state. Wiping
+# it would leave every tenant_id FK dangling and make the fixture describe a
+# database production never has.
+_PRESERVED_TABLES = frozenset({"tenants"})
+
+
 def _truncate_all(engine):
-    tables = ", ".join(f'"{t.name}"' for t in reversed(Base.metadata.sorted_tables))
+    tables = ", ".join(
+        f'"{t.name}"'
+        for t in reversed(Base.metadata.sorted_tables)
+        if t.name not in _PRESERVED_TABLES
+    )
     with engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
 

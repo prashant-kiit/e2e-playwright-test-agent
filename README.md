@@ -516,7 +516,7 @@ App-specific delivery facts live in that app's `agentNotes`. Currently: the Sauc
 
 ## 11. Roadmap and open questions
 
-The target architecture and the five-phase migration plan live in [.claude/harness/DESIGN.md](.claude/harness/DESIGN.md). **P1 (shell → Python, no architecture change) is done** — [VERIFICATION-P1.md](.claude/harness/VERIFICATION-P1.md) records what was tested live and what is only covered by fakes. P2 (revisions + `file_index` + content-addressed blobs, dual-written from `apps/`) is next and is the phase that de-risks the rest.
+The target architecture and the five-phase migration plan live in [.claude/harness/DESIGN.md](.claude/harness/DESIGN.md). **P1 (shell → Python, no architecture change) is done** — [VERIFICATION-P1.md](.claude/harness/VERIFICATION-P1.md) records what was tested live and what is only covered by fakes. P2 (revisions + `file_index` + content-addressed blobs, dual-written from `apps/`) is next and is the phase that de-risks the rest — specced in [SPEC-P2-revisions.md](.claude/harness/SPEC-P2-revisions.md).
 
 Open themes, beyond the phased plan:
 

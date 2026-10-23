@@ -65,10 +65,11 @@ targets(id, tenant_id, project_id, app, name,
         github_pat_ciphertext, pat_expires_at, credential_state)
 
 revision(id, tenant_id, target_id, rev, parent_rev,
-         tree_hash, bundle_key, produced_by_run,
-         delivered_sha, occ_version, author, created_at)
+         tree_hash, produced_by_run, delivered_sha,
+         author, created_at)
+         UNIQUE(target_id, rev)                   -- the OCC point; see below
 
-file_index(revision_id, path, blob_key)           -- DERIVED, never authoritative
+file_index(revision_id, path, blob_key, size)     -- DERIVED, never authoritative
 
 runs(id, tenant_id, target_id, story_id, state, run_key, …)
 run_steps(run_id, step, state, started_at, ended_at)
@@ -83,6 +84,29 @@ exists only so the portal can list and display individual files; it is derived f
 tree and is never the source of truth.
 
 `tenant_id` appears on **every** table from day one (see §13).
+
+**Two columns this table was first specified with were not built, amended here when P2
+met code:**
+
+- **`occ_version` — not added. `UNIQUE(target_id, rev)` is the OCC point.** Committing
+  revision N+1 inserts `rev = N+1` with `parent_rev = N`, so a concurrent committer
+  loses on the unique constraint. A version column alongside it would misdescribe where
+  the check actually happens, and nothing would read it. (With one live run per target
+  the contention is theoretical today; the constraint is what keeps it theoretical.)
+- **`bundle_key` — deferred to P4, with bundles.** Git bundles (§5) presuppose a per-run
+  worktree with its own history, which arrives with the sandbox in P4; there is nothing
+  in P2 whose history is worth bundling. P2 adds only columns it writes, which is what
+  keeps `test_migrations_match_the_models` a meaningful signal rather than a column
+  inventory.
+
+**The head revision is derived, not stored**: it is the row with the greatest `rev` for
+a target. There is no mutable `targets.head_revision_id`, because revisions are
+append-only and a second place recording "which is current" is a second thing that can
+be wrong.
+
+`delivered_sha` is added by P2 and **left null for the whole phase** — delivery still
+works off the filesystem there, so invariant 5 ("'in sync?' is a Postgres query") is
+satisfied in P3, not P2.
 
 ---
 

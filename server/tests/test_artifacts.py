@@ -8,22 +8,7 @@ from app.domain.steps import STEP_ORDER, Step
 from app.models import Artifact
 from app.orchestrator.driver import run_pipeline
 from app.orchestrator.fake import FakeRunner
-from app.storage import content_type_for
-
-
-class FakeStorage:
-    def __init__(self):
-        self.objects: dict[str, tuple[bytes, str]] = {}
-
-    def ensure_bucket(self):
-        pass
-
-    def put_file(self, key, path, content_type=None):
-        self.objects[key] = (path.read_bytes(), content_type or content_type_for(key))
-
-    def get_stream(self, key):
-        data, ct = self.objects[key]
-        return iter([data]), ct
+from tests.storage_helpers import FakeStorage
 
 
 @pytest.fixture()
