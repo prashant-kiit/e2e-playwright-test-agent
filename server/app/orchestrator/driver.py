@@ -25,6 +25,13 @@ def run_pipeline(
     emit: Emit | None = None,
     collect: Callable[[int, object], None] | None = None,
 ) -> None:
+    """`collect` is the driver's ONE step-boundary hook, fired after each
+    completed step. Artifact collection is composed into it by the launcher.
+
+    Keep it single (DESIGN.md §13). Work that needs to happen at a step boundary
+    -- P2's sync-out, uploading blobs and committing a revision -- is composed
+    into this callable by the caller, not added as a second parameter.
+    """
     emit = emit or (lambda line: None)
     collect = collect or (lambda run_id, step: None)
 
