@@ -83,8 +83,11 @@ export default function Bootstrap() {
           </button>
         </form>
         {error && <div className="error">{error}</div>}
+        {/* A failed target-repo sync is a partial outcome, not a success: the app
+            folder exists but nothing reached GitHub. Plain `banner` reads amber,
+            `banner success` green. */}
         {result && (
-          <div className="banner success">
+          <div className={result.bootstrap && !result.bootstrap.ok ? "banner" : "banner success"}>
             Created <code>apps/{result.app}</code>.
             {result.bootstrap
               ? result.bootstrap.ok

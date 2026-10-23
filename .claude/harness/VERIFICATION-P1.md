@@ -130,9 +130,10 @@ Two properties checked on the pushed result, both deliberate:
 > story with no tests folder fails correctly with
 > `no test suite at … - run the QA flow (steps 4-5) first`.
 
-### Exit-code parity with the old scripts
+### Exit codes — measured, and NOT full parity with the old scripts
 
-Checked per command (user story 32), so wrappers and muscle memory still work:
+User story 32 asks for the per-command exit codes to be "confirmed to match the old
+scripts". Measured, they are:
 
 | Situation | Exit |
 |---|---|
@@ -142,7 +143,19 @@ Checked per command (user story 32), so wrappers and muscle memory still work:
 | `reset` without `--confirm-repo` and without `--dry-run` | `2` |
 | `reset` with a mismatched `--confirm-repo` | `2` |
 
-`1` is reserved for `check`'s "not bootstrapped" and is never used for anything else.
+**This is not parity, and an earlier draft of this record wrongly claimed it was.** The
+shell tools had no exit code `2` at all: `qa-lib.sh`'s `qa_die` was
+`echo "$*" >&2; exit 1`, and `run-stories.sh`'s `die` likewise, so every failure — missing
+token, unknown app, bad confirmation — exited `1`. `check-bootstrapped.sh` therefore
+returned `1` both for "not bootstrapped" and for "could not tell you".
+
+The Python CLI splits those: `1` now means exactly "not bootstrapped", `2` means "it went
+wrong". That is a deliberate improvement (it is what the spec's own Testing Decisions
+specify), but it **is a behavior change** and belongs in the record as one, not asserted
+away as parity:
+
+- a wrapper testing success/failure (`if ! make check; then …`) behaves identically;
+- a wrapper testing `-eq 1` to mean "any failure" will no longer catch the `2` cases.
 
 ### Credentials
 
@@ -186,7 +199,36 @@ Honest limits of the above — these are exercised in the suite but not against 
 | `TASK.md` | **Folded into README §11 and deleted** — deliberately, not left as an unstaged deletion. Recoverable from git history |
 | `jq` in `.github/workflows/playwright.yml` | **Out of scope**, documented in DESIGN.md §11 and README §5.5. That file runs in a customer's GitHub Actions, which has `jq` and not our Python |
 | `apphub.run_bootstrap`'s `{"rc", "output"}` | Replaced with a typed `BootstrapOutcome(ok, output)`; the portal still reports an outcome plus text, and a `DeliveryError` is still an outcome, not a 500 |
+| CLI exit code `2` | **Kept, and recorded as a behavior change.** The old scripts exited `1` for everything; `1` now means only "not bootstrapped" and `2` means "it failed". See the exit-code section above |
 | A second driver seam for P2's sync-out | **Not added.** `run_pipeline` keeps exactly one step-boundary callable; P2 composes behind it. Recorded in DESIGN.md §13 and on the function itself |
+
+## Defects found by review after the first commits
+
+Found by the two-axis review of this branch, and fixed:
+
+1. **The PAT leaked into error messages.** `clone_url` embeds the token
+   (`https://x-access-token:<token>@github.com/...`), `Git.clone` passes that URL as argv,
+   and `GitError` builds its message from the argv *and* from git's stderr, which echoes the
+   remote back. That message reaches `HTTPException(detail=...)`, `BootstrapOutcome.output`
+   and the portal's bootstrap banner, which renders it verbatim in a `<pre>`. So any failed
+   clone or push — a revoked token, a renamed repo — would have printed the PAT into the
+   browser. Fixed at the one choke point: `delivery/errors.py` now has `redact()`, applied
+   in `GitError.__init__` to both argv and stderr, and `tests/test_delivery_git.py` asserts
+   a real failing clone leaks nothing while keeping the repo, subcommand and rc in the
+   message. Recorded in README §9 so it is not bypassed by formatting argv by hand.
+2. **A failed bootstrap rendered in a success-styled banner.** `Bootstrap.jsx` hard-coded
+   `banner success`, so "Target-repo bootstrap failed" appeared in green. The partial
+   outcome now uses plain `banner` (amber); asserted in both directions in
+   `Bootstrap.test.jsx`.
+3. **`main.py` still documented `create_all`.** Its docstring said tables are created on
+   startup and "tests create tables from metadata" — both false since the migrations-from-
+   zero fixture landed, and precisely the change README §9 forbids. Rewritten.
+4. **`make test` was described as "exactly what CI runs".** It runs the same three checks
+   but without CI's `QA_REQUIRE_DB=1` and zero-skip gate. Reworded, with `make ci-test`
+   named as the closer match.
+5. **The 409 did not mention the missing queue.** The portal said only "This app already
+   has a live run." It now adds "Runs are not queued — wait for it to finish, or pause/stop
+   it", which is what user story 11 actually asks for.
 
 ## Known gaps left open at the end of P1
 

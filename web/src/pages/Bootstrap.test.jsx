@@ -23,6 +23,7 @@ describe("Bootstrap", () => {
     expect(await screen.findByText(/Created/)).toBeInTheDocument();
     expect(await screen.findByText(/bootstrapped/i)).toBeInTheDocument();
     expect(screen.getByText("done")).toBeInTheDocument();
+    expect(document.querySelector(".banner")).toHaveClass("success");
   });
 
   it("reports a failed target-repo sync as an outcome, not an error", async () => {
@@ -40,6 +41,8 @@ describe("Bootstrap", () => {
     expect(await screen.findByText(/Created/)).toBeInTheDocument();
     expect(await screen.findByText(/bootstrap failed/i)).toBeInTheDocument();
     expect(screen.getByText("no GitHub token")).toBeInTheDocument();
+    // ...and it must not be dressed as a success: a partial outcome reads amber.
+    expect(document.querySelector(".banner")).not.toHaveClass("success");
   });
 
   it("keeps the submit button disabled until app + name are filled", () => {

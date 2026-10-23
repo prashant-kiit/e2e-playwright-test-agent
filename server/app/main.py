@@ -1,8 +1,12 @@
 """FastAPI entrypoint for the QA admin portal backend.
 
-Mounts the projects/targets/runs API (M1) on top of the M0 health endpoint.
-Tables are created on startup for this single-operator dev stack; a later
-milestone can introduce Alembic migrations if the schema starts churning.
+Mounts the projects/targets/runs API on top of the health endpoint.
+
+The schema is owned by Alembic: the container entrypoint runs
+`alembic upgrade head` before uvicorn, and nothing here creates tables. The
+tests build their schema the same way, by running the migrations from zero --
+never `Base.metadata.create_all`, which would hide a revision that forgot a
+column (see tests/conftest.py).
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ def _reaper_enabled() -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Schema is managed by Alembic (the container entrypoint runs
-    # `alembic upgrade head` before uvicorn); tests create tables from metadata.
+    # `alembic upgrade head` before uvicorn), in the app and in the tests alike.
     task = asyncio.create_task(reaper_loop()) if _reaper_enabled() else None
     try:
         yield

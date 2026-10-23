@@ -7,6 +7,24 @@ without parsing stderr.
 
 from __future__ import annotations
 
+import re
+
+# `https://x-access-token:<token>@github.com/...` -- the clone URL every push and
+# clone is given. It arrives here two ways: as part of the argv that failed, and
+# inside git's own stderr, which echoes the remote back.
+_CREDENTIAL_IN_URL = re.compile(r"(://[^/\s:@]*:)[^/\s@]+(@)")
+
+
+def redact(text: str) -> str:
+    """Blank the password half of any credential-bearing URL.
+
+    A GitError is built from the argv that failed, and that argv contains the
+    PAT. Its message reaches the API's HTTP detail and the portal's bootstrap
+    banner, which renders it verbatim -- so this is the choke point where the
+    token stops. The repo path and git's own diagnosis survive.
+    """
+    return _CREDENTIAL_IN_URL.sub(r"\1***\2", text)
+
 
 class DeliveryError(Exception):
     """Base: anything that stops a delivery tool."""
@@ -40,6 +58,8 @@ class GitError(DeliveryError):
     """A git subprocess failed."""
 
     def __init__(self, args: tuple[str, ...], rc: int, err: str) -> None:
+        args = tuple(redact(a) for a in args)
+        err = redact(err)
         super().__init__(f"git {' '.join(args)} failed (rc={rc}): {err.strip()}")
         self.args_ = args
         self.rc = rc

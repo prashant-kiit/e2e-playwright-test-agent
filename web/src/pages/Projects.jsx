@@ -135,7 +135,13 @@ function TargetRow({ target, appInfo }) {
       const run = await api.startRun(target.id, story.trim(), mode);
       navigate(`/runs/${run.id}`);
     } catch (e) {
-      setError(e.status === 409 ? "This app already has a live run." : String(e.message || e));
+      // 409 must not be an operator's first hint that runs aren't queued: say
+      // so, since there is no queue to fall back on (DESIGN.md §5).
+      setError(
+        e.status === 409
+          ? "This app already has a live run. Runs are not queued — wait for it to finish, or pause/stop it, then start this one."
+          : String(e.message || e),
+      );
     } finally {
       setBusy(false);
     }

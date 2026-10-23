@@ -69,14 +69,14 @@ dev-api: docker-up ## Run uvicorn with --reload for the API (needs Postgres up: 
 clean: ## Stop everything and DELETE data volumes (destructive)
 	$(COMPOSE) down -v
 
-test: lint ## Run the same checks CI runs: ruff + backend pytest + frontend vitest
+test: lint ## Run CI's three checks: ruff + backend pytest + frontend vitest
 	cd server && uv run pytest
 	cd web && npm test
 
 lint: ## Lint the backend (ruff). Run by `make test` and by CI
 	cd server && uv run ruff check .
 
-ci-test: ## `make test`, but failing instead of skipping when Postgres is absent
+ci-test: ## `make test` as CI runs it: fails instead of skipping if Postgres is absent
 	QA_REQUIRE_DB=1 $(MAKE) test
 
 # --- target-repo delivery (app/delivery; was scripts/*.sh) ---------------
