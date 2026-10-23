@@ -42,18 +42,36 @@ def heartbeat_during(
     Stops quietly once the run is no longer live -- a completed, paused or
     stopped run has no lease to keep, and that is not an error.
     """
-    period = interval_s if interval_s is not None else lease.DEFAULT_HEARTBEAT
+    # DEFAULT_HEARTBEAT is a timedelta (the lease module is time arithmetic);
+    # Event.wait takes seconds. Passing the timedelta straight through raised
+    # TypeError from `done.wait(period)` -- *outside* the loop's try -- so this
+    # daemon thread died on its first iteration without a sound, the lease was
+    # never refreshed, and every step longer than the 60 s TTL got its healthy
+    # run reaped. Which is every step of a real agent run.
+    period = (
+        interval_s if interval_s is not None else lease.DEFAULT_HEARTBEAT.total_seconds()
+    )
     done = threading.Event()
 
     def _beat() -> None:
-        while not done.wait(period):
-            try:
-                with session_factory() as session:
-                    repo.heartbeat(session, run_id)
-            except repo.RepoError:
-                return  # no longer live: nothing to keep alive
-            except Exception:  # pragma: no cover - never kill a run over a heartbeat
-                log.warning("heartbeat failed for run %s", run_id, exc_info=True)
+        # The whole loop is guarded, the wait included: a heartbeat thread that
+        # dies costs a healthy run its lease, so it must never do so quietly.
+        try:
+            while not done.wait(period):
+                try:
+                    with session_factory() as session:
+                        repo.heartbeat(session, run_id)
+                except repo.RepoError:
+                    return  # no longer live: nothing to keep alive
+                except Exception:  # pragma: no cover - never kill a run over a heartbeat
+                    log.warning("heartbeat failed for run %s", run_id, exc_info=True)
+        except Exception:
+            log.error(
+                "heartbeat thread for run %s died; its lease will now expire and the "
+                "run will be reaped while still healthy",
+                run_id,
+                exc_info=True,
+            )
 
     thread = threading.Thread(target=_beat, name=f"heartbeat-{run_id}", daemon=True)
     thread.start()

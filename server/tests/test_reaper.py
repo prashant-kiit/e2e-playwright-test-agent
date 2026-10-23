@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import timedelta
 
 from app import reaper, repo
 from app.domain import lease
@@ -54,6 +55,33 @@ def test_heartbeat_during_extends_a_live_runs_lease(session_factory):
         _wait_until(
             lambda: _run_field(session_factory, run_id, "lease_expires_at") > before
         )
+
+    assert _run_field(session_factory, run_id, "lease_expires_at") > before
+
+
+def test_heartbeat_uses_the_default_interval_when_none_is_given(session_factory, monkeypatch):
+    """The production path: `heartbeat_during(run_id)` with no explicit interval.
+
+    Every other test here passes `interval_s=0.01`, a float, so the default
+    branch was never exercised -- and the default, `lease.DEFAULT_HEARTBEAT`,
+    is a **timedelta**, which `Event.wait` cannot use. The resulting TypeError
+    was raised by the `while not done.wait(period)` line, outside the loop's
+    try, so the daemon heartbeat thread died on its first iteration in silence
+    and the lease was never refreshed. Any step longer than the 60 s TTL then
+    had its perfectly healthy run reaped -- which is every step of a real agent
+    run.
+
+    The patch keeps the production *type* (a timedelta) and only shortens it,
+    so this fails again the moment the conversion is dropped.
+    """
+    monkeypatch.setattr(lease, "DEFAULT_HEARTBEAT", timedelta(seconds=0.01))
+    target_id, run_id = _seed_run(session_factory)
+    with session_factory() as s:
+        repo.begin_run(s, run_id)
+    before = _run_field(session_factory, run_id, "lease_expires_at")
+
+    with reaper.heartbeat_during(run_id, session_factory=session_factory):
+        _wait_until(lambda: _run_field(session_factory, run_id, "lease_expires_at") > before)
 
     assert _run_field(session_factory, run_id, "lease_expires_at") > before
 
