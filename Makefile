@@ -8,7 +8,7 @@ API_URL := http://localhost:8000
 .DEFAULT_GOAL := help
 
 .PHONY: help up down start stop restart build rebuild logs ps health open dev-web dev-api clean \
-        test check bootstrap deliver reset
+        test lint ci-test check bootstrap deliver reset
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -69,9 +69,15 @@ dev-api: docker-up ## Run uvicorn with --reload for the API (needs Postgres up: 
 clean: ## Stop everything and DELETE data volumes (destructive)
 	$(COMPOSE) down -v
 
-test: ## Run the backend and frontend test suites
+test: lint ## Run the same checks CI runs: ruff + backend pytest + frontend vitest
 	cd server && uv run pytest
 	cd web && npm test
+
+lint: ## Lint the backend (ruff). Run by `make test` and by CI
+	cd server && uv run ruff check .
+
+ci-test: ## `make test`, but failing instead of skipping when Postgres is absent
+	QA_REQUIRE_DB=1 $(MAKE) test
 
 # --- target-repo delivery (app/delivery; was scripts/*.sh) ---------------
 # APP and STORY are required where shown. GITHUB_PAT comes from the environment

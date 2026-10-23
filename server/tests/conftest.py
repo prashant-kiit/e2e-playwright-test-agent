@@ -13,6 +13,7 @@ migrations is the only way a drift bug fails here rather than on deploy.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,20 @@ SERVER_DIR = Path(__file__).resolve().parents[1]
 
 def _base_url():
     return make_url(database_url())
+
+
+def db_unavailable(reason: str):
+    """Skip the DB-backed tests -- unless QA_REQUIRE_DB says a database was
+    promised, in which case fail loudly.
+
+    CI sets QA_REQUIRE_DB=1 because it stands Postgres up as a service: there, an
+    unreachable database is a broken job, not a reason to run a third of the
+    suite and report success. Locally the variable is unset and the skip stands,
+    so the pure-domain tests still run offline.
+    """
+    if os.environ.get("QA_REQUIRE_DB", "").strip() not in ("", "0", "false"):
+        pytest.fail(f"QA_REQUIRE_DB is set but Postgres is unreachable: {reason}")
+    pytest.skip(reason)
 
 
 def _alembic_upgrade(url) -> None:
@@ -57,9 +72,9 @@ def pg_engine():
             conn.execute(text(f'DROP DATABASE IF EXISTS "{TEST_DB}" WITH (FORCE)'))
             conn.execute(text(f'CREATE DATABASE "{TEST_DB}"'))
     except OperationalError as exc:
-        pytest.skip(f"Postgres not reachable ({exc.__class__.__name__}); skipping DB tests")
+        db_unavailable(f"Postgres not reachable ({exc.__class__.__name__}); skipping DB tests")
     except ProgrammingError as exc:  # pragma: no cover - surfaced, never swallowed
-        pytest.skip(f"could not create {TEST_DB}: {exc}")
+        db_unavailable(f"could not create {TEST_DB}: {exc}")
     finally:
         maint.dispose()
 

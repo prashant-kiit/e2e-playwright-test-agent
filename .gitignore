@@ -239,3 +239,6 @@ node_modules/
 /web/dist/
 /web/.vite/
 /server/.pytest_cache/
+
+# Backend test report written by `pytest --junit-xml` in CI.
+server/junit.xml
