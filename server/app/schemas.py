@@ -109,3 +109,34 @@ class RunOut(BaseModel):
     lease_expires_at: datetime | None
     error: str | None
     created_at: datetime
+
+
+# --- delivery (P1: the shell tools became portal actions) ----------------
+
+class DeliverBody(BaseModel):
+    story_id: str = Field(min_length=1, max_length=40)
+    run_id: str | None = None
+    dry_run: bool = False
+
+
+class ResetBody(BaseModel):
+    """`confirm_repo` must echo the target repo name: reset-target.sh read that
+    confirmation from a TTY, and a portal action has none."""
+
+    confirm_repo: str = Field(min_length=1, max_length=200)
+    dry_run: bool = False
+
+
+class BootstrappedOut(BaseModel):
+    app: str
+    repo: str
+    branch: str
+    bootstrapped: bool
+
+
+class DeliveryOut(BaseModel):
+    ok: bool
+    message: str
+    pr_url: str = ""
+    pr_number: int | None = None
+    detail: dict = {}

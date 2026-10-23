@@ -7,11 +7,12 @@ API_URL := http://localhost:8000
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down start stop restart build rebuild logs ps health open dev-web dev-api clean
+.PHONY: help up down start stop restart build rebuild logs ps health open dev-web dev-api clean \
+        test check bootstrap deliver reset
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
 docker-up: # Ensure the Docker daemon is running (starts Docker Desktop on macOS and waits).
 	@if ! docker info >/dev/null 2>&1; then \
@@ -67,3 +68,28 @@ dev-api: docker-up ## Run uvicorn with --reload for the API (needs Postgres up: 
 
 clean: ## Stop everything and DELETE data volumes (destructive)
 	$(COMPOSE) down -v
+
+test: ## Run the backend and frontend test suites
+	cd server && uv run pytest
+	cd web && npm test
+
+# --- target-repo delivery (app/delivery; was scripts/*.sh) ---------------
+# APP and STORY are required where shown. GITHUB_PAT comes from the environment
+# or .env. Every target is also reachable as a portal action.
+
+check: ## Is APP's target repo bootstrapped? (read-only) — make check APP=saucedemo
+	@test -n "$(APP)" || { echo "usage: make check APP=<app>"; exit 2; }
+	cd server && uv run python -m app.delivery check $(APP)
+
+bootstrap: ## Sync infra files to APP's target repo — make bootstrap APP=saucedemo [DRY=1]
+	@test -n "$(APP)" || { echo "usage: make bootstrap APP=<app> [DRY=1]"; exit 2; }
+	cd server && uv run python -m app.delivery bootstrap $(APP) $(if $(DRY),--dry-run,)
+
+deliver: ## Deliver one story as a PR — make deliver APP=saucedemo STORY=SCRUM-101 [DRY=1]
+	@test -n "$(APP)" -a -n "$(STORY)" || { echo "usage: make deliver APP=<app> STORY=<ID> [DRY=1]"; exit 2; }
+	cd server && uv run python -m app.delivery push $(APP) $(STORY) $(if $(DRY),--dry-run,)
+
+reset: ## DESTRUCTIVE: wipe APP's target repo — make reset APP=x CONFIRM=owner/repo [DRY=1]
+	@test -n "$(APP)" || { echo "usage: make reset APP=<app> CONFIRM=<owner/repo> [DRY=1]"; exit 2; }
+	cd server && uv run python -m app.delivery reset $(APP) \
+		$(if $(DRY),--dry-run,--confirm-repo $(CONFIRM))

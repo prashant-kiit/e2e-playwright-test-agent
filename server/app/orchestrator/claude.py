@@ -1,14 +1,14 @@
 """The real Runner: shells out to the `claude` CLI, one step per invocation.
 
-Mirrors scripts/run-stories.sh's proven invocation (`claude -p <prompt>
+Mirrors the batch runner's proven invocation (`claude -p <prompt>
 --output-format stream-json --verbose`, with QA_RUN_DIR/QA_WORKERS), but runs a
 single step and carries the Claude Code session across steps with --resume, so
 exploratory context (step 3) survives into generation (step 4). stdout is teed
 to the run dir's session.jsonl and relayed line-by-line to the log bus.
 
-Requires the claude CLI and the repo checkout (apps/, prompts/, scripts/) to be
-present in the execution environment; wiring that into the container is a later
-milestone. Not exercised by the automated tests (that is the FakeRunner's job).
+Requires the claude CLI and the repo checkout (apps/, prompts/) to be present in
+the execution environment; DESIGN.md P4 moves that into a prebaked per-run
+sandbox image. Not exercised by the automated tests (that is the FakeRunner's job).
 """
 
 from __future__ import annotations
@@ -143,6 +143,7 @@ class ClaudeRunner:
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(config.repo_root()),
+                env=env,  # QA_RUN_DIR/QA_WORKERS reach playwright.config.ts only via this
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=ef,

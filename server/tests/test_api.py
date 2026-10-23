@@ -185,7 +185,14 @@ def test_list_and_download_artifacts(client, session):
     key = f"{run['run_key']}/report.html"
     store.objects[key] = (b"<html>hi</html>", "text/html")
     session.add(
-        Artifact(run_id=run["id"], step="heal", kind="report", s3_key=key, sha256="x" * 64, version=1)
+        Artifact(
+            run_id=run["id"],
+            step="heal",
+            kind="report",
+            s3_key=key,
+            sha256="x" * 64,
+            version=1,
+        )
     )
     session.commit()
 

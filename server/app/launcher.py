@@ -18,6 +18,7 @@ from .orchestrator.claude import ClaudeRunner
 from .orchestrator.driver import run_pipeline
 from .orchestrator.fake import FakeRunner
 from .orchestrator.runner import Runner
+from .reaper import heartbeat_during
 
 
 def make_runner() -> Runner:
@@ -44,9 +45,12 @@ def launch_run(run_id: int) -> None:
 
     def _target() -> None:
         try:
-            run_pipeline(
-                SessionLocal, run_id, make_runner(), emit=bus.emitter(run_id), collect=collect
-            )
+            # The lease is otherwise refreshed only at step boundaries, so a step
+            # longer than the TTL would look like a crash to the reaper.
+            with heartbeat_during(run_id):
+                run_pipeline(
+                    SessionLocal, run_id, make_runner(), emit=bus.emitter(run_id), collect=collect
+                )
         finally:
             bus.close(run_id)
 

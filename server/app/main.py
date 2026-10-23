@@ -7,6 +7,8 @@ milestone can introduce Alembic migrations if the schema starts churning.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 from contextlib import asynccontextmanager
 
@@ -16,13 +18,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import models  # noqa: F401  (register ORM tables on Base.metadata)
 from .api import router
 from .auth_api import auth_router
+from .reaper import reaper_loop
+
+
+def _reaper_enabled() -> bool:
+    """On by default; QA_REAPER=0 turns it off for tests and one-off processes."""
+    return os.environ.get("QA_REAPER", "1") != "0"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Schema is managed by Alembic (the container entrypoint runs
     # `alembic upgrade head` before uvicorn); tests create tables from metadata.
-    yield
+    task = asyncio.create_task(reaper_loop()) if _reaper_enabled() else None
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 app = FastAPI(title="QA Portal", version="0.1.0", lifespan=lifespan)

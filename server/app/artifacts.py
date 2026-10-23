@@ -6,8 +6,8 @@ with a kind (screenshot/video/trace/report/log/other) and a version. Version is
 per (run, key): re-storing the same path in a later attempt bumps it, so history
 is kept without a bespoke version graph.
 
-Playwright *code* is NOT collected here — it is pushed to the target repo by
-scripts/push-artifacts.sh. This indexes evidence/reports/logs only.
+Playwright *code* is NOT collected here — it is delivered to the target repo by
+app/delivery. This indexes evidence/reports/logs only.
 """
 
 from __future__ import annotations

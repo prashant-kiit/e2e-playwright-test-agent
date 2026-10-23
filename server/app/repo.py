@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from .domain import lease
 from .domain.status import RunStatus, assert_transition, is_live
 from .domain.steps import Step
-from .models import AppLock, Artifact, Project, Run, RunStep, Target
+from .models import AppLock, Project, Run, RunStep, Target
 
 VALID_MODES = ("changed", "full")
 

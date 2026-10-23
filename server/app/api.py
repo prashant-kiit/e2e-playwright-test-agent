@@ -9,15 +9,15 @@ from __future__ import annotations
 
 import json
 import queue
-from typing import Callable
+from collections.abc import Callable
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from sqlalchemy import select
-
-from . import apphub, repo, storage
+from . import apphub, delivery, repo, storage
+from .auth import AuthDep
 from .db import get_session
 from .domain.status import is_terminal
 from .launcher import launch_run
@@ -27,9 +27,13 @@ from .schemas import (
     AppOut,
     ArtifactOut,
     BootstrapBody,
+    BootstrappedOut,
+    DeliverBody,
+    DeliveryOut,
     ProjectCreate,
     ProjectOut,
     PromptOut,
+    ResetBody,
     RunCreate,
     RunOut,
     StepOut,
@@ -37,7 +41,6 @@ from .schemas import (
     TargetCreate,
     TargetOut,
 )
-from .auth import AuthDep
 from .storage import Storage
 
 # Everything on this router requires a valid session cookie (tests override
@@ -56,8 +59,26 @@ def get_storage() -> Storage:
 
 
 def get_bootstrap_runner() -> Callable[[str], dict]:
-    """The shell step of bootstrapping. Overridden in tests (no gh/git)."""
-    return apphub.run_bootstrap_script
+    """The target-repo step of bootstrapping. Overridden in tests (no git/network)."""
+    return apphub.run_bootstrap
+
+
+def get_delivery_tools() -> delivery.Tools:
+    """git + GitHub + the PAT. Overridden in tests so no route touches the
+    network; building it here (not at import) keeps a missing PAT from breaking
+    unrelated endpoints.
+
+    Dependencies resolve before the handler body runs, so a failure here would
+    escape the routes' own exception handling as a bare 500. A missing `git` or
+    a missing PAT is an environment problem, so it is reported as 503 with the
+    reason rather than as an opaque server error.
+    """
+    try:
+        return delivery.default_tools()
+    except delivery.DeliveryError as exc:
+        raise HTTPException(
+            status_code=503, detail=f"delivery is unavailable: {exc}"
+        ) from exc
 
 
 # --- repo introspection + bootstrap (M6) --------------------------------
@@ -116,6 +137,102 @@ def create_target(
 @router.get("/targets", response_model=list[TargetOut])
 def list_targets(project_id: int | None = None, session: Session = Depends(get_session)):
     return repo.list_targets(session, project_id=project_id)
+
+
+# --- delivery: bootstrap-check / deliver / reset (P1) --------------------
+
+@router.get("/targets/{target_id}/bootstrapped", response_model=BootstrappedOut)
+def target_bootstrapped(
+    target_id: int,
+    session: Session = Depends(get_session),
+    tools: delivery.Tools = Depends(get_delivery_tools),
+):
+    target = _target_or_404(session, target_id)
+    try:
+        ready, ref = delivery.is_bootstrapped(target.app, tools=tools)
+    except delivery.DeliveryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return BootstrappedOut(
+        app=ref.app, repo=ref.repo, branch=ref.branch, bootstrapped=ready
+    )
+
+
+@router.post("/targets/{target_id}/deliver", response_model=DeliveryOut)
+def deliver_story(
+    target_id: int,
+    body: DeliverBody,
+    session: Session = Depends(get_session),
+    tools: delivery.Tools = Depends(get_delivery_tools),
+):
+    """Deliver one story's artifacts as a PR.
+
+    Bootstrap is folded in under the same action (DESIGN.md decision 16), so an
+    operator approving a delivery is approving "set the repo up and deliver".
+    """
+    target = _target_or_404(session, target_id)
+    try:
+        if not body.dry_run:
+            delivery.ensure_bootstrapped(target.app, tools=tools)
+        result = delivery.push_artifacts(
+            target.app,
+            body.story_id,
+            run_id=body.run_id,
+            dry_run=body.dry_run,
+            tools=tools,
+        )
+    except delivery.NotBootstrapped as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except delivery.CredentialError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except delivery.DeliveryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return DeliveryOut(
+        ok=True,
+        message=result.message,
+        pr_url=result.pr_url,
+        pr_number=result.pr_number,
+        detail={"branch": result.branch, "committed": result.committed},
+    )
+
+
+@router.post("/targets/{target_id}/reset", response_model=DeliveryOut)
+def reset_target_repo(
+    target_id: int,
+    body: ResetBody,
+    session: Session = Depends(get_session),
+    tools: delivery.Tools = Depends(get_delivery_tools),
+):
+    """DESTRUCTIVE: wipe the target repo. Requires the repo name echoed back."""
+    target = _target_or_404(session, target_id)
+    try:
+        result = delivery.reset_target(
+            target.app,
+            confirm_repo=body.confirm_repo,
+            dry_run=body.dry_run,
+            tools=tools,
+        )
+    except delivery.ConfirmationMismatch as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except delivery.CredentialError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except delivery.DeliveryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return DeliveryOut(
+        ok=True,
+        message=result.message,
+        detail={
+            "deleted_branches": list(result.deleted_branches),
+            "failed_branches": list(result.failed_branches),
+            "already_empty": result.already_empty,
+        },
+    )
+
+
+def _target_or_404(session: Session, target_id: int):
+    try:
+        return repo.get_target(session, target_id)
+    except repo.NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/targets/{target_id}/runs", response_model=RunOut, status_code=201)

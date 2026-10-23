@@ -11,17 +11,39 @@ dependencies = [
     "boto3>=1.34",
     "itsdangerous>=2.1",
     "alembic>=1.13",
+    # app/delivery talks to GitHub over REST (replaces the `gh` CLI).
+    "httpx>=0.27",
+    # Used directly by app/schemas.py and app/auth_api.py, not just via fastapi.
+    "pydantic>=2",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8",
-    "httpx>=0.27",
+    "ruff>=0.6",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Deliberately narrow: correctness (F), style errors (E), import order (I),
+# modern syntax (UP) and the bugbear checks that catch real mistakes (B).
+# Anything broader turns a linter into a refactoring backlog.
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    # FastAPI's whole dependency-injection idiom is a call in a default argument.
+    "B008",
+    # Would rewrite `class Step(str, Enum)` to StrEnum. The VARCHAR-backed
+    # Enum(native_enum=False) columns depend on the current behaviour --
+    # CHECKPOINT-0 §5 records what broke last time. Do not "modernise" these.
+    "UP042",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -9,7 +9,7 @@ background thread (M2 wiring); tests call it directly with a FakeRunner.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from .. import config, repo
 from ..domain.steps import STEP_ORDER, resume_step, step_index
@@ -23,7 +23,7 @@ def run_pipeline(
     run_id: int,
     runner: Runner,
     emit: Emit | None = None,
-    collect: Callable[[int, "object"], None] | None = None,
+    collect: Callable[[int, object], None] | None = None,
 ) -> None:
     emit = emit or (lambda line: None)
     collect = collect or (lambda run_id, step: None)

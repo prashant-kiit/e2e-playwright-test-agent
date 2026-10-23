@@ -8,19 +8,20 @@ the target git repo owns the test *code*, SeaweedFS owns artifact *blobs*
 from __future__ import annotations
 
 from datetime import datetime
-
 from enum import Enum as _Enum
 
 from sqlalchemy import (
     Boolean,
     DateTime,
-    Enum as SAEnum,
     ForeignKey,
     Integer,
     String,
     Text,
     UniqueConstraint,
     func,
+)
+from sqlalchemy import (
+    Enum as SAEnum,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -50,7 +51,7 @@ class Project(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    targets: Mapped[list["Target"]] = relationship(
+    targets: Mapped[list[Target]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
 
@@ -72,7 +73,7 @@ class Target(Base):
     )
 
     project: Mapped[Project] = relationship(back_populates="targets")
-    runs: Mapped[list["Run"]] = relationship(
+    runs: Mapped[list[Run]] = relationship(
         back_populates="target", cascade="all, delete-orphan"
     )
 
@@ -107,10 +108,10 @@ class Run(Base):
     )
 
     target: Mapped[Target] = relationship(back_populates="runs")
-    steps: Mapped[list["RunStep"]] = relationship(
+    steps: Mapped[list[RunStep]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
-    artifacts: Mapped[list["Artifact"]] = relationship(
+    artifacts: Mapped[list[Artifact]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
     )
 

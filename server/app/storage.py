@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import mimetypes
 import os
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator, Protocol
+from typing import Protocol
 
 
 def content_type_for(key: str) -> str:
