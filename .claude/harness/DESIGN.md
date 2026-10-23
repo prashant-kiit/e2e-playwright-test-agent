@@ -133,6 +133,25 @@ hand-maintained file it still is, and snapshots its bytes like any other tracked
 It becomes generated with hydrate in P3, which makes it the one tracked file whose
 content *shape* changes; nothing in P2 anticipates that.
 
+**A tracked-tree file's source location is not its delivered location — P3 separates
+them.** Infra is delivered by identical path today: `INFRA_COMMON` in
+[render.py](../../server/app/delivery/render.py) lists a relative path and delivery reads
+that same path out of the workspace, so a template's source *is* its destination. For
+`.github/workflows/playwright.yml` that puts harness **output** at a path GitHub Actions
+treats as a live workflow of the harness repo, and a push to `master` makes this repo
+install browsers and run the suite discovered from `apps/*` against live external sites —
+a flaky red X for tests that are not the harness's. The authoritative run belongs in the
+customer's repo, where the PR is (§7); the harness repo is the one place it must never
+execute.
+
+So from P3 an infra entry carries `(source, destination)`, and the workflow template moves
+under `server/app/delivery/templates/`. Delivered bytes are unchanged. Two things not to
+do: do not neuter the `on:` triggers in the harness copy instead — the delivered copy
+inherits the dead trigger and then never runs in the customer's repo either, which is the
+failure this is meant to prevent; and do not treat it as separate from the generated
+config above, because once an entry is `(source, destination)` the generated
+`playwright.config.ts` is just an entry whose source is a renderer rather than a file.
+
 **Config is not a tree file.** `app.json` no longer exists and is never delivered — it
 is SaaS-internal. At hydrate, config is *rendered* out of Postgres:
 
@@ -347,7 +366,9 @@ Two scope notes on "drop `gh` and `jq`" (decision 20), both settled in P1:
 - It means **our** tooling. The `jq` in `.github/workflows/playwright.yml` stays: that file
   is harness *output*, pushed into each customer's repo, where it builds the results table
   inside GitHub Actions — an environment that has `jq` and does not have our Python. Removing
-  it there would break a customer's CI to tidy a dependency we don't ship.
+  it there would break a customer's CI to tidy a dependency we don't ship. (Where that file
+  *lives* in our repo is a separate question, settled in §4: from P3 it is a template under
+  `server/app/delivery/templates/`, not a live workflow of the harness repo.)
 - Dropping `gh` removed its `gh auth token` fallback with it. `GITHUB_PAT` (environment or
   `.env`) is now the **only** credential source. That is an intentional behavior change, not
   a regression to be "fixed" later: an operator who only ran `gh auth login` now gets a
@@ -460,3 +481,4 @@ one hook by the caller. Recorded here because the natural way to write P2 is to 
 | 20 | Shell → Python module map; drop `gh` and `jq` |
 | 21 | Immutable `audit_log` for every control-plane mutation |
 | 22 | Five-phase migration; `tenant_id` carried from P2 |
+| 23 | Infra entries carry `(source, destination)` from P3; a delivered workflow is never a live workflow of the harness repo |
