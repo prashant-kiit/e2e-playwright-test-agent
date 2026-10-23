@@ -8,25 +8,13 @@ these never touch the dev database.
 import pytest
 from fastapi.testclient import TestClient
 
+from app import apphub
 from app.api import get_launcher, get_storage
 from app.auth import require_auth
 from app.db import get_session
 from app.main import app
-
-
-class _FakeStorage:
-    def __init__(self):
-        self.objects = {}
-
-    def ensure_bucket(self):
-        pass
-
-    def put_file(self, key, path, content_type=None):
-        self.objects[key] = (path.read_bytes(), content_type or "application/octet-stream")
-
-    def get_stream(self, key):
-        data, ct = self.objects[key]
-        return iter([data]), ct
+from app.tenancy import current_tenant_id
+from tests.storage_helpers import FakeStorage
 
 
 @pytest.fixture()
@@ -177,7 +165,7 @@ def test_resume_a_non_paused_run_409(client):
 def test_list_and_download_artifacts(client, session):
     from app.models import Artifact
 
-    store = _FakeStorage()
+    store = FakeStorage()
     app.dependency_overrides[get_storage] = lambda: store
 
     _, tid = _make_target(client)
@@ -185,7 +173,15 @@ def test_list_and_download_artifacts(client, session):
     key = f"{run['run_key']}/report.html"
     store.objects[key] = (b"<html>hi</html>", "text/html")
     session.add(
-        Artifact(run_id=run["id"], step="heal", kind="report", s3_key=key, sha256="x" * 64, version=1)
+        Artifact(
+            tenant_id=current_tenant_id(),
+            run_id=run["id"],
+            step="heal",
+            kind="report",
+            s3_key=key,
+            sha256="x" * 64,
+            version=1,
+        )
     )
     session.commit()
 
@@ -223,12 +219,29 @@ def test_bootstrap_via_api(client, tmp_path, monkeypatch):
     (tmp_path / "apps").mkdir()
     calls = []
     app.dependency_overrides[get_bootstrap_runner] = lambda: (
-        lambda a: calls.append(a) or {"rc": 0, "output": "ok"}
+        lambda a: calls.append(a) or apphub.BootstrapOutcome(ok=True, output="ok")
     )
     r = client.post("/apps/bootstrap", json={"app": "demoapp", "name": "Demo", "targetRepo": "o/r"})
     assert r.status_code == 201
     assert (tmp_path / "apps" / "demoapp" / "app.json").exists()
     assert calls == ["demoapp"]
+    # The portal gets an outcome plus some text, not a shell return code.
+    assert r.json()["bootstrap"] == {"ok": True, "output": "ok"}
+
+
+def test_bootstrap_app_reports_a_failed_target_sync_as_an_outcome(client, tmp_path, monkeypatch):
+    """A target-repo failure is still a 201 with ok=False: apps/<app>/ was
+    created, and the form shows why the sync did not land."""
+    from app.api import get_bootstrap_runner
+
+    monkeypatch.setenv("QA_REPO_ROOT", str(tmp_path))
+    (tmp_path / "apps").mkdir()
+    app.dependency_overrides[get_bootstrap_runner] = lambda: (
+        lambda a: apphub.BootstrapOutcome(ok=False, output="no GitHub token")
+    )
+    r = client.post("/apps/bootstrap", json={"app": "demoapp", "name": "Demo"})
+    assert r.status_code == 201
+    assert r.json()["bootstrap"] == {"ok": False, "output": "no GitHub token"}
 
 
 def test_events_replays_history_of_a_finished_run(client, session):

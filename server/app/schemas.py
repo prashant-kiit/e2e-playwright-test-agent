@@ -77,6 +77,21 @@ class BootstrapBody(BaseModel):
     do_bootstrap: bool = True
 
 
+class BootstrapOutcomeOut(BaseModel):
+    """The target-repo step's outcome. `ok=False` with the reason in `output` is
+    a normal response: apps/<app>/ was created even if the sync did not land."""
+
+    model_config = ConfigDict(from_attributes=True)
+    ok: bool
+    output: str
+
+
+class BootstrapAppOut(BaseModel):
+    app: str
+    created: bool
+    bootstrap: BootstrapOutcomeOut | None = None
+
+
 class PromptOut(BaseModel):
     name: str
     content: str
@@ -109,3 +124,86 @@ class RunOut(BaseModel):
     lease_expires_at: datetime | None
     error: str | None
     created_at: datetime
+
+
+# --- delivery (P1: the shell tools became portal actions) ----------------
+
+class DeliverBody(BaseModel):
+    story_id: str = Field(min_length=1, max_length=40)
+    run_id: str | None = None
+    dry_run: bool = False
+
+
+class ResetBody(BaseModel):
+    """`confirm_repo` must echo the target repo name: reset-target.sh read that
+    confirmation from a TTY, and a portal action has none."""
+
+    confirm_repo: str = Field(min_length=1, max_length=200)
+    dry_run: bool = False
+
+
+class BootstrappedOut(BaseModel):
+    app: str
+    repo: str
+    branch: str
+    bootstrapped: bool
+
+
+class DeliveryOut(BaseModel):
+    ok: bool
+    message: str
+    pr_url: str = ""
+    pr_number: int | None = None
+    detail: dict = {}
+
+
+# --- revisions / file_index / parity (P2) --------------------------------
+#
+# All read-only except the snapshot action. These describe the dual-written
+# revision model; nothing in the system reads them to make a decision in P2.
+
+class RevisionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    rev: int
+    parent_rev: int | None
+    tree_hash: str
+    produced_by_run_id: int | None
+    author: str
+    created_at: datetime
+    file_count: int
+
+
+class SnapshotOut(BaseModel):
+    """The outcome of a manual snapshot.
+
+    `created=False` with the unchanged head in `revision` is a normal response,
+    not a failure: a tree whose hash already matches the head commits nothing,
+    because `rev` counts real changes rather than counting attempts.
+    """
+
+    created: bool
+    revision: RevisionOut
+
+
+class FileIndexOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    path: str
+    blob_key: str
+    size: int
+
+
+class ParityOut(BaseModel):
+    """Whether a target's head revision agrees with the files on disk.
+
+    `has_revision=False` is its own state: a never-snapshotted target is not
+    "in sync", and is not an error either.
+    """
+
+    has_revision: bool
+    in_sync: bool
+    rev: int | None
+    tree_hash: str | None
+    only_in_db: list[str]
+    only_on_disk: list[str]
+    modified: list[str]

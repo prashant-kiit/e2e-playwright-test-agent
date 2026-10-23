@@ -2,26 +2,22 @@
 prompts/. Files remain the source of truth for config; this module lets the
 portal read them and bootstrap a new target app.
 
-Bootstrapping writes apps/<app>/app.json + seed.spec.ts from a form, then runs
-scripts/bootstrap-target.sh. The shell step is injectable so tests don't need
-gh/git or a real target repo.
+Bootstrapping writes apps/<app>/app.json + seed.spec.ts from a form, then calls
+app/delivery to sync the infra to the target repo. The target-repo step is
+injectable so tests need neither git nor a real repo.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
-import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import config
-
-_HEADING = re.compile(r"#\s*(?:User Story:\s*)?([A-Za-z]+-\d+)\s*[-–]\s*(.+)")
-_APP_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-# Story file names are "<ID>-<slug>", where the ID itself contains a hyphen
-# (e.g. SCRUM-201-auth -> id "SCRUM-201", slug "auth").
-_STORY_FILE = re.compile(r"^([A-Za-z]+-\d+)-(.+)$")
+from .delivery.render import APP_NAME as _APP_NAME
+from .delivery.render import HEADING as _HEADING
+from .delivery.render import STORY_FILE as _STORY_FILE
 
 _SEED_TEMPLATE = """import { test, expect } from '@playwright/test';
 
@@ -123,18 +119,43 @@ class BootstrapError(Exception):
     pass
 
 
-def run_bootstrap_script(app: str) -> dict:
-    """Run scripts/bootstrap-target.sh <app> from the repo root."""
-    proc = subprocess.run(
-        ["./scripts/bootstrap-target.sh", app],
-        cwd=str(config.repo_root()),
-        capture_output=True,
-        text=True,
-    )
-    return {"rc": proc.returncode, "output": (proc.stdout + proc.stderr).strip()}
+@dataclass(frozen=True)
+class BootstrapOutcome:
+    """The portal-facing result of the target-repo bootstrap step.
+
+    This replaces the shell-shaped {"rc": int, "output": str} the step returned
+    while it was still a script: `ok` is the outcome, `output` is the text the
+    form shows. A DeliveryError is an outcome, not a server error, so the form
+    can report a failed bootstrap next to the app it did create.
+    """
+
+    ok: bool
+    output: str
 
 
-def bootstrap_app(data: dict, run=run_bootstrap_script, do_bootstrap: bool = True) -> dict:
+def run_bootstrap(app: str, *, tools=None) -> BootstrapOutcome:
+    """Bootstrap the app's target repo through app/delivery (was a shell script).
+
+    `tools` is the delivery seam (GitHub client + git + token + workspace); left
+    unset it is built from the environment. Tests pass one backed by a bare repo
+    on disk, so this needs neither network nor credentials.
+    """
+    from .delivery import DeliveryError, bootstrap_target
+
+    try:
+        result = bootstrap_target(app, tools=tools)
+    except DeliveryError as exc:
+        return BootstrapOutcome(ok=False, output=str(exc))
+    lines = [
+        f"App:    {result.app}",
+        f"Target: {result.repo} ({result.branch})",
+        *([result.changes.strip()] if result.changes.strip() else []),
+        result.message,
+    ]
+    return BootstrapOutcome(ok=True, output="\n".join(lines))
+
+
+def bootstrap_app(data: dict, run=run_bootstrap, do_bootstrap: bool = True) -> dict:
     """Create apps/<app>/ from a form and (optionally) run the bootstrap script."""
     app = (data.get("app") or "").strip()
     if not _APP_NAME.match(app):

@@ -8,7 +8,7 @@ and the lock table live in the repository layer.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 # Defaults: heartbeat every 15s, lease lives 60s. A run is considered dead once
 # it has missed several heartbeats, which tolerates brief pauses/GC stalls.
@@ -17,7 +17,7 @@ DEFAULT_LEASE_TTL = timedelta(seconds=60)
 
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def new_expiry(now: datetime | None = None, ttl: timedelta = DEFAULT_LEASE_TTL) -> datetime:
@@ -33,5 +33,5 @@ def is_expired(expires_at: datetime, now: datetime | None = None) -> bool:
 def _aware(dt: datetime) -> datetime:
     """Treat a naive datetime (e.g. read back from the DB) as UTC."""
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     return dt

@@ -5,6 +5,12 @@ import json
 import pytest
 
 from app import apphub
+from tests.delivery_helpers import (
+    FakeGitHub,
+    make_bare_remote,
+    make_tools,
+    make_workspace,
+)
 
 
 @pytest.fixture()
@@ -59,7 +65,7 @@ def test_bootstrap_writes_files_and_runs_script(repo_root):
 
     def fake(app):
         calls.append(app)
-        return {"rc": 0, "output": "bootstrapped"}
+        return apphub.BootstrapOutcome(ok=True, output="bootstrapped")
 
     res = apphub.bootstrap_app(
         {"app": "newapp", "name": "New", "baseURL": "https://n", "targetRepo": "o/r"},
@@ -69,7 +75,7 @@ def test_bootstrap_writes_files_and_runs_script(repo_root):
     d = repo_root / "apps" / "newapp"
     assert (d / "app.json").exists() and (d / "seed.spec.ts").exists()
     assert json.loads((d / "app.json").read_text())["targetRepo"] == "o/r"
-    assert res["bootstrap"] == {"rc": 0, "output": "bootstrapped"}
+    assert res["bootstrap"] == apphub.BootstrapOutcome(ok=True, output="bootstrapped")
 
 
 def test_bootstrap_can_skip_the_script(repo_root):
@@ -86,3 +92,30 @@ def test_bootstrap_rejects_existing_app(repo_root):
     _make_app(repo_root, "foo")
     with pytest.raises(apphub.BootstrapError):
         apphub.bootstrap_app({"app": "foo", "name": "x"}, do_bootstrap=False)
+
+
+# --- the target-repo bootstrap step (P1: typed result, not {"rc", "output"}) --
+# Real git against a bare remote, fake GitHub REST: the delivery prior art.
+
+def _delivery_env(tmp_path, monkeypatch, app="demo"):
+    workspace = make_workspace(tmp_path / "ws", app)
+    remote = make_bare_remote(tmp_path)
+    monkeypatch.setenv("QA_REPO_ROOT", str(workspace))
+    return make_tools(workspace, remote, FakeGitHub(has_commits=False))
+
+
+def test_run_bootstrap_reports_a_successful_outcome(tmp_path, monkeypatch):
+    outcome = apphub.run_bootstrap("demo", tools=_delivery_env(tmp_path, monkeypatch))
+
+    assert outcome.ok is True
+    assert "o/r" in outcome.output  # the operator is told which target was synced
+
+
+def test_run_bootstrap_turns_a_delivery_failure_into_an_outcome(tmp_path, monkeypatch):
+    """A DeliveryError is an outcome the form can show, never a server error."""
+    tools = _delivery_env(tmp_path, monkeypatch)
+
+    outcome = apphub.run_bootstrap("no-such-app", tools=tools)
+
+    assert outcome.ok is False
+    assert "no-such-app" in outcome.output

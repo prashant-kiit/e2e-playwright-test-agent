@@ -18,7 +18,8 @@ from sqlalchemy.orm import Session
 from .domain import lease
 from .domain.status import RunStatus, assert_transition, is_live
 from .domain.steps import Step
-from .models import AppLock, Artifact, Project, Run, RunStep, Target
+from .models import AppLock, Project, Run, RunStep, Target
+from .tenancy import current_tenant_id
 
 VALID_MODES = ("changed", "full")
 
@@ -43,7 +44,7 @@ class RunConflict(RepoError):
 # --- projects / targets --------------------------------------------------
 
 def create_project(session: Session, name: str) -> Project:
-    project = Project(name=name)
+    project = Project(tenant_id=current_tenant_id(), name=name)
     session.add(project)
     session.commit()
     session.refresh(project)
@@ -63,7 +64,9 @@ def get_project(session: Session, project_id: int) -> Project:
 
 def create_target(session: Session, project_id: int, app: str, name: str) -> Target:
     get_project(session, project_id)  # ensure the project exists
-    target = Target(project_id=project_id, app=app, name=name)
+    target = Target(
+        tenant_id=current_tenant_id(), project_id=project_id, app=app, name=name
+    )
     session.add(target)
     session.commit()
     session.refresh(target)
@@ -130,6 +133,7 @@ def start_run(
         session.flush()
 
     run = Run(
+        tenant_id=current_tenant_id(),
         run_key=_new_run_key(target.app, now),
         target_id=target_id,
         story_id=story_id,
@@ -140,7 +144,12 @@ def start_run(
     session.add(run)
     session.flush()  # assign run.id
     session.add(
-        AppLock(target_id=target_id, run_id=run.id, lease_expires_at=run.lease_expires_at)
+        AppLock(
+            tenant_id=current_tenant_id(),
+            target_id=target_id,
+            run_id=run.id,
+            lease_expires_at=run.lease_expires_at,
+        )
     )
     session.commit()
     session.refresh(run)
@@ -219,7 +228,14 @@ def start_step(session: Session, run_id: int, step: Step, now: datetime | None =
         select(RunStep).where(RunStep.run_id == run_id, RunStep.step == step)
     ).one_or_none()
     if rs is None:
-        rs = RunStep(run_id=run_id, step=step, status="running", attempt=1, started_at=now)
+        rs = RunStep(
+            tenant_id=current_tenant_id(),
+            run_id=run_id,
+            step=step,
+            status="running",
+            attempt=1,
+            started_at=now,
+        )
         session.add(rs)
     else:
         rs.attempt += 1

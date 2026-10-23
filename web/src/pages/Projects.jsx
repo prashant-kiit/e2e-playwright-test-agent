@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api.js";
 import { Spinner } from "../components.jsx";
+import Revisions from "./Revisions.jsx";
 
 export default function Projects() {
   const [projects, setProjects] = useState(null);
@@ -116,6 +117,7 @@ function TargetRow({ target, appInfo }) {
   const [mode, setMode] = useState("full");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [showRevisions, setShowRevisions] = useState(false);
 
   useEffect(() => {
     api
@@ -135,7 +137,13 @@ function TargetRow({ target, appInfo }) {
       const run = await api.startRun(target.id, story.trim(), mode);
       navigate(`/runs/${run.id}`);
     } catch (e) {
-      setError(e.status === 409 ? "This app already has a live run." : String(e.message || e));
+      // 409 must not be an operator's first hint that runs aren't queued: say
+      // so, since there is no queue to fall back on (DESIGN.md §5).
+      setError(
+        e.status === 409
+          ? "This app already has a live run. Runs are not queued — wait for it to finish, or pause/stop it, then start this one."
+          : String(e.message || e),
+      );
     } finally {
       setBusy(false);
     }
@@ -152,6 +160,12 @@ function TargetRow({ target, appInfo }) {
               View target code ↗
             </a>
           )}
+          <button
+            className="btn ghost sm"
+            onClick={() => setShowRevisions((v) => !v)}
+          >
+            {showRevisions ? "Hide revisions" : "Revisions"}
+          </button>
         </span>
       </div>
       <form className="inline-form" onSubmit={start}>
@@ -179,6 +193,11 @@ function TargetRow({ target, appInfo }) {
         </button>
       </form>
       {error && <div className="error">{error}</div>}
+      {showRevisions && (
+        <div className="target-revisions">
+          <Revisions target={target} />
+        </div>
+      )}
     </div>
   );
 }

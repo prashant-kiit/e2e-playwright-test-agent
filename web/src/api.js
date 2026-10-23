@@ -18,6 +18,17 @@ async function req(method, path, body) {
   }
   if (res.status === 204) return null;
   const ct = res.headers.get("content-type") || "";
+  // The API paths deliberately collide with SPA client routes, so a caching or
+  // proxy slip can answer a data call with index.html. Handing that back as a
+  // string turns into "e.map is not a function" three frames away and a blank
+  // page; failing here says what actually happened.
+  if (ct.includes("text/html")) {
+    throw new ApiError(
+      `unexpected HTML from ${path} — expected data. The SPA shell was served ` +
+        `for an API path; check the reverse proxy's Vary/Accept handling.`,
+      res.status,
+    );
+  }
   return ct.includes("application/json") ? res.json() : res.text();
 }
 
@@ -56,6 +67,21 @@ export const api = {
   stopRun: (id) => req("POST", `/runs/${id}/stop`),
 
   artifactContentUrl: (id) => `/artifacts/${id}/content`,
+
+  // revisions (P2): the dual-written snapshot of a target's tracked tree.
+  // Read-only except snapshotTarget, which is P2-only scaffolding -- in P3 the
+  // filesystem is not authoritative and "snapshot the disk" stops meaning
+  // anything.
+  listRevisions: (targetId) => req("GET", `/targets/${targetId}/revisions`),
+  snapshotTarget: (targetId) => req("POST", `/targets/${targetId}/revisions/snapshot`),
+  targetParity: (targetId) => req("GET", `/targets/${targetId}/parity`),
+  revisionFiles: (revisionId) => req("GET", `/revisions/${revisionId}/files`),
+  // A tracked path contains slashes, so it travels as a query parameter and
+  // needs no escaping scheme beyond the usual encoding.
+  // Always text: the route serves every tracked path as text/plain so the
+  // bytes reach the viewer exactly as they were stored.
+  revisionFile: (revisionId, path) =>
+    req("GET", `/revisions/${revisionId}/file?path=${encodeURIComponent(path)}`),
 
   // repo introspection + bootstrap + settings
   listApps: () => req("GET", "/apps"),

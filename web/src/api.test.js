@@ -46,4 +46,32 @@ describe("api wrapper", () => {
   it("builds the artifact content url", () => {
     expect(api.artifactContentUrl(7)).toBe("/artifacts/7/content");
   });
+
+  it("refuses an HTML document where data was expected", async () => {
+    // The API paths collide with SPA routes, so a caching slip can hand the
+    // app its own index.html. Returning it as a string blanks the page with a
+    // cryptic "e.map is not a function"; this says what actually happened.
+    mockFetch(200, "<!doctype html><title>QA Portal</title>", "text/html");
+    await expect(api.listProjects()).rejects.toThrow(/unexpected html/i);
+  });
+
+  it("returns a tracked json file verbatim, not re-encoded", async () => {
+    // The route serves every tracked path as text/plain precisely so this
+    // cannot become JSON.parse -> JSON.stringify, which is not the stored bytes.
+    const raw = '{"name":   "qa",\n  "private": true}\n';
+    mockFetch(200, raw, "text/plain; charset=utf-8");
+    expect(await api.revisionFile(3, "package.json")).toBe(raw);
+  });
+
+  it("encodes a tracked path into the revision file query", async () => {
+    mockFetch(200, "// cart\n", "text/plain");
+    await api.revisionFile(3, "tests/checkout/cart.spec.ts");
+    const [path] = global.fetch.mock.calls[0];
+    expect(path).toBe("/revisions/3/file?path=tests%2Fcheckout%2Fcart.spec.ts");
+  });
+
+  it("returns a tracked file as text, not json", async () => {
+    mockFetch(200, "export default {};\n", "text/plain");
+    expect(await api.revisionFile(3, "playwright.config.ts")).toBe("export default {};\n");
+  });
 });

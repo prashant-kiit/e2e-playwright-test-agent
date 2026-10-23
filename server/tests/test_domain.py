@@ -1,6 +1,6 @@
 """Unit tests for the pure domain layer (no DB, no services)."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -23,7 +23,6 @@ from app.domain.steps import (
     resume_step,
     step_index,
 )
-
 
 # --- steps ---------------------------------------------------------------
 
@@ -118,13 +117,13 @@ def test_assert_transition_raises_on_illegal():
 # --- lease ---------------------------------------------------------------
 
 def test_new_expiry_is_ttl_in_the_future():
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
     exp = lease.new_expiry(now=now, ttl=timedelta(seconds=60))
     assert exp == now + timedelta(seconds=60)
 
 
 def test_is_expired_before_and_after():
-    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
     exp = lease.new_expiry(now=now, ttl=timedelta(seconds=60))
     assert not lease.is_expired(exp, now=now + timedelta(seconds=30))
     assert lease.is_expired(exp, now=now + timedelta(seconds=61))
@@ -132,7 +131,7 @@ def test_is_expired_before_and_after():
 
 def test_is_expired_treats_naive_db_timestamp_as_utc():
     naive = datetime(2026, 1, 1, 0, 1, 0)  # no tzinfo, as psycopg may return
-    now_before = datetime(2026, 1, 1, 0, 0, 30, tzinfo=timezone.utc)
-    now_after = datetime(2026, 1, 1, 0, 2, 0, tzinfo=timezone.utc)
+    now_before = datetime(2026, 1, 1, 0, 0, 30, tzinfo=UTC)
+    now_after = datetime(2026, 1, 1, 0, 2, 0, tzinfo=UTC)
     assert not lease.is_expired(naive, now=now_before)
     assert lease.is_expired(naive, now=now_after)

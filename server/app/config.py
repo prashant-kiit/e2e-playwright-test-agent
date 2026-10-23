@@ -1,8 +1,11 @@
 """Filesystem/runtime config for the orchestrator.
 
-The portal wraps the existing file/shell harness, so the backend needs to know
-where the repo root is (apps/, prompts/, scripts/ live there) and where to put
-per-run working dirs. All overridable by env for containers/tests.
+Config still lives on the filesystem, so the backend needs to know where the repo
+root is (apps/ and prompts/ live there) and where to put per-run working dirs.
+All overridable by env for containers/tests.
+
+DESIGN.md P3 removes repo_root() entirely: config moves into Postgres and the
+worktree is hydrated per run.
 """
 
 from __future__ import annotations

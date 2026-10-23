@@ -58,7 +58,7 @@ services:
       QA_RUNNER: "${QA_RUNNER:-fake}"
       QA_FAKE_DELAY: "${QA_FAKE_DELAY:-0}"
     volumes:
-      - .:/workspace    # the repo: apps/, prompts/, scripts/ (read + bootstrap)
+      - .:/workspace    # the repo: apps/ and prompts/ (read + bootstrap)
       - apidata:/data   # per-run working dirs (run logs + Playwright output)
     ports:
       - "8000:8000"

@@ -6,8 +6,8 @@ with a kind (screenshot/video/trace/report/log/other) and a version. Version is
 per (run, key): re-storing the same path in a later attempt bumps it, so history
 is kept without a bespoke version graph.
 
-Playwright *code* is NOT collected here — it is pushed to the target repo by
-scripts/push-artifacts.sh. This indexes evidence/reports/logs only.
+Playwright *code* is NOT collected here — it is delivered to the target repo by
+app/delivery. This indexes evidence/reports/logs only.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from .domain.steps import Step
 from .models import Artifact, Run
 from .storage import Storage, content_type_for
+from .tenancy import current_tenant_id
 
 # Files that are never useful as artifacts.
 _SKIP = {".DS_Store"}
@@ -81,6 +82,7 @@ class ArtifactCollector:
                 stored.append(prior)
             else:
                 row = Artifact(
+                    tenant_id=current_tenant_id(),
                     run_id=run.id, step=step.value, kind=classify(rel),
                     s3_key=key, sha256=digest, version=1,
                 )

@@ -10,7 +10,7 @@ describe("Bootstrap", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("submits the form and shows the result", async () => {
-    api.bootstrapApp.mockResolvedValue({ app: "my-app", bootstrap: { rc: 0, output: "done" } });
+    api.bootstrapApp.mockResolvedValue({ app: "my-app", bootstrap: { ok: true, output: "done" } });
     render(<Bootstrap />);
     await userEvent.type(screen.getByPlaceholderText("my-app"), "my-app");
     await userEvent.type(screen.getByPlaceholderText("My App"), "My App");
@@ -21,6 +21,28 @@ describe("Bootstrap", () => {
     expect(body.app).toBe("my-app");
     expect(body.do_bootstrap).toBe(true);
     expect(await screen.findByText(/Created/)).toBeInTheDocument();
+    expect(await screen.findByText(/bootstrapped/i)).toBeInTheDocument();
+    expect(screen.getByText("done")).toBeInTheDocument();
+    expect(document.querySelector(".banner")).toHaveClass("success");
+  });
+
+  it("reports a failed target-repo sync as an outcome, not an error", async () => {
+    api.bootstrapApp.mockResolvedValue({
+      app: "my-app",
+      bootstrap: { ok: false, output: "no GitHub token" },
+    });
+    render(<Bootstrap />);
+    await userEvent.type(screen.getByPlaceholderText("my-app"), "my-app");
+    await userEvent.type(screen.getByPlaceholderText("My App"), "My App");
+    await userEvent.click(screen.getByRole("button", { name: /create target/i }));
+
+    // The app folder was still created, so the banner reports the outcome and
+    // the reason rather than discarding both.
+    expect(await screen.findByText(/Created/)).toBeInTheDocument();
+    expect(await screen.findByText(/bootstrap failed/i)).toBeInTheDocument();
+    expect(screen.getByText("no GitHub token")).toBeInTheDocument();
+    // ...and it must not be dressed as a success: a partial outcome reads amber.
+    expect(document.querySelector(".banner")).not.toHaveClass("success");
   });
 
   it("keeps the submit button disabled until app + name are filled", () => {

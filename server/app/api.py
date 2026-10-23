@@ -9,15 +9,15 @@ from __future__ import annotations
 
 import json
 import queue
-from typing import Callable
+from collections.abc import Callable
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from sqlalchemy import select
-
-from . import apphub, repo, storage
+from . import apphub, delivery, repo, revisions, storage
+from .auth import AuthDep
 from .db import get_session
 from .domain.status import is_terminal
 from .launcher import launch_run
@@ -26,18 +26,26 @@ from .orchestrator.bus import DONE, bus
 from .schemas import (
     AppOut,
     ArtifactOut,
+    BootstrapAppOut,
     BootstrapBody,
+    BootstrappedOut,
+    DeliverBody,
+    DeliveryOut,
+    FileIndexOut,
+    ParityOut,
     ProjectCreate,
     ProjectOut,
     PromptOut,
+    ResetBody,
+    RevisionOut,
     RunCreate,
     RunOut,
+    SnapshotOut,
     StepOut,
     StoryOut,
     TargetCreate,
     TargetOut,
 )
-from .auth import AuthDep
 from .storage import Storage
 
 # Everything on this router requires a valid session cookie (tests override
@@ -55,9 +63,27 @@ def get_storage() -> Storage:
     return storage.from_env()
 
 
-def get_bootstrap_runner() -> Callable[[str], dict]:
-    """The shell step of bootstrapping. Overridden in tests (no gh/git)."""
-    return apphub.run_bootstrap_script
+def get_bootstrap_runner() -> Callable[[str], apphub.BootstrapOutcome]:
+    """The target-repo step of bootstrapping. Overridden in tests (no git/network)."""
+    return apphub.run_bootstrap
+
+
+def get_delivery_tools() -> delivery.Tools:
+    """git + GitHub + the PAT. Overridden in tests so no route touches the
+    network; building it here (not at import) keeps a missing PAT from breaking
+    unrelated endpoints.
+
+    Dependencies resolve before the handler body runs, so a failure here would
+    escape the routes' own exception handling as a bare 500. A missing `git` or
+    a missing PAT is an environment problem, so it is reported as 503 with the
+    reason rather than as an opaque server error.
+    """
+    try:
+        return delivery.default_tools()
+    except delivery.DeliveryError as exc:
+        raise HTTPException(
+            status_code=503, detail=f"delivery is unavailable: {exc}"
+        ) from exc
 
 
 # --- repo introspection + bootstrap (M6) --------------------------------
@@ -72,7 +98,7 @@ def list_stories(app: str):
     return apphub.list_stories(app)
 
 
-@router.post("/apps/bootstrap", status_code=201)
+@router.post("/apps/bootstrap", status_code=201, response_model=BootstrapAppOut)
 def bootstrap_app(
     body: BootstrapBody,
     run=Depends(get_bootstrap_runner),
@@ -116,6 +142,250 @@ def create_target(
 @router.get("/targets", response_model=list[TargetOut])
 def list_targets(project_id: int | None = None, session: Session = Depends(get_session)):
     return repo.list_targets(session, project_id=project_id)
+
+
+# --- delivery: bootstrap-check / deliver / reset (P1) --------------------
+
+@router.get("/targets/{target_id}/bootstrapped", response_model=BootstrappedOut)
+def target_bootstrapped(
+    target_id: int,
+    session: Session = Depends(get_session),
+    tools: delivery.Tools = Depends(get_delivery_tools),
+):
+    target = _target_or_404(session, target_id)
+    try:
+        ready, ref = delivery.is_bootstrapped(target.app, tools=tools)
+    except delivery.DeliveryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return BootstrappedOut(
+        app=ref.app, repo=ref.repo, branch=ref.branch, bootstrapped=ready
+    )
+
+
+@router.post("/targets/{target_id}/deliver", response_model=DeliveryOut)
+def deliver_story(
+    target_id: int,
+    body: DeliverBody,
+    session: Session = Depends(get_session),
+    tools: delivery.Tools = Depends(get_delivery_tools),
+):
+    """Deliver one story's artifacts as a PR.
+
+    Bootstrap is folded in under the same action (DESIGN.md decision 16), so an
+    operator approving a delivery is approving "set the repo up and deliver".
+    """
+    target = _target_or_404(session, target_id)
+    try:
+        if not body.dry_run:
+            delivery.ensure_bootstrapped(target.app, tools=tools)
+        result = delivery.push_artifacts(
+            target.app,
+            body.story_id,
+            run_id=body.run_id,
+            dry_run=body.dry_run,
+            tools=tools,
+        )
+    except delivery.NotBootstrapped as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except delivery.CredentialError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except delivery.DeliveryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return DeliveryOut(
+        ok=True,
+        message=result.message,
+        pr_url=result.pr_url,
+        pr_number=result.pr_number,
+        detail={"branch": result.branch, "committed": result.committed},
+    )
+
+
+@router.post("/targets/{target_id}/reset", response_model=DeliveryOut)
+def reset_target_repo(
+    target_id: int,
+    body: ResetBody,
+    session: Session = Depends(get_session),
+    tools: delivery.Tools = Depends(get_delivery_tools),
+):
+    """DESTRUCTIVE: wipe the target repo. Requires the repo name echoed back."""
+    target = _target_or_404(session, target_id)
+    try:
+        result = delivery.reset_target(
+            target.app,
+            confirm_repo=body.confirm_repo,
+            dry_run=body.dry_run,
+            tools=tools,
+        )
+    except delivery.ConfirmationMismatch as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except delivery.CredentialError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except delivery.DeliveryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return DeliveryOut(
+        ok=True,
+        message=result.message,
+        detail={
+            "deleted_branches": list(result.deleted_branches),
+            "failed_branches": list(result.failed_branches),
+            "already_empty": result.already_empty,
+        },
+    )
+
+
+def _target_or_404(session: Session, target_id: int):
+    try:
+        return repo.get_target(session, target_id)
+    except repo.NotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# --- revisions / file_index / parity (P2) --------------------------------
+#
+# Read-only, except the snapshot action. Nothing here reads the revision tables
+# to make a decision -- `apps/` is still authoritative for the whole of P2, and
+# a route that started deciding from these rows would remove the safety net the
+# phase exists to keep (DESIGN.md §13).
+#
+# Every route resolves through a row and filters by the request's tenant, so a
+# blob is never served by key alone (DESIGN.md §9). The tenant is always 1
+# today; filtering anyway is the structural half of P5.
+
+# Tracked files are displayed as source, so they stream as text whatever their
+# extension implies. See revision_file_content.
+TRACKED_FILE_MEDIA_TYPE = "text/plain; charset=utf-8"
+
+
+def _revision_out(rev, file_count: int) -> RevisionOut:
+    return RevisionOut(
+        id=rev.id,
+        rev=rev.rev,
+        parent_rev=rev.parent_rev,
+        tree_hash=rev.tree_hash,
+        produced_by_run_id=rev.produced_by_run_id,
+        author=rev.author,
+        created_at=rev.created_at,
+        file_count=file_count,
+    )
+
+
+@router.post("/targets/{target_id}/revisions/snapshot", response_model=SnapshotOut)
+def snapshot_target_tree(
+    target_id: int,
+    response: Response,
+    session: Session = Depends(get_session),
+    store: Storage = Depends(get_storage),
+):
+    """Snapshot a target's tracked tree right now, outside any run.
+
+    **P2-only scaffolding.** It exists so an operator can give a never-run
+    target a head revision to compare parity against. In P3 the filesystem is
+    not authoritative and "snapshot the disk" stops meaning anything, so this
+    route goes away with the mount it reads.
+
+    An unchanged tree commits nothing and answers 200 with the existing head;
+    a new revision answers 201.
+    """
+    target = _target_or_404(session, target_id)
+    try:
+        committed = revisions.snapshot_target(session, target, store, author="operator")
+    except Exception as exc:  # the blob store is down, or the tree is unreadable
+        raise HTTPException(status_code=502, detail=f"snapshot failed: {exc}") from exc
+
+    if committed is None:
+        head = revisions.head_revision(session, target_id)
+        if head is None:  # an empty tracked tree hashes to a new revision, so
+            raise HTTPException(  # this is unreachable in practice
+                status_code=500, detail="snapshot committed nothing and there is no head"
+            )
+        response.status_code = 200
+        return SnapshotOut(
+            created=False,
+            revision=_revision_out(head, revisions.count_files(session, head.id)),
+        )
+
+    response.status_code = 201
+    return SnapshotOut(
+        created=True,
+        revision=_revision_out(committed, revisions.count_files(session, committed.id)),
+    )
+
+
+@router.get("/targets/{target_id}/revisions", response_model=list[RevisionOut])
+def list_target_revisions(target_id: int, session: Session = Depends(get_session)):
+    _target_or_404(session, target_id)
+    return [
+        _revision_out(rev, count)
+        for rev, count in revisions.list_revisions_with_file_counts(session, target_id)
+    ]
+
+
+@router.get("/targets/{target_id}/parity", response_model=ParityOut)
+def target_parity(target_id: int, session: Session = Depends(get_session)):
+    """Whether the head revision agrees with the files on disk.
+
+    The phase's evidence, and strictly read-only: parity never repairs or
+    re-snapshots, because a self-healing check would hide the drift it exists
+    to surface.
+    """
+    target = _target_or_404(session, target_id)
+    parity = revisions.target_parity(session, target)
+    return ParityOut(
+        has_revision=parity.has_revision,
+        in_sync=parity.in_sync,
+        rev=parity.rev,
+        tree_hash=parity.tree_hash,
+        only_in_db=list(parity.diff.only_in_db),
+        only_on_disk=list(parity.diff.only_on_disk),
+        modified=list(parity.diff.modified),
+    )
+
+
+def _revision_or_404(session: Session, revision_id: int):
+    rev = revisions.get_revision(session, revision_id)
+    if rev is None:
+        raise HTTPException(status_code=404, detail=f"no revision {revision_id}")
+    return rev
+
+
+@router.get("/revisions/{revision_id}/files", response_model=list[FileIndexOut])
+def list_revision_files(revision_id: int, session: Session = Depends(get_session)):
+    _revision_or_404(session, revision_id)
+    return revisions.list_files(session, revision_id)
+
+
+@router.get("/revisions/{revision_id}/file")
+def revision_file_content(
+    revision_id: int,
+    path: str,
+    session: Session = Depends(get_session),
+    store: Storage = Depends(get_storage),
+):
+    """Stream one tracked file's bytes out of blob storage.
+
+    `path` is a query parameter rather than a wildcard path segment so tracked
+    paths with slashes need no escaping scheme.
+
+    The row is found first and its tenant checked, and only then is the blob it
+    names read: knowing a blob key is not enough to read bytes.
+    """
+    _revision_or_404(session, revision_id)
+    row = revisions.get_file(session, revision_id, path)
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail=f"revision {revision_id} has no file {path!r}"
+        )
+    try:
+        chunks, _ = store.get_stream(row.blob_key)
+    except Exception as exc:  # object missing / store down
+        raise HTTPException(status_code=502, detail=f"storage error: {exc}") from exc
+    # A tracked file is source text to read, never a document to re-encode, so
+    # it is always served as text rather than under the type its extension
+    # guesses. Two reasons, both found by review: `application/json` makes a
+    # browser parse package.json and re-serialise it, which is no longer the
+    # bytes that were stored (ticket 04 asks for byte-identical); and
+    # mimetypes guesses `video/mp2t` for .ts, which is the bulk of a suite.
+    return StreamingResponse(chunks, media_type=TRACKED_FILE_MEDIA_TYPE)
 
 
 @router.post("/targets/{target_id}/runs", response_model=RunOut, status_code=201)
