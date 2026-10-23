@@ -46,4 +46,16 @@ describe("api wrapper", () => {
   it("builds the artifact content url", () => {
     expect(api.artifactContentUrl(7)).toBe("/artifacts/7/content");
   });
+
+  it("encodes a tracked path into the revision file query", async () => {
+    mockFetch(200, "// cart\n", "text/plain");
+    await api.revisionFile(3, "tests/checkout/cart.spec.ts");
+    const [path] = global.fetch.mock.calls[0];
+    expect(path).toBe("/revisions/3/file?path=tests%2Fcheckout%2Fcart.spec.ts");
+  });
+
+  it("returns a tracked file as text, not json", async () => {
+    mockFetch(200, "export default {};\n", "text/plain");
+    expect(await api.revisionFile(3, "playwright.config.ts")).toBe("export default {};\n");
+  });
 });

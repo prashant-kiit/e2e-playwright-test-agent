@@ -10,6 +10,7 @@ const apiPaths = [
   "/targets",
   "/runs",
   "/artifacts",
+  "/revisions",
   "/apps",
   "/prompts",
   "/settings",

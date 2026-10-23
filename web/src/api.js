@@ -57,6 +57,19 @@ export const api = {
 
   artifactContentUrl: (id) => `/artifacts/${id}/content`,
 
+  // revisions (P2): the dual-written snapshot of a target's tracked tree.
+  // Read-only except snapshotTarget, which is P2-only scaffolding -- in P3 the
+  // filesystem is not authoritative and "snapshot the disk" stops meaning
+  // anything.
+  listRevisions: (targetId) => req("GET", `/targets/${targetId}/revisions`),
+  snapshotTarget: (targetId) => req("POST", `/targets/${targetId}/revisions/snapshot`),
+  targetParity: (targetId) => req("GET", `/targets/${targetId}/parity`),
+  revisionFiles: (revisionId) => req("GET", `/revisions/${revisionId}/files`),
+  // A tracked path contains slashes, so it travels as a query parameter and
+  // needs no escaping scheme beyond the usual encoding.
+  revisionFile: (revisionId, path) =>
+    req("GET", `/revisions/${revisionId}/file?path=${encodeURIComponent(path)}`),
+
   // repo introspection + bootstrap + settings
   listApps: () => req("GET", "/apps"),
   listStories: (app) => req("GET", `/apps/${app}/stories`),
