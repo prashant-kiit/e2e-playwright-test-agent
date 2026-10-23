@@ -65,6 +65,20 @@ The schema under test is built by **running the Alembic migrations from zero**, 
 `Base.metadata.create_all`. CI preserves that; it is the only thing that catches migration
 drift before deploy.
 
+### What is *not* yet verified about CI
+
+`.github/workflows/ci.yml` **has never executed on GitHub.** `portal/build` is not pushed,
+so there has been no Actions run. What was actually checked, locally:
+
+- the workflow YAML parses, and both jobs' step lists are as intended;
+- every command it runs is the same command `make test` runs, and those all pass here;
+- the junit skip-parser was run against both a clean report (`0`) and a no-database report
+  (`65`).
+
+The first push will be the first real run of the job itself — expect to fix something
+mechanical (action versions, `uv sync --locked` resolving on Linux, the service's startup
+race) rather than anything about the suite.
+
 ## Live verification against real GitHub
 
 Target repos used:
