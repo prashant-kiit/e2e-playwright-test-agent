@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 
 from .. import config
 from ..domain.steps import Step
@@ -43,6 +44,60 @@ def _build_message(ctx: StepContext) -> str:
     }.items():
         text = text.replace(token, value)
     return text
+
+
+def runtime_dir() -> Path:
+    """The app's shipped agent config, owned by the application (not the
+    repo-root .claude/, which exists only for development)."""
+    return config.repo_root() / "apps" / "agent" / "runtime"
+
+
+def _agents_json() -> str:
+    """Build the --agents payload from runtime/agents/*.md.
+
+    Passing subagents inline (rather than via a plugin) keeps their names bare
+    (e.g. "playwright-test-planner"), matching how the step prompts invoke them;
+    a plugin would namespace them as "<plugin>:<name>".
+    """
+    agents: dict[str, dict] = {}
+    for path in sorted((runtime_dir() / "agents").glob("*.md")):
+        text = path.read_text()
+        meta, _, body = text.partition("---\n")[2].partition("\n---")
+        fm: dict[str, str] = {}
+        for line in meta.splitlines():
+            key, sep, val = line.partition(":")
+            if sep:
+                fm[key.strip()] = val.strip()
+        name = fm.get("name") or path.stem
+        entry: dict = {"description": fm.get("description", ""), "prompt": body.strip()}
+        if fm.get("tools"):
+            entry["tools"] = [t.strip() for t in fm["tools"].split(",") if t.strip()]
+        if fm.get("model"):
+            entry["model"] = fm["model"]
+        agents[name] = entry
+    return json.dumps(agents)
+
+
+def _isolation_flags() -> list[str]:
+    """Load ONLY the app's shipped agent config (apps/agent/runtime) instead of
+    inheriting the repo-root .claude/ used for development.
+
+    --setting-sources "" drops ambient user/project/local .claude discovery; the
+    app's permissions/hooks, MCP servers and subagents are then supplied
+    explicitly. Verified against claude CLI 2.1.x: ambient skills/settings are
+    excluded while these explicit sources load. Set QA_AGENT_ISOLATE=0 to fall
+    back to ambient discovery (development only).
+    """
+    if os.environ.get("QA_AGENT_ISOLATE") == "0":
+        return []
+    rt = runtime_dir()
+    return [
+        "--setting-sources", "",
+        "--settings", str(rt / "settings.json"),
+        "--mcp-config", str(rt / "mcp.json"),
+        "--strict-mcp-config",
+        "--agents", _agents_json(),
+    ]
 
 
 def _summarise(line: str) -> str | None:
@@ -74,6 +129,7 @@ class ClaudeRunner:
         message = _build_message(ctx)
 
         cmd = ["claude", "-p", message, "--output-format", "stream-json", "--verbose"]
+        cmd += _isolation_flags()
         if ctx.prev_session_id:
             cmd += ["--resume", ctx.prev_session_id]
 
