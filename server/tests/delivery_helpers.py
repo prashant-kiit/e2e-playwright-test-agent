@@ -174,3 +174,29 @@ def remote_log(bare: Path, branch: str = "master") -> list[str]:
         check=True,
     )
     return [line for line in out.stdout.splitlines() if line]
+
+
+def make_worktree(root: Path, *, story: str = "SCRUM-1", slug: str = "checkout") -> Path:
+    """A hydrated worktree: one target's whole tree at the root, nothing else.
+
+    The shape P3 hydrates and ingests -- the infra entries at their destination
+    paths, the target's own content beside them, and no apps/<app>/ prefix
+    anywhere, because the on-disk shape and the stored shape are now the same
+    shape.
+    """
+    for rel, text in INFRA_CONTENT.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    (root / "user-stories").mkdir(parents=True, exist_ok=True)
+    (root / "specs").mkdir(exist_ok=True)
+    (root / "tests" / slug).mkdir(parents=True, exist_ok=True)
+    (root / "seed.spec.ts").write_text("// seed\n")
+    (root / "user-stories" / f"{story}-{slug}.md").write_text(
+        f"# User Story: {story} - Checkout Flow\n\nAs a user...\n"
+    )
+    (root / "specs" / f"{story}-{slug}-test-plan.md").write_text("# Plan\n")
+    (root / "tests" / slug / "cart.spec.ts").write_text("// cart\n")
+    (root / "tests" / slug / "pay.spec.ts").write_text("// pay\n")
+    return root

@@ -55,18 +55,41 @@ def test_second_bootstrap_with_no_changes_pushes_nothing(env):
 
 
 def test_re_bootstrap_pushes_only_what_changed(env):
+    """The changed file is an app-scoped one: the infra entries come from the
+    templates in this package, so there is nothing in the workspace to edit."""
     workspace, remote = env
     bootstrap("demo", tools=make_tools(workspace, remote, FakeGitHub(has_commits=False)))
 
-    (workspace / "playwright.config.ts").write_text("export default { retries: 2 };\n")
+    (workspace / "apps" / "demo" / "seed.spec.ts").write_text("// seed v2\n")
     result = bootstrap(
         "demo", tools=make_tools(workspace, remote, FakeGitHub(has_commits=True))
     )
 
     assert result.mode == "re-bootstrap"
-    assert "playwright.config.ts" in result.changes
+    assert "apps/demo/seed.spec.ts" in result.changes
     assert "package.json" not in result.changes
     assert remote_log(remote)[0] == "chore: re-bootstrap Playwright project (demo)"
+
+
+def test_the_generated_config_is_pushed_from_the_target_row_not_the_workspace(env):
+    """A base-URL change arrives in the delivered config without any file in
+    this repo changing: that is what "generated" buys."""
+    workspace, remote = env
+    bootstrap("demo", tools=make_tools(workspace, remote, FakeGitHub(has_commits=False)))
+
+    import json
+
+    app_json = workspace / "apps" / "demo" / "app.json"
+    data = json.loads(app_json.read_text())
+    data["baseURL"] = "https://moved.example.com"
+    app_json.write_text(json.dumps(data, indent=2) + "\n")
+
+    result = bootstrap(
+        "demo", tools=make_tools(workspace, remote, FakeGitHub(has_commits=True))
+    )
+
+    assert "playwright.config.ts" in result.changes
+    assert result.pushed is True
 
 
 def test_dry_run_touches_nothing(env):
@@ -81,8 +104,10 @@ def test_dry_run_touches_nothing(env):
 
 
 def test_a_missing_workspace_file_fails_before_cloning(env):
+    """Only the app-scoped files still come off the workspace; the infra set
+    comes from the package, so it cannot be missing."""
     workspace, remote = env
-    (workspace / "package-lock.json").unlink()
+    (workspace / "apps" / "demo" / "seed.spec.ts").unlink()
 
     with pytest.raises(errors.DeliveryError, match="missing workspace file"):
         bootstrap("demo", tools=make_tools(workspace, remote, FakeGitHub()))

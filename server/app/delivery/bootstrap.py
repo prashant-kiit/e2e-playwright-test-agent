@@ -18,7 +18,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import DeliveryError, NotBootstrapped
-from .render import TargetRef, infra_files, resolve_target
+from .render import (
+    INFRA_ENTRIES,
+    TargetRef,
+    infra_files,
+    read_target_config,
+    resolve_target,
+)
 from .tools import Tools, default_tools
 
 
@@ -77,8 +83,12 @@ def bootstrap(app: str, *, dry_run: bool = False, tools: Tools | None = None) ->
             ),
         )
 
-    # Fail before cloning if the workspace is missing a file we promise to push.
-    for rel in files:
+    # The infra entries come from the templates in this package and from the
+    # generated config's renderer; only the two app-scoped files still come off
+    # the workspace. Fail before cloning if one of those is missing.
+    cfg = read_target_config(app)
+    workspace_files = tuple(f for f in files if f.startswith(f"apps/{app}/"))
+    for rel in workspace_files:
         if not (tools.workspace / rel).is_file():
             raise DeliveryError(f"missing workspace file: {rel}")
 
@@ -95,7 +105,12 @@ def bootstrap(app: str, *, dry_run: bool = False, tools: Tools | None = None) ->
             repo_git = tools.git.clone(url, work, depth=1)
             repo_git.checkout_new(target.branch)
 
-        for rel in files:
+        for entry in INFRA_ENTRIES:
+            dest = work / entry.destination
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(entry.render(cfg))
+
+        for rel in workspace_files:
             dest = work / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(tools.workspace / rel, dest)

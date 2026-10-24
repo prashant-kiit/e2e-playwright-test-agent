@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from .. import config
+from ..target_config import DEFAULT_BRANCH, PLACEHOLDER_REPO, TargetConfig
 from .errors import DeliveryError
 
 # A story heading: "# User Story: SCRUM-202 - Account Sign-up Form"
@@ -27,37 +29,176 @@ HEADING = re.compile(r"#\s*(?:User Story:\s*)?([A-Za-z]+-\d+)\s*[-–]\s*(.+)")
 STORY_FILE = re.compile(r"^([A-Za-z]+-\d+)-(.+)$")
 APP_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
-# The placeholder apps/_template/app.json ships with; never a real target.
-PLACEHOLDER_REPO = "owner/repo-that-receives-the-tests"
-DEFAULT_BRANCH = "master"
+# Where the infra templates live: inside the server package, so an API image
+# needs no mounted repo to deliver one.
+TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
-# Infra files that define a runnable target repo, workspace-relative and pushed
-# at the same path. The single list used by bootstrap and the bootstrapped check
-# (ports qa-lib.sh `qa_infra_files`).
-INFRA_COMMON: tuple[str, ...] = (
-    "package.json",
-    "package-lock.json",
-    "playwright.config.ts",
-    ".gitignore",
-    ".github/workflows/playwright.yml",
+APP_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+# --- infra entries: (source, destination) ---------------------------------
+#
+# DESIGN.md decision 23. An entry's source is either a file under TEMPLATES_DIR
+# or a **renderer** -- a function of the target's configuration. Its destination
+# is the path in the hydrated worktree and in the customer's repo.
+#
+# Before P3 a template's source *was* its destination, which put
+# `.github/workflows/playwright.yml` at a path GitHub Actions treats as a live
+# workflow of this repository: a push to master made the harness install
+# browsers and run customers' suites against live external sites. Splitting the
+# two moves the source without changing a delivered byte.
+#
+# Do not neuter the `on:` triggers in the template instead of moving it: the
+# delivered copy would inherit the dead trigger and never run in the customer's
+# repo either, which is the exact failure the move prevents.
+
+Renderer = Callable[[TargetConfig], str]
+
+
+@dataclass(frozen=True)
+class InfraEntry:
+    """One infra file: where its bytes come from, and where they land."""
+
+    destination: str
+    template: str | None = None   # relative to TEMPLATES_DIR
+    renderer: Renderer | None = None
+
+    @property
+    def generated(self) -> bool:
+        """Whether this entry's bytes come from the target row rather than a file.
+
+        Generated entries are re-rendered on every hydrate and re-rendered again
+        before every ingest scan, which is what gives them exactly one author.
+        """
+        return self.renderer is not None
+
+    def render(self, cfg: TargetConfig) -> str:
+        if self.renderer is not None:
+            return self.renderer(cfg)
+        assert self.template is not None
+        return (TEMPLATES_DIR / self.template).read_text()
+
+
+def render_playwright_config(cfg: TargetConfig) -> str:
+    """The target's `playwright.config.ts`, generated from its row.
+
+    Single-target by construction, which is what makes the project names bare
+    (`chromium`, not `<app>-chromium`) and what stops a project name or a test
+    path from reaching another customer's tests. The same file is what the
+    customer's CI runs, so it must not know about `apps/`.
+
+    `baseURL` arrives from the database as operator input and is rendered into
+    TypeScript source, so it goes through `json.dumps` rather than being
+    interpolated: a quote in a base URL would otherwise be a code-injection
+    point into the customer's repo.
+    """
+    base_url = json.dumps(cfg.base_url)
+    return f"""// GENERATED FILE -- do not edit.
+//
+// Rendered from this target's configuration in Postgres on every hydrate, and
+// re-rendered before every ingest, so edits here are discarded. Change the
+// base URL in the portal instead; the change arrives as a tree diff and a new
+// revision.
+import {{ defineConfig, devices }} from '@playwright/test';
+
+const baseURL = {base_url};
+
+/* The orchestrator sets QA_RUN_DIR per run, so Playwright's output lands in the
+ * run directory and never in this worktree -- the worktree is the tree a
+ * revision is made of. */
+const RUN_DIR = process.env.QA_RUN_DIR;
+const outputPath = (name: string) => (RUN_DIR ? `${{RUN_DIR}}/${{name}}` : name);
+
+export default defineConfig({{
+  /* One target per worktree: the whole tree is this target's, seed included. */
+  testDir: '.',
+  outputDir: outputPath('test-results'),
+  fullyParallel: true,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 2 : 0,
+  workers: process.env.CI
+    ? 1
+    : process.env.QA_WORKERS
+      ? Number(process.env.QA_WORKERS)
+      : undefined,
+  /* open: 'never' so a failing local run does not block on the report server. */
+  reporter: [
+    ['list'],
+    ['html', {{ open: 'never', outputFolder: outputPath('playwright-report') }}],
+  ],
+  use: {{
+    /* Playwright's default is no limit; an agent driving the browser over MCP
+     * would hang forever on a missing element. */
+    actionTimeout: 10_000,
+    navigationTimeout: 15_000,
+    trace: 'on-first-retry',
+  }},
+  projects: [
+    {{ name: 'chromium', use: {{ ...devices['Desktop Chrome'], baseURL }} }},
+    {{ name: 'firefox', use: {{ ...devices['Desktop Firefox'], baseURL }} }},
+    {{ name: 'webkit', use: {{ ...devices['Desktop Safari'], baseURL }} }},
+    {{ name: 'mobile-chrome', use: {{ ...devices['Pixel 7'], baseURL }} }},
+  ],
+}});
+"""
+
+
+# The infra set that defines a runnable target repo (ports qa-lib.sh
+# `qa_infra_files`). Shared on disk but **logically per-target**: each target's
+# revision carries its own copy, which content addressing makes free.
+INFRA_ENTRIES: tuple[InfraEntry, ...] = (
+    InfraEntry("package.json", template="package.json"),
+    InfraEntry("package-lock.json", template="package-lock.json"),
+    InfraEntry("playwright.config.ts", renderer=render_playwright_config),
+    # The template is `gitignore`, without the dot: a leading dot inside package
+    # data is the kind of thing a packaging glob silently drops, and the
+    # destination is what carries the name.
+    InfraEntry(".gitignore", template="gitignore"),
+    InfraEntry(".github/workflows/playwright.yml", template="workflows/playwright.yml"),
 )
 
+INFRA_DESTINATIONS: tuple[str, ...] = tuple(e.destination for e in INFRA_ENTRIES)
+GENERATED_DESTINATIONS: tuple[str, ...] = tuple(
+    e.destination for e in INFRA_ENTRIES if e.generated
+)
 
-def infra_files(app: str) -> tuple[str, ...]:
-    return INFRA_COMMON + (f"apps/{app}/app.json", f"apps/{app}/seed.spec.ts")
+# The seed a newly created target starts from, rendered into revision 1.
+SEED_TEMPLATE = "seed.spec.ts"
 
 
-# --- the tracked tree (P2) ----------------------------------------------
+def infra_entry(destination: str) -> InfraEntry:
+    for entry in INFRA_ENTRIES:
+        if entry.destination == destination:
+            return entry
+    raise KeyError(destination)
+
+
+def write_infra(root: Path, cfg: TargetConfig, *, only_generated: bool = False) -> None:
+    """Write the infra entries into `root` at their destination paths.
+
+    `only_generated` is hydrate's render step and ingest's re-render: the
+    generated entries overwrite whatever the revision held, while the template
+    entries are revision content like any other file and are left alone.
+    """
+    for entry in INFRA_ENTRIES:
+        if only_generated and not entry.generated:
+            continue
+        dest = root / entry.destination
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(entry.render(cfg))
+
+
+# --- the tracked tree ------------------------------------------------------
 #
-# What a revision versions, for one target. The infra files above are shared on
-# disk across every app but are **logically per-target**: each target's revision
-# carries its own copy, which content addressing makes free.
+# What a revision versions, for one target, inside a worktree root. P3 made it
+# root-relative: the on-disk shape and the stored shape are the same shape, so
+# the apps/<app>/ mapping function is gone. This is why P2 stored
+# target-relative paths.
 
-# The app's own tree content, target-relative: single files, then directories
-# with the glob that defines what counts inside them. The globs are not `**`
-# by accident -- stories and plans are markdown, and anything else that lands
-# in those folders is somebody's scratch file, not something to version and
-# (in P3) hydrate back into a worktree.
+# The target's own tree content: single files, then directories with the glob
+# that defines what counts inside them. The globs are not `**` by accident --
+# stories and plans are markdown, and anything else that lands in those folders
+# is somebody's scratch file, not something to version and hydrate back out.
 TRACKED_APP_FILES: tuple[str, ...] = ("seed.spec.ts",)
 TRACKED_APP_TREES: tuple[tuple[str, str], ...] = (
     ("user-stories", "*.md"),
@@ -67,19 +208,19 @@ TRACKED_APP_TREES: tuple[tuple[str, str], ...] = (
 
 # Never tree content wherever they turn up. artifacts.py skips .DS_Store for the
 # same reason; a snapshot has more at stake, since a stray file here becomes
-# versioned content that a later phase writes back out.
+# versioned content that hydrate writes back into the next worktree.
 UNTRACKED_NAMES: frozenset[str] = frozenset({".DS_Store", "Thumbs.db", ".gitkeep"})
 UNTRACKED_SUFFIXES: tuple[str, ...] = ("~", ".swp", ".swo", ".orig", ".rej")
 
-# Never tree content, even though they sit inside apps/<app>/ (DESIGN.md §4):
-#   app.json      SaaS-internal config, rendered from Postgres in P3, and it
-#                 must never become something a revision delivers;
+# Never tree content, even though they sit inside the worktree (DESIGN.md §4):
 #   reports/      the agent's reports and evidence screenshots -- run output,
 #                 which is why push.py already declines to deliver them;
 #   the rest      run artifacts, keyed by run in the artifacts table instead.
+#
+# `app.json` left this list by ceasing to exist: config is a row now, rendered
+# into the prompt and into the generated config, never a tree file.
 UNTRACKED_APP_PATHS: frozenset[str] = frozenset(
     {
-        "app.json",
         "session.jsonl",
         "reports",
         "node_modules",
@@ -89,61 +230,42 @@ UNTRACKED_APP_PATHS: frozenset[str] = frozenset(
 )
 
 
-def app_dir(app: str) -> Path:
-    return config.repo_root() / "apps" / app
-
-
-def tracked_path_on_disk(app: str, path: str) -> Path:
-    """Where a target-relative tracked path lives in today's monorepo layout.
-
-    The one mapping function between the stored shape and the on-disk shape --
-    and the same one P3's hydrate needs, run the other way. Stored paths are
-    target-relative on purpose: the revision is a whole-worktree snapshot of one
-    target, so baking this repo's apps/<app>/ layout into the durable record
-    would put a path migration in front of P3.
-    """
-    if path in INFRA_COMMON:
-        return config.repo_root() / path
-    return app_dir(app) / path
-
-
-def tracked_tree(app: str) -> list[tuple[str, Path]]:
-    """Every tracked file for `app`, as (target-relative path, path on disk).
+def tracked_tree(root: Path) -> list[tuple[str, Path]]:
+    """Every tracked file in `root`, as (root-relative path, path on disk).
 
     Sorted by path and free of directory iteration order, so two walks of the
     same tree agree. A tracked file that does not exist is omitted rather than
-    an error: the tree describes what is there, and a target missing its
-    workflow file is a bootstrap problem, not a snapshot failure.
+    an error: the tree describes what is there, and a worktree missing its
+    workflow file is a hydrate problem, not a snapshot failure.
     """
     found: dict[str, Path] = {}
 
-    for rel in INFRA_COMMON:
-        path = config.repo_root() / rel
+    for rel in INFRA_DESTINATIONS:
+        path = root / rel
         if path.is_file():
             found[rel] = path
 
-    base = app_dir(app)
     for rel in TRACKED_APP_FILES:
-        if not _is_untracked(rel) and (base / rel).is_file():
-            found[rel] = tracked_path_on_disk(app, rel)
+        if not _is_untracked(rel) and (root / rel).is_file():
+            found[rel] = root / rel
 
     for tree, pattern in TRACKED_APP_TREES:
-        root = base / tree
-        if not root.is_dir():
+        base = root / tree
+        if not base.is_dir():
             continue
-        for path in root.glob(pattern):
+        for path in base.glob(pattern):
             if not path.is_file():
                 continue
-            rel = path.relative_to(base).as_posix()
+            rel = path.relative_to(root).as_posix()
             if _is_untracked(rel):
                 continue
-            found[rel] = tracked_path_on_disk(app, rel)
+            found[rel] = path
 
     return sorted(found.items())
 
 
 def _is_untracked(rel: str) -> bool:
-    """Whether a target-relative path is excluded from the tracked tree.
+    """Whether a root-relative path is excluded from the tracked tree.
 
     Checked per path segment rather than per prefix, so a `node_modules/`
     nested inside a test folder is excluded as surely as one at the top.
@@ -166,6 +288,36 @@ def read_app_json(app: str) -> dict:
         return json.loads(path.read_text())
     except json.JSONDecodeError as exc:
         raise DeliveryError(f"apps/{app}/app.json is not valid JSON: {exc}") from exc
+
+
+def read_target_config(app: str) -> TargetConfig:
+    """A target's configuration, read from app.json.
+
+    **Interim.** P3-07 replaces this with the `targets` row reached through
+    delivery's injected `Tools`, which is what makes delivery stop touching the
+    filesystem. It exists for one ticket so the infra renderer has a
+    configuration to render from while apps/ is still authoritative.
+    """
+    data = read_app_json(app)
+    return TargetConfig(
+        app=app,
+        name=data.get("name") or app,
+        base_url=str(data.get("baseURL") or "").strip(),
+        locators=str(data.get("locators") or "").strip(),
+        agent_notes=tuple(data.get("agentNotes") or ()),
+        target_repo=str(data.get("targetRepo") or "").strip(),
+        target_branch=str(data.get("targetBranch") or "").strip() or DEFAULT_BRANCH,
+    )
+
+
+def infra_files(app: str) -> tuple[str, ...]:
+    """Every path bootstrap puts in the target repo, at its destination.
+
+    The infra entries' destinations plus the two app-scoped files. `app.json` is
+    here only while apps/ is still authoritative -- P3-07 stops delivering it,
+    and P3-08 deletes it.
+    """
+    return INFRA_DESTINATIONS + (f"apps/{app}/app.json", f"apps/{app}/seed.spec.ts")
 
 
 @dataclass(frozen=True)

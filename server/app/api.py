@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import apphub, delivery, repo, revisions, storage, target_config
+from . import apphub, delivery, monorepo, repo, revisions, storage, target_config
 from .auth import AuthDep
 from .db import get_session
 from .domain.status import is_terminal
@@ -305,7 +305,10 @@ def snapshot_target_tree(
     """
     target = _target_or_404(session, target_id)
     try:
-        committed = revisions.snapshot_target(session, target, store, author="operator")
+        with monorepo.staged_tree(target.app) as root:
+            committed = revisions.commit_revision(
+                session, target, store, root, author="operator"
+            )
     except Exception as exc:  # the blob store is down, or the tree is unreadable
         raise HTTPException(status_code=502, detail=f"snapshot failed: {exc}") from exc
 
@@ -346,7 +349,8 @@ def target_parity(target_id: int, session: Session = Depends(get_session)):
     to surface.
     """
     target = _target_or_404(session, target_id)
-    parity = revisions.target_parity(session, target)
+    with monorepo.staged_tree(target.app) as root:
+        parity = revisions.target_parity(session, target, root)
     return ParityOut(
         has_revision=parity.has_revision,
         in_sync=parity.in_sync,

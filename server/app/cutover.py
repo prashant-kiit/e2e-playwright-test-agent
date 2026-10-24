@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from . import repo, revisions, storage, target_config
+from . import monorepo, repo, revisions, storage, target_config
 from .delivery.errors import DeliveryError
 from .delivery.render import read_app_json
 from .models import Target
@@ -125,11 +125,15 @@ def _cut_over_target(
 ) -> TargetOutcome:
     config = _config_from_app_json(target.app, read_config)
 
-    committed = revisions.snapshot_target(session, target, store, author="cutover")
-
-    parity = revisions.target_parity(session, target)
-    if not parity.in_sync:
-        raise ParityNotGreen(target.app, _describe(parity))
+    # The P2 path, unchanged -- over `apps/<app>/` staged as the worktree the
+    # tracked tree is now defined against.
+    with monorepo.staged_tree(target.app) as root:
+        committed = revisions.commit_revision(
+            session, target, store, root, author="cutover"
+        )
+        parity = revisions.target_parity(session, target, root)
+        if not parity.in_sync:
+            raise ParityNotGreen(target.app, _describe(parity))
 
     imported = _import_config(session, target, config)
     head = revisions.head_revision(session, target.id)

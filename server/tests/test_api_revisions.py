@@ -15,6 +15,7 @@ from app import repo
 from app.api import get_launcher, get_storage
 from app.auth import require_auth
 from app.db import get_session
+from app.delivery import render
 from app.main import app
 from app.models import FileIndex, Revision, Tenant
 from app.tenancy import current_tenant_id
@@ -128,11 +129,13 @@ def test_a_json_tracked_file_survives_the_round_trip_byte_identical(client, targ
     text media type for every tracked path.
     """
     rev = client.post(f"/targets/{target.id}/revisions/snapshot").json()["revision"]
-    on_disk = client.workspace / "package.json"
+    # package.json is an infra entry, so its bytes come from the template that
+    # delivery pushes -- the same bytes the snapshot stored.
+    source = render.TEMPLATES_DIR / "package.json"
 
     r = client.get(f"/revisions/{rev['id']}/file", params={"path": "package.json"})
     assert r.status_code == 200
-    assert r.content == on_disk.read_bytes()
+    assert r.content == source.read_bytes()
     assert r.headers["content-type"].startswith("text/plain")
 
 

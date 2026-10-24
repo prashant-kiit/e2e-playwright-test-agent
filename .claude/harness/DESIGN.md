@@ -120,7 +120,7 @@ What is versioned, bundled and delivered — versus what is a run artifact:
 | `specs/` (plans) | `test-results/` |
 | `seed.spec.ts` | `playwright-report/` |
 | `tests/` | traces, videos, screenshots |
-| `playwright.config.ts` *(generated from P3)* | `session.jsonl` |
+| `playwright.config.ts` *(generated — P3)* | `session.jsonl` |
 | `package.json` + lockfile | |
 | `.gitignore` | |
 | `.github/workflows/playwright.yml` | |
@@ -128,32 +128,43 @@ What is versioned, bundled and delivered — versus what is a run artifact:
 `session.jsonl` is deliberately an **artifact keyed by run**, not tree content: Q2's
 resume needs it, but it must never reach a customer repo.
 
-**`playwright.config.ts` is generated from P3 onward, not before.** P2 tracks it as the
-hand-maintained file it still is, and snapshots its bytes like any other tracked file.
-It becomes generated with hydrate in P3, which makes it the one tracked file whose
-content *shape* changes; nothing in P2 anticipates that.
+**`playwright.config.ts` is generated — P3-02 implemented it.** P1 and P2 tracked it as
+the hand-maintained file it then was, and snapshotted its bytes like any other tracked
+file. It is now rendered from the target row by `render_playwright_config` in
+[render.py](../../server/app/delivery/render.py), re-rendered on every hydrate and
+re-rendered again before every ingest scan, so it has exactly one author. The
+hand-maintained copy at the repo root is deleted. It is single-target, which is what makes
+the project names bare — `chromium`, not `<app>-chromium` — and what stops a project name
+or a test path from reaching another customer's tests.
 
-**A tracked-tree file's source location is not its delivered location — P3 separates
-them.** Infra is delivered by identical path today: `INFRA_COMMON` in
-[render.py](../../server/app/delivery/render.py) lists a relative path and delivery reads
-that same path out of the workspace, so a template's source *is* its destination. For
-`.github/workflows/playwright.yml` that puts harness **output** at a path GitHub Actions
-treats as a live workflow of the harness repo, and a push to `master` makes this repo
-install browsers and run the suite discovered from `apps/*` against live external sites —
-a flaky red X for tests that are not the harness's. The authoritative run belongs in the
-customer's repo, where the PR is (§7); the harness repo is the one place it must never
-execute.
+**A tracked-tree file's source location is not its delivered location — P3-02 separated
+them.** Infra was delivered by identical path through P2: the list named a relative path
+and delivery read that same path out of the workspace, so a template's source *was* its
+destination. For `.github/workflows/playwright.yml` that put harness **output** at a path
+GitHub Actions treats as a live workflow of the harness repo, and a push to `master` made
+this repo install browsers and run the suite discovered from `apps/*` against live
+external sites — a flaky red X for tests that are not the harness's. The authoritative run
+belongs in the customer's repo, where the PR is (§7); the harness repo is the one place it
+must never execute.
 
-So from P3 an infra entry carries `(source, destination)`, and the workflow template moves
-under `server/app/delivery/templates/`. Delivered bytes are unchanged. Two things not to
-do: do not neuter the `on:` triggers in the harness copy instead — the delivered copy
-inherits the dead trigger and then never runs in the customer's repo either, which is the
-failure this is meant to prevent; and do not treat it as separate from the generated
-config above, because once an entry is `(source, destination)` the generated
-`playwright.config.ts` is just an entry whose source is a renderer rather than a file.
+An infra entry therefore carries `(source, destination)` — `InfraEntry` in
+[render.py](../../server/app/delivery/render.py) — and the templates live under
+`server/app/delivery/templates/`, inside the server package so an API image needs no
+mounted repo to deliver one. The workflow's source is `workflows/playwright.yml`, which is
+not a path GitHub Actions reads; its destination is unchanged, and so are its bytes and
+its `on:` triggers. The generated config is simply the entry whose source is a renderer
+rather than a file.
+
+Two things not to do: do not neuter the `on:` triggers in the harness copy instead — the
+delivered copy inherits the dead trigger and then never runs in the customer's repo
+either, which is the failure the move exists to prevent; and do not reintroduce a
+hand-maintained `playwright.config.ts` anywhere, because a second author for a generated
+file is a drift surface with nothing to gain.
 
 **Config is not a tree file.** `app.json` no longer exists and is never delivered — it
-is SaaS-internal. At hydrate, config is *rendered* out of Postgres:
+is SaaS-internal, held in columns on `targets` and validated on the write path by
+[target_config.py](../../server/app/target_config.py). At hydrate, config is *rendered*
+out of Postgres:
 
 - `baseURL` is inlined into a generated `playwright.config.ts`
 - `locators` and `agentNotes` are injected into the agent's **prompt context**

@@ -16,7 +16,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 
-from . import config, repo, revisions, storage
+from . import config, monorepo, repo, revisions, storage
 from .artifacts import ArtifactCollector
 from .db import SessionLocal
 from .domain.steps import Step
@@ -65,14 +65,18 @@ def make_sync_out(
     def sync_out(run_id: int, step: Step) -> None:
         with session_factory() as s:
             run = repo.get_run(s, run_id)
-            revisions.snapshot_target(
-                s,
-                run.target,
-                store,
-                # Fits Revision.author's 100 chars: run_key is at most 80.
-                author=f"run:{run.run_key}",
-                produced_by_run_id=run.id,
-            )
+            # Staged while apps/ is still the tree the run works in; P3-03
+            # replaces this with the run's own hydrated worktree.
+            with monorepo.staged_tree(run.target.app) as root:
+                revisions.commit_revision(
+                    s,
+                    run.target,
+                    store,
+                    root,
+                    # Fits Revision.author's 100 chars: run_key is at most 80.
+                    author=f"run:{run.run_key}",
+                    produced_by_run_id=run.id,
+                )
 
     return sync_out
 
@@ -156,12 +160,14 @@ def ensure_baseline_revision(
             run = repo.get_run(s, run_id)
             if revisions.head_revision(s, run.target_id) is not None:
                 return
-            committed = revisions.snapshot_target(
-                s,
-                run.target,
-                store or storage.from_env(),
-                author="baseline",
-            )
+            with monorepo.staged_tree(run.target.app) as root:
+                committed = revisions.commit_revision(
+                    s,
+                    run.target,
+                    store or storage.from_env(),
+                    root,
+                    author="baseline",
+                )
         if committed is not None:
             emit(
                 f"=== baseline revision {committed.rev} recorded "

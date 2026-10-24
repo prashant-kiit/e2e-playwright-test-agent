@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-from app import cutover, repo, revisions
+from app import cutover, monorepo, repo, revisions
 from app.models import FileIndex
 from tests.delivery_helpers import make_workspace
 from tests.storage_helpers import FakeStorage
@@ -102,7 +102,8 @@ def test_a_red_target_is_not_imported(session, target, workspace):
     """The gate refuses *before* writing the row, so a blocked cutover leaves
     the configuration exactly as it was."""
     store = FakeStorage()
-    revisions.snapshot_target(session, target, store, author="operator")
+    with monorepo.staged_tree(target.app) as root:
+        revisions.commit_revision(session, target, store, root, author="operator")
     head = revisions.head_revision(session, target.id)
     row = session.get(FileIndex, {"revision_id": head.id, "path": "seed.spec.ts"})
     row.blob_key = revisions.blob_key(row.tenant_id, "0" * 64)

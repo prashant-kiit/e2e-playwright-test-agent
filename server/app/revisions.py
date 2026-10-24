@@ -110,8 +110,12 @@ class TreeScan:
         return tree_hash(self.blobs)
 
 
-def scan_tracked_tree(app: str) -> TreeScan:
-    """Hash every tracked file for `app`, in sorted path order."""
+def scan_tracked_tree(root: Path) -> TreeScan:
+    """Hash every tracked file under `root`, in sorted path order.
+
+    `root` is a worktree: the shape hydrate builds and ingest reads. There is no
+    app argument, because a worktree holds exactly one target.
+    """
     return TreeScan(
         files=tuple(
             TrackedFile(
@@ -120,7 +124,7 @@ def scan_tracked_tree(app: str) -> TreeScan:
                 sha256=file_sha256(on_disk),
                 size=on_disk.stat().st_size,
             )
-            for path, on_disk in tracked_tree(app)
+            for path, on_disk in tracked_tree(root)
         )
     )
 
@@ -143,26 +147,27 @@ def head_revision(session: Session, target_id: int) -> Revision | None:
     ).one_or_none()
 
 
-def snapshot_target(
+def commit_revision(
     session: Session,
     target: Target,
     store: Storage,
+    root: Path,
     *,
     author: str,
     produced_by_run_id: int | None = None,
 ) -> Revision | None:
-    """Commit a revision for `target`'s tracked tree, or None if unchanged.
+    """Commit a revision of the tracked tree under `root`, or None if unchanged.
 
     Returns None when the tree hash already matches the head: three of the five
     pipeline steps (read-story, plan, explore) routinely change no tracked file,
     and a revision per step would make `rev` a step counter rather than a count
     of real changes.
 
-    Raises whatever the blob store raises. Callers that must not fail a run --
-    which in P2 is all of them -- catch it; see launcher.make_collector.
+    Raises whatever the blob store raises. Who catches that is the caller's
+    decision and it changed in P3: a failed ingest now fails the run.
     """
     tenant_id = current_tenant_id()
-    scan = scan_tracked_tree(target.app)
+    scan = scan_tracked_tree(root)
     digest = scan.tree_hash
 
     head = head_revision(session, target.id)
@@ -280,8 +285,8 @@ def get_file(session: Session, revision_id: int, path: str) -> FileIndex | None:
     ).one_or_none()
 
 
-def target_parity(session: Session, target: Target) -> Parity:
-    """Compare a target's head revision against its tracked tree on disk.
+def target_parity(session: Session, target: Target, root: Path) -> Parity:
+    """Compare a target's head revision against the tracked tree under `root`.
 
     The I/O half: load the head's file_index rows, walk the disk, and hand both
     to the pure comparison in app/parity.py. Read-only -- parity never repairs,
@@ -296,7 +301,7 @@ def target_parity(session: Session, target: Target) -> Parity:
         row.path: sha256_from_blob_key(row.blob_key)
         for row in list_files(session, head.id)
     }
-    on_disk = scan_tracked_tree(target.app).blobs
+    on_disk = scan_tracked_tree(root).blobs
     return Parity(
         has_revision=True,
         rev=head.rev,
