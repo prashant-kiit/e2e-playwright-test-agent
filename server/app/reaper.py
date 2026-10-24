@@ -13,6 +13,11 @@ Two pieces fix that:
 
 A PAUSED run deliberately holds its lock with no lease, and repo.reap_expired
 already skips it; nothing here changes that.
+
+P4 hung one more piece of maintenance on the same loop: the live log is a
+Postgres table now (DESIGN.md §10), and its rows are pruned past a retention
+window here. It is a sweep beside the reap, not inside it -- a failed prune must
+never stop a dead run's lock from being freed.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from collections.abc import Callable, Iterator
 from . import repo
 from .db import SessionLocal
 from .domain import lease
+from .orchestrator.bus import prune_run_logs
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +108,12 @@ async def reaper_loop(
                 log.warning("reaped %d run(s) with expired leases: %s", len(reaped), reaped)
                 if on_reap is not None:
                     on_reap(reaped)
+            # Beside the reap, never inside it: housekeeping must not be able to
+            # keep a dead run's app locked.
+            try:
+                await asyncio.to_thread(_prune_once, session_factory)
+            except Exception:  # pragma: no cover - a failed prune is not an outage
+                log.warning("pruning the run log failed; continuing", exc_info=True)
         except asyncio.CancelledError:
             raise
         except Exception:  # pragma: no cover - a dead reaper must not kill the API
@@ -111,3 +123,11 @@ async def reaper_loop(
 def _reap_once(session_factory=SessionLocal) -> list[int]:
     with session_factory() as session:
         return repo.reap_expired(session)
+
+
+def _prune_once(session_factory=SessionLocal) -> int:
+    with session_factory() as session:
+        pruned = prune_run_logs(session)
+    if pruned:
+        log.info("pruned %d run_log row(s) past the retention window", pruned)
+    return pruned

@@ -1,8 +1,17 @@
-"""Launches the orchestrator for a run on a background thread.
+"""Starts the orchestrator for a run, and composes everything around it.
 
 Kept separate from the API so tests can override it with a no-op (they drive the
 driver directly with a FakeRunner). The real launcher picks the configured
-runner, streams log lines to the bus, and closes the stream when the run ends.
+runner, streams log lines to the configured bus, and closes the stream when the
+run ends.
+
+**One composition, two call sites.** `drive_run` is the whole of "work a run":
+heartbeat, runner, composition, close the stream. The thread launcher calls it
+on a daemon thread (`launch_run`); the sandbox entrypoint calls it as a process
+(`app/sandbox/run.py`). There is no second pipeline for the container to use,
+which is the thing a structural test keeps true
+(tests/test_sandbox_entrypoint.py) because a second pipeline is invisible to a
+behavioural test for as long as it happens to agree.
 
 It is also where everything that happens *around* a run is composed: hydrate
 before the pipeline, teardown after it, and the step-boundary hook the driver
@@ -24,7 +33,7 @@ from . import config, repo, revisions, storage
 from .artifacts import ArtifactCollector
 from .db import SessionLocal
 from .domain.steps import Step
-from .orchestrator.bus import bus
+from .orchestrator.bus import LogBus, bus_from_env
 from .orchestrator.claude import ClaudeRunner
 from .orchestrator.driver import SessionFactory, run_pipeline
 from .orchestrator.fake import FakeRunner
@@ -229,18 +238,50 @@ def run_with_worktree(
         emit("=== teardown: worktree removed ===")
 
 
+def drive_run(
+    run_id: int,
+    *,
+    runner: Runner | None = None,
+    log: LogBus | None = None,
+    session_factory: SessionFactory = SessionLocal,
+    store: Storage | None = None,
+) -> None:
+    """Work the run: heartbeat, runner, the composition, close the stream.
+
+    The one function both call sites use. Its keyword arguments are the three
+    things a container gets from its environment -- a bus, a database and an
+    object store -- passed in rather than read from `env` so that the entrypoint
+    is testable without a container, exactly as `run_with_worktree` already
+    allows.
+
+    The heartbeat is taken **here**, inside whichever process does the work, so
+    the reaper's crash detection measures the thing that is actually working
+    rather than a thread in a process that may be fine while the run is not. It
+    wraps hydrate too: the lease is otherwise refreshed only at step boundaries,
+    and `npm ci` on a cold cache outlasts the TTL easily.
+    """
+    log = log or bus_from_env()
+    emit = log.emitter(run_id)
+    try:
+        with heartbeat_during(run_id, session_factory=session_factory):
+            run_with_worktree(
+                run_id,
+                emit,
+                runner or make_runner(),
+                session_factory=session_factory,
+                store=store,
+            )
+    finally:
+        log.close(run_id)
+
+
 def launch_run(run_id: int) -> None:
-    """Start the pipeline for run_id on a daemon thread."""
-    emit = bus.emitter(run_id)
+    """Start the pipeline for run_id on a daemon thread.
 
-    def _target() -> None:
-        try:
-            # The lease is otherwise refreshed only at step boundaries, so a step
-            # longer than the TTL would look like a crash to the reaper. It wraps
-            # hydrate too: `npm ci` on a cold cache outlasts the TTL easily.
-            with heartbeat_during(run_id):
-                run_with_worktree(run_id, emit, make_runner())
-        finally:
-            bus.close(run_id)
-
-    threading.Thread(target=_target, name=f"run-{run_id}", daemon=True).start()
+    The thread call site. `QA_SANDBOX=thread` selects it (app/sandbox/dispatch.py);
+    it keeps CI fast and token-free and it is what lets the existing suite prove
+    the behaviour did not move when the work did.
+    """
+    threading.Thread(
+        target=drive_run, args=(run_id,), name=f"run-{run_id}", daemon=True
+    ).start()

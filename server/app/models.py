@@ -212,6 +212,32 @@ class Artifact(Base):
     run: Mapped[Run] = relationship(back_populates="artifacts")
 
 
+class RunLog(Base):
+    """One live log line of one run: the stream the portal reads by cursor.
+
+    P4 moved the run into a container, so the lines have to land somewhere both
+    the writer and the API can reach. Append-only, `(run_id, seq)` as the primary
+    key, and `seq` counted by the one writer that executes the run.
+
+    **The live view and its recent history, not the archive.** `session.jsonl`
+    remains the durable per-run record (DESIGN.md §10) and these rows are pruned
+    past a retention window (`orchestrator.bus.prune_run_logs`), so the
+    convenience of a readable stream does not become unbounded growth.
+    """
+
+    __tablename__ = "run_log"
+
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    tenant_id: Mapped[int] = _tenant_col()
+    line: Mapped[str] = mapped_column(Text, nullable=False)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+
 class AppLock(Base):
     """One row per app that currently has a live run. The PK enforces the
     'no two live runs per app' rule; the lease lets a reaper free a dead run."""

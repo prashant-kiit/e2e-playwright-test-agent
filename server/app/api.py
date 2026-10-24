@@ -14,7 +14,7 @@ story gets in.
 from __future__ import annotations
 
 import json
-import queue
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
@@ -30,7 +30,7 @@ from .db import SessionLocal, get_session
 from .domain.status import is_terminal
 from .launcher import launch_run
 from .models import Artifact
-from .orchestrator.bus import DONE, bus
+from .orchestrator.bus import LogBus, bus_from_env
 from .schemas import (
     ArtifactOut,
     DeliverBody,
@@ -69,6 +69,16 @@ def get_launcher() -> Callable[[int], None]:
 def get_storage() -> Storage:
     """The artifact blob store. Overridden with a fake in tests."""
     return storage.from_env()
+
+
+def get_log_bus() -> LogBus:
+    """Where a run's live log lines are read from.
+
+    The same factory the launcher publishes through, so the reader and the
+    writer cannot disagree about where a run's lines are: in-process for a
+    thread run, `run_log` for a run in a container.
+    """
+    return bus_from_env()
 
 
 def get_bootstrap_runner() -> Callable[[str], apphub.BootstrapOutcome]:
@@ -443,6 +453,11 @@ def _target_or_404(session: Session, target_id: int):
 # extension implies. See revision_file_content.
 TRACKED_FILE_MEDIA_TYPE = "text/plain; charset=utf-8"
 
+# How often the events route reads forward from its cursor, and how long it
+# stays silent before reassuring the browser that the connection is alive.
+POLL_INTERVAL_S = 0.5
+KEEPALIVE_S = 15.0
+
 
 def _revision_out(rev, file_count: int) -> RevisionOut:
     return RevisionOut(
@@ -620,9 +635,24 @@ def artifact_content(
 
 
 @router.get("/runs/{run_id}/events")
-def run_events(run_id: int, session: Session = Depends(get_session)):
-    """Server-sent events of the run's live log. A finished run replays its
-    recorded history and closes; a live run streams until it ends."""
+def run_events(
+    run_id: int,
+    session: Session = Depends(get_session),
+    log: LogBus = Depends(get_log_bus),
+):
+    """Server-sent events of the run's live log, read forward from a cursor.
+
+    A cursor rather than a subscription, because P4 moved the run out of this
+    process: the lines are appended by whatever executes the run, and a reader
+    that polls a cursor is a reader that works on any replica, for any run, and
+    for a run that finished before the last deploy. A late subscriber therefore
+    receives the run's real history rather than whatever one process remembers.
+
+    A finished run replays its history and closes; a live run streams until the
+    bus says the stream is over -- which, for a run in a container, means its
+    status reached a terminal state or a pause, because that is the only
+    end-of-stream marker another process can see.
+    """
     try:
         run = repo.get_run(session, run_id)
     except repo.NotFound as exc:
@@ -633,24 +663,29 @@ def run_events(run_id: int, session: Session = Depends(get_session)):
         return f"data: {json.dumps(line)}\n\n"
 
     def gen():
-        q, history = bus.subscribe(run_id)
-        try:
-            for line in history:
+        cursor = 0
+        silent_for = 0.0
+        while True:
+            lines, cursor = log.read_from(run_id, cursor)
+            for line in lines:
                 yield _event(line)
             if terminal:
-                yield "event: end\ndata: \"\"\n\n"
+                # Read once, at the top: a run that was already finished when
+                # the reader arrived has nothing more to send.
+                yield 'event: end\ndata: ""\n\n'
                 return
-            while True:
-                try:
-                    item = q.get(timeout=15)
-                except queue.Empty:
-                    yield ": keepalive\n\n"
-                    continue
-                if item is DONE:
-                    yield "event: end\ndata: \"\"\n\n"
-                    return
-                yield _event(item)
-        finally:
-            bus.unsubscribe(run_id, q)
+            if lines:
+                silent_for = 0.0
+                continue
+            if log.is_closed(run_id):
+                # One more pass has already run above, so everything the writer
+                # appended before it finished has been sent.
+                yield 'event: end\ndata: ""\n\n'
+                return
+            time.sleep(POLL_INTERVAL_S)
+            silent_for += POLL_INTERVAL_S
+            if silent_for >= KEEPALIVE_S:
+                silent_for = 0.0
+                yield ": keepalive\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")

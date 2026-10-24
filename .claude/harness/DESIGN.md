@@ -373,6 +373,31 @@ when?" must be answerable from a table, not from logs.
 - The SSE log bus stays for the live run view; `session.jsonl` remains the durable
   per-run record.
 
+**Amended by P4: the live log is a Postgres table.** The sentence above said "the SSE log
+bus stays", and it does — but the bus behind it stopped being an in-process dictionary,
+because P4 executes a run in a container that cannot publish into the API's memory. It was
+already the wrong place for two reasons that had nothing to do with containers: a restart
+erased the history of every run that had ever streamed, including finished ones, and only
+the replica that started a run could stream it.
+
+```
+run_log(run_id, seq, line, at)      PRIMARY KEY (run_id, seq)
+```
+
+`LogBus` is a protocol with two implementations and one read model — append a line, read
+forward from a cursor. The in-memory one serves the thread path and the tests; the
+Postgres-backed one serves anything out of process. `Emit` did not change shape, so the
+driver, the runners and the step-boundary hook were untouched by the move. `seq` is counted
+by the **one writer per run** rather than by a database identity, so a second writer loses
+on the primary key; the API never publishes on behalf of a run it does not execute.
+`/runs/{id}/events` reads forward from a cursor with the keepalive it already sent, so a
+late subscriber gets the run's real history and any replica can stream any run.
+
+**These rows are the live view and its recent history, not the archive.** `session.jsonl`
+is still the durable per-run record, and the reaper loop prunes `run_log` past a retention
+window (7 days by default, matching §9's reaped-snapshot retention) — because an
+append-only table nobody prunes is the slowest kind of outage.
+
 ---
 
 ## 11. Module map (shell → Python)
