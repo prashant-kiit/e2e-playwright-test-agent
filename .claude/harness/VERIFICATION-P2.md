@@ -34,15 +34,16 @@ still asks GitHub. `delivered_sha` exists and is written by nothing.
 
 | Check | Result |
 |---|---|
-| `cd server && uv run pytest` | **241 passed**, 0 skipped (was 173 at the end of P1) |
+| `cd server && uv run pytest` | **247 passed**, 0 skipped (was 173 at the end of P1) |
 | `cd web && npm test` | **28 passed**, 5 files (was 13, 4 files) |
 | `cd server && uv run ruff check .` | clean |
 | `make ci-test` | green (all three, with `QA_REQUIRE_DB=1`) |
 
-The +68 backend tests are the tracked-tree contract (8), the revision model and tree hash (18),
-parity as a pure function (8), the read routes and snapshot action (16), step-boundary
-composition through a whole run (11) and tenancy/schema structure (7). The +15 frontend tests
-are the revisions panel (11), the api wrapper's new methods and its HTML guard (4).
+The +74 backend tests are the tracked-tree contract (11), the revision model and tree hash (18),
+parity as a pure function (8), the read routes and snapshot action (18), step-boundary
+composition through a whole run (11), tenancy/schema structure (7) and one regression test for
+the heartbeat defect below. The +15 frontend tests are the revisions panel (11), the api
+wrapper's new methods and its guards (4).
 
 ### Changes to the existing suite
 
@@ -54,6 +55,7 @@ The spec allowed one: adding `exists` to the two storage fakes. What actually ch
 | `exists` added to that one shared fake | The seam's single new method |
 | `test_api.py` passes `tenant_id` on a hand-built `Artifact` row | The column is non-null and application code sets it explicitly; a test that constructs ORM rows directly has to as well |
 | `conftest.py` stops truncating `tenants`, and deletes any *extra* tenant after each test | The seeded row is reference data the migration establishes, not test state. Truncating it left every `tenant_id` FK dangling |
+| `test_reaper.py` gains a test and `app/reaper.py` a fix | Defect 3 below, found by the real agent run. Not P2 code, but it is what stopped P2's own acceptance criterion being met |
 
 No existing assertion about run behavior, delivery, artifacts or the portal was modified.
 
@@ -185,7 +187,92 @@ revision.
 
 ## The real agent run
 
-<!-- REAL_RUN_SECTION -->
+`QA_RUNNER=claude`, the real `claude` CLI driving Playwright MCP against the live practice
+target, with live Postgres and live SeaweedFS underneath and the launcher's real composition
+around it. Two runs were made; both are reported, because the first is what found the phase's
+most serious defect.
+
+**It was driven from the host, not from the API container.** That container has no `node`, no
+`claude` CLI and no API key — P1's known "real-runner wiring" gap, unchanged by P2 and due to
+be closed by P4's sandbox.
+
+### Run 8 — SCRUM-201, and the defect it found
+
+All five steps succeeded and the agent produced a 17-test suite that passed on Chromium first
+time (cost $1.52). The revision model behaved correctly throughout. But the **run row ended
+`failed`** with "lease expired (reaped)", and the driver then raised
+`IllegalTransition: failed -> completed`.
+
+That is defect 3 above: the heartbeat never beat, so a multi-minute step outlived its 60 s
+lease. It is the single most valuable thing this verification produced — it means
+`QA_RUNNER=claude` could not have finished a run at all, and nothing in the test suite would
+have told us.
+
+Revisions committed, despite the run being reaped mid-flight:
+
+| rev | parent | run | files | what landed |
+|---|---|---|---|---|
+| 1 | — | — | 14 | the pre-run baseline (a manual snapshot) |
+| 2 | 1 | 8 | 15 | `specs/SCRUM-201-auth-test-plan.md` |
+| 3 | 2 | 8 | 20 | the five `tests/auth/*.spec.ts` files |
+
+### Run 12 — SCRUM-202, after the fix
+
+Re-run on the same target with a different story, with the heartbeat in place.
+**`status=completed`, `error=None`, no traceback.**
+
+| step | elapsed |
+|---|---|
+| read_story | 27 s |
+| plan | 4 m 23 s |
+| explore | 6 m 41 s |
+| generate | 7 m 06 s |
+| heal | 1 m 14 s |
+
+Checked live, mid-run, 4 m 17 s into `generate`: `status=running` with **59.6 s of lease
+remaining** — the heartbeat refreshing a lease that would otherwise have lapsed four minutes
+earlier. That is the fix working under a real agent step rather than a simulated one.
+
+The chain it left:
+
+| rev | parent | run | files | tree | what landed |
+|---|---|---|---|---|---|
+| 3 | 2 | 8 | 20 | `642859b4be2d` | (head before this run) |
+| 4 | 3 | 12 | 21 | `2ec3e292d23f` | `specs/SCRUM-202-forms-test-plan.md` |
+| 5 | 4 | 12 | 26 | `a28d78885139` | the five `tests/forms/*.spec.ts` files |
+| 6 | 5 | 12 | 26 | `9db772b03a5b` | the healer's edit |
+
+Four things in that table are the phase working as designed:
+
+- **Five steps, three revisions.** `read_story` and `explore` changed no tracked file and
+  committed nothing, so `rev` counts real changes rather than steps.
+- **No re-baseline.** The target already had a head, so the run advanced the chain instead of
+  starting a new one.
+- **Rev 5 → rev 6 has the same 26 files but a different tree hash**, because `heal` changed
+  *contents*, not membership. A file-list comparison would have missed it; the tree hash is
+  what catches it.
+- **That revision cost exactly one blob.** The diff between rev 5 and rev 6 is a single path,
+  `tests/forms/ui-elements.spec.ts` — which is what makes a revision per step boundary
+  affordable at all.
+
+### What was then confirmed against the result
+
+| Check | Result |
+|---|---|
+| Parity for the target after the run | **green** — `in_sync: true`, rev 6, nothing missing, extra or modified |
+| Head revision's files vs. disk | all **26** fetched through the portal's blob route and `cmp`'d: **0 mismatches** |
+| Dangling references | **0** — no revision anywhere points at bytes that are not stored |
+| Dedup, across 7 revisions | 163 `file_index` rows reference **63** distinct blobs: **100 re-uses avoided** |
+| Orphan blobs | 6 — the harmless direction, left for §9's GC (see the gaps below) |
+| Artifacts for run 12 | 7, still keyed `run_key/relpath` and **not** re-keyed to the tenant prefix |
+| Delivery | `make deliver APP=saucedemo STORY=SCRUM-101` opened **PR #3** on the real target repo: 11 files (story, plan, 9 specs), no revision or tenant data leaked |
+
+The agent's own output from both runs — `apps/practice-target/specs/` and
+`apps/practice-target/tests/` — is committed, as the repo already does for `saucedemo`.
+Run 8's output landed inside two commits whose messages describe only the fixes they carry
+(`59e3f6c` has the test plan, `4958215` the five specs), because they were swept in by
+`git add -A` while the run was writing. Recorded here rather than rewritten, since the branch
+is pushed.
 
 ---
 
@@ -212,7 +299,8 @@ Honest limits of the above:
 
 ## Defects found while verifying
 
-Both fixed inside this phase, as the ticket requires.
+All fixed inside this phase, as the ticket requires. Three were found by running the thing;
+three more by the two-axis review of the branch.
 
 1. **The portal blanked on any refresh of a route that collides with an API path.** The API
    paths sit at the root alongside the SPA's client routes, and nginx picks between them on the
@@ -235,6 +323,64 @@ Both fixed inside this phase, as the ticket requires.
    rows per revision on a real target, to show one number. The count now comes from a single
    aggregate. Found when a verification script touched `revision.files` outside a session and
    raised `DetachedInstanceError` — the N+1 was the same lazy load, just inside one.
+
+3. **The heartbeat never beat, so any step over a minute had its healthy run reaped.** This is
+   the big one, and the real agent run is what found it.
+
+   `heartbeat_during` passed `lease.DEFAULT_HEARTBEAT` — a **timedelta** — to
+   `threading.Event.wait`, which takes seconds. The `TypeError` came from the
+   `while not done.wait(period)` line, which sits *outside* the loop's `try`, so the daemon
+   heartbeat thread died on its first iteration **in silence**. The lease was therefore only
+   ever refreshed at step boundaries, which is exactly the bug `reaper.py`'s own docstring says
+   it was written to fix: *"any step longer than a minute ran with an expired lease — so a
+   healthy run looked dead"*.
+
+   With a 60 s TTL and real agent steps of several minutes, `QA_RUNNER=claude` could not finish
+   a run at all. Measured on the first verification run:
+
+   | step | duration |
+   |---|---|
+   | read_story | 24 s |
+   | plan | 3 m 51 s |
+   | explore | 6 m 38 s |
+   | generate | 7 m 26 s |
+   | heal | 36 s |
+
+   All five steps succeeded and the revision chain was committed correctly at every boundary —
+   but the reaper had already failed the run, and the driver then raised
+   `IllegalTransition: failed -> completed`.
+
+   **Why the tests missed it:** every existing heartbeat test passes `interval_s=0.01`, a
+   float, so the default branch — the only one production uses — was never exercised. The new
+   test calls `heartbeat_during(run_id)` with no interval and patches `DEFAULT_HEARTBEAT` to a
+   shorter **timedelta**, keeping the production type so it fails again if the conversion is
+   dropped. The beat loop is now guarded as a whole, the wait included, and logs at ERROR if
+   the thread dies, because a heartbeat that stops quietly costs a healthy run.
+
+   Confirmed against the live stack: a 95 s step — past the TTL and two reaper sweeps — now
+   reaches COMPLETED with its chain intact and parity green, where the same scenario previously
+   raised `IllegalTransition`.
+
+4. **A tracked JSON file was not byte-identical through the portal viewer**, which is precisely
+   what ticket 04 asks for. The file route typed its response from the path's extension, so
+   `package.json` went out as `application/json`, the browser parsed it, and the viewer
+   re-serialised it with `JSON.stringify` — different whitespace, different key order, not the
+   bytes that were stored. The same guess typed every `.spec.ts` in a suite as `video/mp2t`.
+   Tracked files are source text to read, so the route now serves `text/plain` for every
+   tracked path and the viewer never re-encodes what it is handed. The live byte-comparison
+   above missed this because `curl` reads raw bytes; only the browser path was affected.
+
+5. **The tracked tree over-collected.** The spec's table says `user-stories/*.md` and
+   `specs/*.md`, but both folders were walked with `rglob("*")`, so a stray scratch file would
+   become versioned tree content — and in P3, hydrate writes tree content back into a worktree.
+   The globs now match the spec, and `.DS_Store`, editor backups and swap files are excluded
+   wherever they appear, the way artifact collection already excludes them.
+
+6. **"One mapping function" was two.** The spec asks for a single tracked-path-to-disk mapping
+   *because it is the function P3's hydrate needs*; `tracked_tree` re-implemented the
+   root-vs-app-dir split inline, so the two could drift and P3 would inherit the wrong one. It
+   now calls `tracked_path_on_disk`, which also leaves one mechanism enforcing the exclusions
+   rather than a second, unreachable one.
 
 ---
 
@@ -280,3 +426,12 @@ Not defects — deliberate, and the next reader should know:
    This is P1's known gap, unchanged by P2, and P4's sandbox is where it is meant to land.
 7. **`prompts/` still names `./scripts/push-artifacts.sh`.** P1's known gap 0, still out of
    scope, still worth doing as a small separate task.
+8. **A tracked file's source location is still its delivered location** (DESIGN.md decision 23,
+   added while this phase was being verified). P2 tracks
+   `.github/workflows/playwright.yml` at the path it occupies today, which is correct for this
+   phase and is what the tracked-tree tests pin. From P3 an infra entry carries
+   `(source, destination)` and the workflow becomes a template under
+   `server/app/delivery/templates/`, so that harness output stops being a live workflow of the
+   harness repo. That changes the *shape* of an infra entry in `render.py`, which is where P2
+   put the tracked-tree contract — so P3 changes one definition rather than hunting for several.
+   Delivered bytes are unchanged by it.
