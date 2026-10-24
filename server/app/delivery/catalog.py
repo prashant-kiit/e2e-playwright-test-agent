@@ -29,13 +29,19 @@ from __future__ import annotations
 import shutil
 import tempfile
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from sqlalchemy import func, select
 
+from .. import revisions
+from ..models import Revision, Target
+from ..sandbox import hydrate as hyd
+from ..storage import Storage
+from ..target_config import TargetConfig, config_of
+from ..tenancy import current_tenant_id
 from .errors import DeliveryError
 
 
@@ -83,8 +89,8 @@ class DeliveryState:
 
 
 class Catalog(Protocol):
-    def config(self, app: str): ...
-    def materialize(self, app: str): ...
+    def config(self, app: str) -> TargetConfig: ...
+    def materialize(self, app: str) -> AbstractContextManager[Path]: ...
     def state(self, app: str) -> DeliveryState: ...
     def record_delivered(self, app: str, sha: str) -> None: ...
 
@@ -97,15 +103,13 @@ class DbCatalog:
     is how a connection pool runs out.
     """
 
-    def __init__(self, session_factory, store) -> None:
+    def __init__(self, session_factory, store: Storage) -> None:
         self._sessions = session_factory
         self._store = store
 
     # --- configuration ----------------------------------------------------
 
-    def config(self, app: str):
-        from ..target_config import config_of
-
+    def config(self, app: str) -> TargetConfig:
         with self._sessions() as session:
             return config_of(self._target(session, app))
 
@@ -119,10 +123,6 @@ class DbCatalog:
         does, so the tree delivery pushes is the tree a run would have worked
         in -- including the config whose `baseURL` came from the database.
         """
-        from .. import revisions
-        from ..sandbox import hydrate as hyd
-        from ..target_config import config_of
-
         tmp = Path(tempfile.mkdtemp(prefix="qa-delivery-"))
         try:
             root = tmp / "workspace"
@@ -146,10 +146,6 @@ class DbCatalog:
 
     def state(self, app: str) -> DeliveryState:
         """Delivered, or N revisions ahead. One query, no network."""
-        from .. import revisions
-        from ..models import Revision
-        from ..tenancy import current_tenant_id
-
         with self._sessions() as session:
             target = self._target(session, app)
             head = revisions.head_revision(session, target.id)
@@ -169,7 +165,7 @@ class DbCatalog:
                     ever_delivered=newest_delivered is not None,
                 )
             # Count the revisions newer than the last delivered one, rather
-                # than subtracting rev numbers: `rev` is monotonic per target but
+            # than subtracting rev numbers: `rev` is monotonic per target, but
             # the count is what "N ahead" means to the operator reading it.
             ahead = session.scalar(
                 select(func.count(Revision.id)).where(
@@ -192,8 +188,6 @@ class DbCatalog:
         The only writer of this column. "What exactly did we push, and from
         what?" becomes a row rather than an archaeology exercise.
         """
-        from .. import revisions
-
         with self._sessions() as session:
             target = self._target(session, app)
             head = revisions.head_revision(session, target.id)
@@ -207,10 +201,7 @@ class DbCatalog:
     # --- plumbing ---------------------------------------------------------
 
     @staticmethod
-    def _target(session, app: str):
-        from ..models import Target
-        from ..tenancy import current_tenant_id
-
+    def _target(session, app: str) -> Target:
         if not app:
             raise DeliveryError("a target is required")
         target = session.scalars(

@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..package_data import templates_dir
 from ..target_config import TargetConfig
 from .errors import DeliveryError
 
@@ -26,7 +27,6 @@ HEADING = re.compile(r"#\s*(?:User Story:\s*)?([A-Za-z]+-\d+)\s*[-–]\s*(.+)")
 # A story file name is "<ID>-<slug>", where the ID itself contains a hyphen
 # (SCRUM-201-auth -> id "SCRUM-201", slug "auth").
 STORY_FILE = re.compile(r"^([A-Za-z]+-\d+)-(.+)$")
-APP_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 # The folders the agent's prompts name, and where the seed lands. One
 # definition, because the prompts, the tracked tree and the delivered paths all
@@ -36,20 +36,8 @@ PLANS_DIR = "specs"
 TESTS_DIR = "tests"
 SEED_DESTINATION = "seed.spec.ts"
 
-# Where the infra templates live: inside the server package, so an API image
-# needs no mounted repo to deliver one.
-TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
-
-APP_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-
-# The folders the agent's prompts name, and where the seed lands. One
-# definition, because the prompts, the tracked tree and the delivered paths all
-# have to agree about them.
-STORIES_DIR = "user-stories"
-PLANS_DIR = "specs"
-TESTS_DIR = "tests"
-SEED_DESTINATION = "seed.spec.ts"
-
+# The infra templates and the seed, resolved from the installed package.
+TEMPLATES_DIR = templates_dir()
 
 # --- infra entries: (source, destination) ---------------------------------
 #
@@ -291,7 +279,7 @@ def _is_untracked(rel: str) -> bool:
     return parts[-1].endswith(UNTRACKED_SUFFIXES)
 
 
-def infra_files(app: str = "") -> tuple[str, ...]:
+def infra_files() -> tuple[str, ...]:
     """Every path bootstrap puts in the target repo, at its destination."""
     return INFRA_DESTINATIONS
 
@@ -345,9 +333,11 @@ def story_filename(paths: Iterable[str], story_id: str) -> str:
     push-artifacts.sh and stays one: two files for one story means nobody knows
     which suite is being delivered, and picking either is worse than stopping.
 
-    `paths` is a set of tracked paths -- from `file_index` for delivery, from the
-    worktree scan for a run -- rather than a glob over a mounted directory. The
-    rule is unchanged; it is a query against truth now.
+    `paths` is a set of tracked paths -- a scan of the hydrated worktree for a
+    run, a scan of the materialized head for delivery -- rather than a glob over
+    a mounted directory. Both trees are built from `file_index` and nothing
+    else, so the rule is unchanged but it now runs against truth rather than
+    against whatever a long-lived mount happened to hold.
     """
     if not story_id:
         raise DeliveryError("a <STORY_ID> is required (e.g. SCRUM-201)")
@@ -370,8 +360,9 @@ def resolve_story(
 
     `paths` says which files the tree holds; `root` is where their bytes are, so
     the title can be read from the story's first heading. Callers pass both
-    explicitly, because where the path set came from -- `file_index` or a scan --
-    is the thing P3 changed and should be visible at the call site.
+    explicitly, because which tree they resolved against -- a run's worktree or
+    delivery's materialized head -- is the thing P3 changed and should be
+    visible at the call site.
     """
     story_path = story_filename(paths, story_id)
     base = Path(story_path).stem
@@ -390,16 +381,18 @@ def resolve_story(
     )
 
 
-def _story_title(path: Path) -> str | None:
-    """The title from the story's first heading.
+def story_title(content: str) -> str | None:
+    """The title from a story's first heading.
+
+    Over bytes rather than a path, so delivery (which has a materialized file)
+    and the portal (which has a blob) share one derivation. There is exactly one
+    definition of "what a story is called" and this is it.
 
     push-artifacts.sh used ${heading#*- }; the HEADING regex gets the same
     answer and tolerates an en-dash, so it is preferred with the shell
     behaviour kept as the fallback.
     """
-    if not path.is_file():
-        return None
-    for line in path.read_text().splitlines():
+    for line in content.splitlines():
         if not line.startswith("#"):
             continue
         match = HEADING.match(line)
@@ -409,6 +402,11 @@ def _story_title(path: Path) -> str | None:
             return line.split("- ", 1)[1].strip() or None
         return line.lstrip("# ").strip() or None
     return None
+
+
+def _story_title(path: Path) -> str | None:
+    """`story_title` of a file that may not exist."""
+    return story_title(path.read_text()) if path.is_file() else None
 
 
 def pr_body(story: StoryRef, run_id: str | None = None) -> str:

@@ -90,7 +90,7 @@ def push_artifacts(
                 pr_number=None,
                 pr_created=False,
                 message=(
-                    f"(dry-run) would push revision {tools.state(app).rev} onto "
+                    f"(dry-run) would push revision {tools.catalog.state(app).rev} onto "
                     f"{story.branch} and open/update a PR into {target.branch} "
                     f'titled "{story.pr_title}"'
                 ),

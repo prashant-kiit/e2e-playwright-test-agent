@@ -210,23 +210,24 @@ def step_invocation(
     return cmd, env, ctx.worktree
 
 
-def _summarise(line: str) -> str | None:
-    """Turn one stream-json line into a short human log line (or None to skip)."""
-    try:
-        obj = json.loads(line)
-    except json.JSONDecodeError:
-        return line.rstrip()
-    kind = obj.get("type")
+def _summarise(event: dict) -> str | None:
+    """Turn one stream-json event into a short human log line (or None to skip).
+
+    Takes the parsed event, not the line: the reader already needs the object
+    for the session id and the result, and parsing each line twice was how the
+    two could disagree about what it said.
+    """
+    kind = event.get("type")
     if kind == "assistant":
-        for block in obj.get("message", {}).get("content", []):
+        for block in event.get("message", {}).get("content", []):
             if block.get("type") == "text" and block.get("text", "").strip():
                 return block["text"].strip()
         return None
     if kind == "result":
-        cost = obj.get("total_cost_usd")
-        return f"[result] is_error={obj.get('is_error')} cost=${cost}"
+        cost = event.get("total_cost_usd")
+        return f"[result] is_error={event.get('is_error')} cost=${cost}"
     if kind == "system":
-        return f"[system] {obj.get('subtype', '')}".rstrip()
+        return f"[system] {event.get('subtype', '')}".rstrip()
     return None
 
 
@@ -258,14 +259,18 @@ class ClaudeRunner:
             for line in proc.stdout:
                 jf.write(line)
                 try:
-                    obj = json.loads(line)
-                    if obj.get("session_id"):
-                        session_id = obj["session_id"]
-                    if obj.get("type") == "result":
-                        is_error = bool(obj.get("is_error", True))
+                    event = json.loads(line)
                 except json.JSONDecodeError:
-                    pass
-                summary = _summarise(line)
+                    # Not stream-json (a warning, a crash dump): pass it
+                    # through rather than lose it.
+                    if line.strip():
+                        emit(f"[{ctx.step.value}] {line.rstrip()}")
+                    continue
+                if event.get("session_id"):
+                    session_id = event["session_id"]
+                if event.get("type") == "result":
+                    is_error = bool(event.get("is_error", True))
+                summary = _summarise(event)
                 if summary:
                     emit(f"[{ctx.step.value}] {summary}")
             rc = proc.wait()

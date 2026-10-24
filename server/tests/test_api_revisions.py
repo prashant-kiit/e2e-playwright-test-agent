@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
+from app import api
 from app.api import get_bootstrap_runner, get_launcher, get_storage
 from app.auth import require_auth
 from app.db import get_session
@@ -220,3 +222,45 @@ def test_there_is_no_parity_route(client, target):
     """With one copy of the truth left there is nothing to compare against; the
     property is checked by construction instead (test_hydrate.py)."""
     assert client.get(f"/targets/{target}/parity").status_code == 404
+
+
+# --- losing the revision race --------------------------------------------
+
+def _lose_the_race(*_args, **_kwargs):
+    """What a concurrent writer looks like from inside a write route."""
+    raise IntegrityError(
+        "INSERT INTO revisions", {}, Exception("unique(target_id, rev)")
+    )
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        pytest.param(lambda c, t: _write_story(c, t), id="story-write"),
+        pytest.param(
+            lambda c, t: c.delete(f"/targets/{t}/stories/SCRUM-1"), id="story-delete"
+        ),
+        pytest.param(
+            lambda c, t: c.patch(
+                f"/targets/{t}/config", json={"base_url": "https://other.example.com"}
+            ),
+            id="config-edit",
+        ),
+    ],
+)
+def test_losing_the_revision_race_is_a_409_on_every_write_route(
+    client, target, monkeypatch, write
+):
+    """`unique(target_id, rev)` is the OCC point, and every write can lose it.
+
+    So every write route owes the operator a 409 and not a 500. Only the story
+    write used to say it; this is the test that stops the next route from being
+    added without it.
+    """
+    for name in ("write_story", "delete_story", "update_config"):
+        monkeypatch.setattr(api.authoring, name, _lose_the_race)
+
+    response = write(client, target)
+
+    assert response.status_code == 409
+    assert "reload" in response.json()["detail"]

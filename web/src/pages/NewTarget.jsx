@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { Field, Spinner } from "../components.jsx";
+import { ConfigFields, noteLines, useFields } from "../config-form.jsx";
 
 // Register a target entirely in the portal.
 //
@@ -25,7 +26,7 @@ const EMPTY = {
 export default function NewTarget() {
   const [projects, setProjects] = useState(null);
   const [projectId, setProjectId] = useState("");
-  const [form, setForm] = useState(EMPTY);
+  const [form, set, setForm] = useFields(EMPTY);
   const [notes, setNotes] = useState("");
   const [syncInfra, setSyncInfra] = useState(false);
   const [result, setResult] = useState(null);
@@ -42,8 +43,6 @@ export default function NewTarget() {
       .catch((e) => setError(String(e.message || e)));
   }, []);
 
-  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
-
   async function submit(e) {
     e.preventDefault();
     setBusy(true);
@@ -53,7 +52,7 @@ export default function NewTarget() {
       setResult(
         await api.createTarget(Number(projectId), {
           ...form,
-          agent_notes: notes.split("\n").map((s) => s.trim()).filter(Boolean),
+          agent_notes: noteLines(notes),
           sync_infra: syncInfra,
         }),
       );
@@ -98,26 +97,7 @@ export default function NewTarget() {
           <Field label="Display name">
             <input value={form.name} onChange={set("name")} placeholder="My App" required />
           </Field>
-          <Field label="Base URL">
-            <input
-              value={form.base_url}
-              onChange={set("base_url")}
-              placeholder="https://my-app.example.com"
-              required
-            />
-          </Field>
-          <Field label="Target repo (owner/repo)">
-            <input value={form.target_repo} onChange={set("target_repo")} placeholder="owner/repo" required />
-          </Field>
-          <Field label="Target branch">
-            <input value={form.target_branch} onChange={set("target_branch")} />
-          </Field>
-          <Field label="Locator convention">
-            <input value={form.locators} onChange={set("locators")} placeholder="data-testid attributes" />
-          </Field>
-          <Field label="Agent notes (one per line)">
-            <textarea rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} />
-          </Field>
+          <ConfigFields form={form} set={set} notes={notes} setNotes={setNotes} />
           <label className="checkbox">
             <input type="checkbox" checked={syncInfra} onChange={(e) => setSyncInfra(e.target.checked)} />
             Also sync the infra files to the target repo now (needs GitHub access)

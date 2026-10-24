@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .catalog import Catalog, DeliveryState
+from .catalog import Catalog
 from .git import Git, require_git
 from .github import GitHubClient, clone_url, token_from_env
 
@@ -29,10 +29,13 @@ class Tools:
     catalog: Catalog
 
     def clone_url(self, repo: str) -> str:
-        return clone_url(repo, self.token)
+        """The one method here that does something: it adds the credential.
 
-    def state(self, app: str) -> DeliveryState:
-        return self.catalog.state(app)
+        Everything delivery asks the database it asks `tools.catalog` directly
+        -- `config`, `materialize`, `state`, `record_delivered` -- so the call
+        site names its source instead of this class forwarding four times.
+        """
+        return clone_url(repo, self.token)
 
 
 def default_tools() -> Tools:

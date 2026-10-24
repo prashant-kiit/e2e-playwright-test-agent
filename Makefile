@@ -8,7 +8,7 @@ API_URL := http://localhost:8000
 .DEFAULT_GOAL := help
 
 .PHONY: help up down start stop restart build rebuild logs ps health open dev-web dev-api clean \
-        test lint ci-test check bootstrap deliver reset cutover
+        test lint ci-test check bootstrap deliver reset
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -79,18 +79,14 @@ lint: ## Lint the backend (ruff). Run by `make test` and by CI
 ci-test: ## `make test` as CI runs it: fails instead of skipping if Postgres is absent
 	QA_REQUIRE_DB=1 $(MAKE) test
 
-# --- P3 cutover (one-shot, run with the repo mount still present) --------
-
-cutover: ## Snapshot every target, gate on parity, import its app.json into the row
-	cd server && uv run python -m app.cutover
-
 # --- target-repo delivery (app/delivery; was scripts/*.sh) ---------------
 # APP and STORY are required where shown. GITHUB_PAT comes from the environment
-# or .env (the `gh auth token` fallback is gone with `gh`).
+# only -- neither `gh auth token` nor a `.env` beside the workspace is a
+# fallback (README.md §6.5).
 #
 # Each of these is also an API route (POST /targets/<id>/deliver, /reset,
-# GET /targets/<id>/bootstrapped), but only the bootstrap form is wired into the
-# portal UI so far -- delivery and reset are CLI- or API-only today.
+# GET /targets/<id>/delivery), but only the delivery state is wired into the
+# portal UI so far -- delivering and resetting are CLI- or API-only today.
 
 check: ## Is APP's target repo bootstrapped? (read-only) — make check APP=saucedemo
 	@test -n "$(APP)" || { echo "usage: make check APP=<app>"; exit 2; }

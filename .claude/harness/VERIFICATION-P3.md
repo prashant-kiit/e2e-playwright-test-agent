@@ -42,8 +42,8 @@ _(Each is checked off against observed evidence in **Acceptance criteria, line b
 
 | Check | Result |
 |---|---|
-| `cd server && uv run pytest` | **524 passed**, 0 skipped (was 247 at the end of P2) |
-| `cd web && npm test` | **43 passed**, 6 files (was 28, 5 files) |
+| `cd server && uv run pytest` | **534 passed**, 0 skipped (was 247 at the end of P2) |
+| `cd web && npm test` | **45 passed**, 7 files (was 28, 5 files) |
 | `cd server && uv run ruff check .` | clean |
 | `make ci-test` | green (all three, with `QA_REQUIRE_DB=1`) |
 
@@ -60,6 +60,7 @@ _(Each is checked off against observed evidence in **Acceptance criteria, line b
 | `tests/test_no_repo_mount.py` | **The structural half of the phase.** No module under the server package references a repo-root helper, the removed environment variable, or a path naming `apps/`; the prompts, agent runtime and delivery templates all resolve from inside the installed package with nothing mounted |
 | `tests/test_agent_prompts.py` | The agent's working directory is the worktree; the prompt carries the row's `baseURL`, `locators` and `agentNotes`; no prompt names an app directory, `app.json`, a story glob or either P1-era shell script; every placeholder is substituted |
 | `web/src/pages/Stories.test.jsx`, `TargetConfig.test.jsx` | The story editor and the config form, including the live-run conflict banner and the "nothing changed, so no revision" case |
+| `web/src/pages/Projects.test.jsx` | The targets page: the delivery badge, and that each of the three panel buttons opens its own panel and closes it again (added in the review pass — see below) |
 
 ### Changes to the existing suite
 
@@ -531,6 +532,92 @@ Fixed inside the phase, as the ticket requires.
    `$CLAUDE_PROJECT_DIR` is the worktree — a tree that becomes a revision and is then deleted,
    so the log was both lost and briefly a stray file inside the tree being hashed. It writes to
    `QA_RUN_DIR` now.
+
+---
+
+## Findings from the two-axis review
+
+`/code-review` ran over `7cfb707...HEAD` on both axes, against issue #7 and tickets #8–#16.
+Everything below is fixed in the phase, with the suite green at the end (534 + 45).
+
+### One real bug
+
+**A crashed run blocked every operator write, forever.** `repo.assert_no_live_run` refused a
+story or config edit on the *existence* of an `AppLock` row, ignoring `lease_expires_at` — while
+`start_run` next door reaps exactly those rows. So a run whose process died held the target
+against the portal until someone deleted the row by hand, and the docstring claimed parity with
+`start_run` that the code did not have. The lease is the whole point of P1's lock: an expired
+one means nobody is holding it.
+
+Fixed with `repo.live_run_holding(session, target_id)`, now the one answer to "is a run holding
+this target?", used by both the guard and its message. A paused run **still** blocks (it holds
+the lock deliberately, with a lapsed lease the reaper skips), an expired lease does not, and an
+orphaned lock row — lock present, run row gone — does not. Three tests, one per case.
+
+### Spec-axis findings
+
+| Finding | Fix |
+|---|---|
+| The `cutover` Makefile target survived the command it invoked (`python -m app.cutover`, deleted in #15) | Target and its `.PHONY` entry removed. The cutover ran once, against the dev database, and its transcript is above |
+| Three places still advertised the `.env` PAT fallback deleted in P3: README §5.6 and §6.5, the Makefile's delivery comment, and `.env.example`'s own header | All four now say **environment only**, and §6.5 tells the operator to source the file themselves. The lookup path is the most dangerous line in the phase; documentation that says otherwise is how it comes back |
+| `IntegrityError → 409` was wired to the story write only. `delete_story` and the config edit would have turned a lost `unique(target_id, rev)` race into a 500 | One `_authoring_errors(session)` context manager now translates all five authoring failures, used by every story and config route. `test_losing_the_revision_race_is_a_409_on_every_write_route` is parameterized over the three write routes and was confirmed to fail against the old code first |
+| `story_filename`'s docstring claimed delivery passes paths "from `file_index`" where in fact both callers scan a tree | Docstring corrected. The behaviour was already right — both trees are built from `file_index` and nothing else, which is the property that matters — so the fix is to stop the comment overstating it |
+
+Nothing in the diff was scope creep the spec had not asked for, and no requirement came back
+missing; the four above are the gaps the axis found.
+
+### Standards-axis findings
+
+A layering inversion and a duplicated validation list were worth the churn:
+
+- **The portal imported from the CLI runner.** `apphub.py` reached into
+  `orchestrator/claude.py` for `prompts_dir()` and `runtime_dir()`, so the HTTP layer depended
+  on the agent runner to find package data. Both now live in `app/package_data.py`, which
+  depends on nothing.
+- **Two copies of "what a valid configuration is".** `repo.create_target` called the five
+  cleaners by hand and `repo.update_target_config` called them again; a sixth field would have
+  reached one path and missed the other. Both go through `target_config.CLEANERS` /
+  `clean_fields` now — which also closed a gap nobody had noticed: **create never validated
+  `name`**, so a target could be born with a blank name the edit form would then refuse to
+  save (`test_a_blank_display_name_is_refused_at_create_as_it_is_at_edit`).
+
+The rest, in one list: `render.py`'s duplicated constants block, dead `APP_NAME` and unused
+`infra_files(app=...)` parameter removed; two story-title derivations collapsed into
+`render.story_title(content)`; the test-only `authoring.write_file` deleted (the one test that
+used it now seeds the file the way an ingest does); `catalog.py`'s four local re-imports hoisted
+to module level — confirmed not to be hiding a cycle — its garbled mid-block comment repaired
+and its `Catalog` protocol annotated; `Tools.state` deleted as a Middle Man, so callers say
+`tools.catalog.state(app)` as they already said `tools.catalog.config(app)`;
+`claude.py` parsing each streamed line twice replaced by `_summarise(event)` over the object the
+reader already has; an unreachable `except HydrateError: raise` in `materialize` removed; and
+three mysterious names fixed — `wt` → `worktree`, `target` → `entry` in teardown's chmod loop
+(it was not a `Target`), and `open(storyId)` → `edit(storyId)` in `Stories.jsx`, where it
+shadowed `window.open`.
+
+In the portal, the duplication was real and is now shared: `LiveRunBanner` in
+`components.jsx` (both write surfaces refuse for the same reason, so they say the same thing),
+and `config-form.jsx` holding `CONFIG_FIELDS`, `ConfigFields`, `useFields` and `noteLines`. The
+five configuration fields are now **one list**, rendered by both the create and the edit form —
+the portal's mirror of the server's one `CLEANERS` map. `Projects.jsx`'s `PANELS` carries each
+panel's renderer instead of a name matched by three hand-written `panel === "..."` blocks, and
+`Projects.test.jsx` covers the three buttons (verified to fail when the lookup is broken).
+
+**One finding accepted rather than fixed.** The five configuration primitives travel as keyword
+arguments through `api.create_target` → `authoring.create_target` → `repo.create_target` — a
+Data Clump. They stay: `TargetConfig` is derived *from* a row (`config_of`) and so cannot
+precede one, and the field names have to stay visible for `clean_fields` to tell the operator
+which field they mistyped. The part that mattered — one cleaning map for create and edit — is
+done, and `repo.create_target`'s docstring records the decision.
+
+### Re-verified after the fixes
+
+`make ci-test` green (534 backend with `QA_REQUIRE_DB=1`, 45 web, ruff clean), and the portal
+re-checked in a real browser against the running stack: the targets page with both real targets
+and their delivery badges, each of the three panels opened and closed, the config form loaded
+from the row and saved through the shared field list (reporting "nothing in the tree changed, so
+no revision was committed", which is correct for a no-op edit), and the new-target form
+rendering the same five fields with the short labels. Zero console errors beyond the dev
+server's own `favicon.ico` 404.
 
 ---
 

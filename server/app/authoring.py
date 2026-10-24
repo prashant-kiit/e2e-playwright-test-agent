@@ -37,11 +37,11 @@ from sqlalchemy.orm import Session
 
 from . import repo, revisions, target_config
 from .delivery.render import (
-    HEADING,
     SEED_TEMPLATE,
     STORIES_DIR,
     STORY_FILE,
     TEMPLATES_DIR,
+    story_title,
     write_infra,
 )
 from .models import Revision, Target
@@ -227,7 +227,7 @@ def list_stories(session: Session, store: Storage, target: Target) -> list[dict]
             {
                 "story_id": story_id,
                 "slug": slug,
-                "title": _title(_read(session, store, head.id, path)) or slug,
+                "title": story_title(_read(session, store, head.id, path)) or slug,
                 "file": Path(path).name,
                 "path": path,
             }
@@ -241,24 +241,6 @@ def _read(session: Session, store: Storage, revision_id: int, path: str) -> str:
         return ""
     chunks, _ct = store.get_stream(row.blob_key)
     return b"".join(chunks).decode()
-
-
-def _title(content: str) -> str | None:
-    """The title from a story's first heading.
-
-    The same derivation delivery uses, over bytes rather than a path: there is
-    one definition of "what a story is called" and it lives in render.HEADING.
-    """
-    for line in content.splitlines():
-        if not line.startswith("#"):
-            continue
-        match = HEADING.match(line)
-        if match:
-            return match.group(2).strip()
-        if "- " in line:
-            return line.split("- ", 1)[1].strip() or None
-        return line.lstrip("# ").strip() or None
-    return None
 
 
 def read_story(
@@ -328,27 +310,6 @@ def delete_story(
     return revision
 
 
-def write_file(
-    session: Session,
-    store: Storage,
-    target: Target,
-    *,
-    path: str,
-    content: str,
-) -> Revision | None:
-    """Write one tracked file. Used by tests and by future authoring surfaces.
-
-    Deliberately not an API route: the portal authors stories and config, and
-    everything else in the tree is the agent's output.
-    """
-    def edit(root: Path) -> None:
-        dest = root / path
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(content)
-
-    return _commit_edit(session, target, store, edit)
-
-
 # --- configuration --------------------------------------------------------
 
 def update_config(
@@ -365,23 +326,17 @@ def update_config(
     Validation runs before the live-run check so a typo is reported as a typo
     rather than as a conflict.
     """
-    cleaned = {
-        field: value for field, value in fields.items() if value is not None
-    }
-    if not cleaned:
+    given = {field: value for field, value in fields.items() if value is not None}
+    if not given:
         return target, None
-    # Validate first: `update_target_config` commits, and a refused edit must
-    # not have moved the row.
-    for field, value in cleaned.items():
-        if field == "base_url":
-            target_config.clean_base_url(value)
-        elif field == "target_repo":
-            target_config.clean_target_repo(value)
-        elif field == "agent_notes":
-            target_config.clean_agent_notes(value)
+    # Validate before anything else: `update_target_config` commits, so a
+    # refused edit must not have moved the row -- and a typo should be reported
+    # as a typo rather than as a conflict. One cleaner map, shared with the
+    # write path, so the two cannot disagree about which fields exist.
+    target_config.clean_fields(given)
     repo.assert_no_live_run(session, target.id)
 
-    target = repo.update_target_config(session, target.id, **cleaned)
+    target = repo.update_target_config(session, target.id, **given)
     revision = _commit_edit(session, target, store, lambda root: None)
     return target, revision
 
@@ -397,6 +352,5 @@ __all__ = [
     "read_story",
     "story_path",
     "update_config",
-    "write_file",
     "write_story",
 ]

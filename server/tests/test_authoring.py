@@ -14,10 +14,15 @@ refused, not queued.
 
 from __future__ import annotations
 
+import shutil
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from app import authoring, repo, revisions
 from app.delivery import render
+from app.sandbox import hydrate
 from tests.storage_helpers import FakeStorage
 from tests.target_helpers import BASE_URL, TARGET_REPO
 
@@ -49,6 +54,28 @@ def target(session, store, project):
 def _paths(session, target):
     head = revisions.head_revision(session, target.id)
     return {row.path for row in revisions.list_files(session, head.id)}
+
+
+def _seed_suite_file(session, store, target, path, content):
+    """Put a file the operator cannot write into the tree, the way a run does.
+
+    `authoring` only writes stories and config; a healed suite arrives through
+    the pipeline's ingest, which commits the worktree. This does the same thing
+    by hand: materialize the head, add the file, commit.
+    """
+    head = revisions.head_revision(session, target.id)
+    tmp = Path(tempfile.mkdtemp(prefix="qa-test-seed-"))
+    try:
+        root = tmp / "tree"
+        hydrate.materialize(session, head, store, root)
+        file = root / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text(content)
+        return revisions.commit_revision(
+            session, target, store, root, author="agent"
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _content(session, store, target, path):
@@ -224,9 +251,7 @@ def test_deleting_a_story_leaves_its_plan_and_suite_alone(session, store, target
     authoring.write_story(
         session, store, target, story_id="SCRUM-9", slug="signup", content="# one\n"
     )
-    authoring.write_file(
-        session, store, target, path="tests/signup/a.spec.ts", content="// a\n"
-    )
+    _seed_suite_file(session, store, target, "tests/signup/a.spec.ts", "// a\n")
 
     authoring.delete_story(session, store, target, story_id="SCRUM-9")
 
@@ -352,6 +377,75 @@ def test_a_config_edit_is_refused_while_a_run_is_live(session, store, target):
 def test_a_write_is_allowed_again_once_the_run_is_over(session, store, target):
     run = _start_run(session, target)
     repo.request_stop(session, run.id)  # a pending run stops at once
+
+    rev = authoring.write_story(
+        session, store, target, story_id="SCRUM-9", slug="signup", content="# x\n"
+    )
+    assert rev.rev == 2
+
+
+def test_a_crashed_runs_stale_lock_does_not_block_a_write_forever(session, store, target):
+    """A dead run must not wedge the portal.
+
+    `start_run` reaps a lock whose lease has lapsed and reuses the target, so
+    "is a run live?" has to mean the same thing here. Looking only at whether a
+    lock row exists made a crashed run block every story and config edit until
+    the reaper happened to come round -- and the reaper is a 30-second loop that
+    may not be running at all.
+    """
+    from app.domain import lease
+    from app.models import AppLock
+
+    run = _start_run(session, target)
+    stale = lease.utcnow() - lease.DEFAULT_LEASE_TTL
+    lock = session.get(AppLock, target.id)
+    lock.lease_expires_at = stale
+    run.lease_expires_at = stale
+    session.commit()
+
+    rev = authoring.write_story(
+        session, store, target, story_id="SCRUM-9", slug="signup", content="# x\n"
+    )
+    assert rev.rev == 2
+
+
+def test_a_paused_runs_lock_still_blocks_a_write(session, store, target):
+    """A pause deliberately holds the lock with a lapsed lease, and the reaper
+    skips it -- so an expired lease alone must not read as "dead"."""
+    from app.domain import lease
+    from app.models import AppLock
+
+    run = _start_run(session, target)
+    repo.begin_run(session, run.id)
+    repo.pause_run(session, run.id)
+    lock = session.get(AppLock, target.id)
+    lock.lease_expires_at = lease.utcnow() - lease.DEFAULT_LEASE_TTL
+    session.commit()
+
+    with pytest.raises(repo.RunConflict):
+        authoring.write_story(
+            session, store, target, story_id="SCRUM-9", slug="signup", content="# x\n"
+        )
+
+
+def test_a_lock_whose_run_is_already_terminal_does_not_block(session, store, target):
+    """Belt and braces: a lock row orphaned by a finished run is not a live run."""
+    from app.models import AppLock
+
+    run = _start_run(session, target)
+    repo.begin_run(session, run.id)
+    repo.complete_run(session, run.id)
+    # complete_run releases the lock; put an orphan back to prove the check
+    # looks at the run rather than at the row's existence.
+    session.add(
+        AppLock(
+            tenant_id=target.tenant_id,
+            target_id=target.id,
+            run_id=run.id,
+            lease_expires_at=run.created_at,
+        )
+    )
+    session.commit()
 
     rev = authoring.write_story(
         session, store, target, story_id="SCRUM-9", slug="signup", content="# x\n"

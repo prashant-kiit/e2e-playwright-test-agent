@@ -17,6 +17,7 @@ lands with P4 (DESIGN.md §6); this is format validation only.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -88,6 +89,35 @@ def clean_agent_notes(value: object) -> list[str]:
         raise ConfigError("agent notes must be a list of strings")
     notes = [str(note).strip() for note in value]
     return [note for note in notes if note]
+
+
+# What cleaning each editable field means. One map, so the write path and the
+# authoring layer cannot disagree about which fields exist or how they are
+# validated -- the cascade used to be written out twice.
+CLEANERS: dict[str, Callable[[object], object]] = {
+    "name": lambda value: str(value or "").strip(),
+    "base_url": clean_base_url,
+    "target_repo": clean_target_repo,
+    "target_branch": clean_target_branch,
+    "locators": clean_locators,
+    "agent_notes": clean_agent_notes,
+}
+
+
+def clean_fields(fields: Mapping[str, object]) -> dict[str, object]:
+    """Clean a partial set of editable fields, or raise.
+
+    Raises `ConfigError` for a value that is not allowed and `ValueError` for a
+    field that is not configuration at all -- a different kind of mistake, made
+    by a caller rather than by an operator, so it gets a different status code.
+    """
+    unknown = set(fields) - set(CLEANERS)
+    if unknown:
+        raise ValueError(f"not configuration: {', '.join(sorted(unknown))}")
+    cleaned = {field: CLEANERS[field](value) for field, value in fields.items()}
+    if "name" in cleaned and not cleaned["name"]:
+        raise ConfigError("name is required")
+    return cleaned
 
 
 @dataclass(frozen=True)

@@ -61,9 +61,6 @@ class _StubDelivery:
     def __init__(self, catalog=None):
         self.catalog = catalog or _StubCatalog()
 
-    def state(self, app):
-        return self.catalog.state(app)
-
 
 @pytest.fixture()
 def client(session):

@@ -101,8 +101,6 @@ def materialize(
                 for chunk in chunks:
                     digest.update(chunk)
                     fh.write(chunk)
-        except HydrateError:
-            raise
         except Exception as exc:
             raise HydrateError(
                 f"revision {revision.rev}: could not read the blob for {row.path!r} "
@@ -228,9 +226,9 @@ def teardown(root: Path) -> None:
 
     def _force(func, path, _exc):
         path = Path(path)
-        for target in (path.parent, path):
+        for entry in (path.parent, path):
             try:
-                target.chmod(target.stat().st_mode | stat.S_IRWXU)
+                entry.chmod(entry.stat().st_mode | stat.S_IRWXU)
             except OSError:
                 pass
         try:

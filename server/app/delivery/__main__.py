@@ -67,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "check":
             ready, target = is_bootstrapped(args.app, tools=tools)
-            state = tools.state(args.app)
+            state = tools.catalog.state(args.app)
             print(f"Target: {target.repo} ({target.branch})")
             print(f"State:  {state.describe()}")
             if state.delivered_sha:

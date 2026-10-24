@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.js";
-import { Field } from "../components.jsx";
+import { Field, LiveRunBanner } from "../components.jsx";
+import { ConfigFields, noteLines, useFields } from "../config-form.jsx";
 
 // A target's configuration, as a form.
 //
@@ -16,7 +17,7 @@ import { Field } from "../components.jsx";
 // one edit produced a revision and another did not.
 
 export default function TargetConfig({ target, onSaved }) {
-  const [form, setForm] = useState({
+  const [form, set] = useFields({
     name: target.name,
     base_url: target.base_url,
     target_repo: target.target_repo,
@@ -29,8 +30,6 @@ export default function TargetConfig({ target, onSaved }) {
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
-
   async function submit(e) {
     e.preventDefault();
     setBusy(true);
@@ -40,7 +39,7 @@ export default function TargetConfig({ target, onSaved }) {
     try {
       const out = await api.updateTargetConfig(target.id, {
         ...form,
-        agent_notes: notes.split("\n").map((s) => s.trim()).filter(Boolean),
+        agent_notes: noteLines(notes),
       });
       setNotice(
         out.revision
@@ -62,12 +61,7 @@ export default function TargetConfig({ target, onSaved }) {
         <h2>Configuration</h2>
       </div>
 
-      {conflict && (
-        <div className="banner banner-bad">
-          <strong>Not saved — this target has a live run.</strong>
-          <div>{conflict}</div>
-        </div>
-      )}
+      <LiveRunBanner detail={conflict} />
       {error && <div className="error">{error}</div>}
       {notice && <div className="banner success">{notice}</div>}
 
@@ -75,30 +69,7 @@ export default function TargetConfig({ target, onSaved }) {
         <Field label="Display name">
           <input value={form.name} onChange={set("name")} required />
         </Field>
-        <Field label="Base URL (inlined into the generated Playwright config)">
-          <input
-            value={form.base_url}
-            onChange={set("base_url")}
-            placeholder="https://my-app.example.com"
-            required
-          />
-        </Field>
-        <Field label="Target repo (owner/repo that receives the tests)">
-          <input value={form.target_repo} onChange={set("target_repo")} placeholder="owner/repo" required />
-        </Field>
-        <Field label="Target branch">
-          <input value={form.target_branch} onChange={set("target_branch")} required />
-        </Field>
-        <Field label="Locator convention (injected into the agent's prompt)">
-          <input
-            value={form.locators}
-            onChange={set("locators")}
-            placeholder="data-testid attributes: page.getByTestId('…')"
-          />
-        </Field>
-        <Field label="Agent notes, one per line (injected into the agent's prompt)">
-          <textarea rows={5} value={notes} onChange={(e) => setNotes(e.target.value)} />
-        </Field>
+        <ConfigFields form={form} set={set} notes={notes} setNotes={setNotes} hints rows={5} />
         <button className="btn primary" disabled={busy}>
           {busy ? "Saving…" : "Save configuration"}
         </button>

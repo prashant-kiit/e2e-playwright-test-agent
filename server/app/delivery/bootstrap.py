@@ -25,7 +25,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .render import INFRA_DESTINATIONS, INFRA_ENTRIES, TargetRef, target_ref
+from .render import INFRA_DESTINATIONS, TargetRef, target_ref, write_infra
 from .tools import Tools, default_tools
 
 
@@ -45,7 +45,7 @@ def is_bootstrapped(app: str, *, tools: Tools | None = None) -> tuple[bool, Targ
     """Read-only, and read from the database. Never writes, never dials out."""
     tools = tools or default_tools()
     ref = target_ref(tools.catalog.config(app))
-    return tools.state(app).bootstrapped, ref
+    return tools.catalog.state(app).bootstrapped, ref
 
 
 def ensure_bootstrapped(app: str, *, tools: Tools | None = None) -> BootstrapResult | None:
@@ -55,7 +55,7 @@ def ensure_bootstrapped(app: str, *, tools: Tools | None = None) -> BootstrapRes
     story" (DESIGN.md decision 16).
     """
     tools = tools or default_tools()
-    if tools.state(app).bootstrapped:
+    if tools.catalog.state(app).bootstrapped:
         return None
     return bootstrap(app, tools=tools)
 
@@ -95,11 +95,10 @@ def bootstrap(app: str, *, dry_run: bool = False, tools: Tools | None = None) ->
             repo_git.checkout_new(target.branch)
 
         # Every entry from its source: a template in this package, or the
-        # renderer that reads the target's row. Nothing is read off a mount.
-        for entry in INFRA_ENTRIES:
-            dest = work / entry.destination
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(entry.render(cfg))
+        # renderer that reads the target's row. Through `write_infra`, which is
+        # the one writer of the infra set -- hydrate and revision 1 use the same
+        # function, so the three cannot drift about what lands where.
+        write_infra(work, cfg)
 
         repo_git.add_all()
         if not repo_git.has_staged_changes():

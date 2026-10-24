@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import json
 import queue
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -167,6 +168,8 @@ def create_target(
     except target_config.ConfigError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except IntegrityError as exc:
+        # The one route where IntegrityError is not the revision race: a brand
+        # new target has no rev to lose, so this is unique(project_id, app).
         session.rollback()
         raise HTTPException(
             status_code=409, detail=f"a target named {body.app!r} already exists"
@@ -194,18 +197,42 @@ def update_target_config(
     they change the row and commit nothing.
     """
     target = _target_or_404(session, target_id)
-    try:
+    with _authoring_errors(session):
         _target, revision = authoring.update_config(
             session, store, target, **body.model_dump(exclude_none=True)
         )
-    except target_config.ConfigError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except repo.RunConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _write_out(session, store, target, revision)
 
 
 # --- story authoring: the only way a story gets in -----------------------
+
+@contextmanager
+def _authoring_errors(session: Session) -> Iterator[None]:
+    """Translate an authoring failure into a status code.
+
+    Every operator write refuses for the same reasons, so the mapping lives
+    once: a story or configuration the write path rejects is 422, a story that
+    is not there is 404, a live run holding the target is 409, and losing the
+    race on `unique(target_id, rev)` is 409. One route having the OCC case and
+    the next one not is how that race turns into a 500.
+    """
+    try:
+        yield
+    except (authoring.InvalidStory, target_config.ConfigError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except authoring.NoSuchStory as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except repo.RunConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        # unique(target_id, rev): a concurrent writer got there first. Losing is
+        # the designed outcome -- there is no merge (DESIGN.md invariant 2).
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="another write committed a revision first; reload and try again",
+        ) from exc
+
 
 def _write_out(session: Session, store: Storage, target, revision) -> WriteOut:
     return WriteOut(
@@ -237,10 +264,8 @@ def read_story(
     store: Storage = Depends(get_storage),
 ):
     target = _target_or_404(session, target_id)
-    try:
+    with _authoring_errors(session):
         return authoring.read_story(session, store, target, story_id)
-    except authoring.NoSuchStory as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.put("/targets/{target_id}/stories/{story_id}", response_model=WriteOut)
@@ -258,7 +283,7 @@ def write_story(
             status_code=422,
             detail=f"story id in the path ({story_id}) and body ({body.story_id}) differ",
         )
-    try:
+    with _authoring_errors(session):
         revision = authoring.write_story(
             session,
             store,
@@ -267,18 +292,6 @@ def write_story(
             slug=body.slug,
             content=body.content,
         )
-    except authoring.InvalidStory as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except repo.RunConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except IntegrityError as exc:
-        # unique(target_id, rev): a concurrent writer got there first. Losing is
-        # the designed outcome -- there is no merge (DESIGN.md invariant 2).
-        session.rollback()
-        raise HTTPException(
-            status_code=409,
-            detail="another write committed a revision first; reload and try again",
-        ) from exc
     return _write_out(session, store, target, revision)
 
 
@@ -291,12 +304,8 @@ def delete_story(
 ):
     """Remove one story. Its plan and suite are left alone."""
     target = _target_or_404(session, target_id)
-    try:
+    with _authoring_errors(session):
         revision = authoring.delete_story(session, store, target, story_id=story_id)
-    except authoring.NoSuchStory as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except repo.RunConflict as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _write_out(session, store, target, revision)
 
 

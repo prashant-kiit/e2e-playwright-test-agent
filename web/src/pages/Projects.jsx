@@ -88,9 +88,29 @@ function ProjectCard({ project, targets, onChange }) {
   );
 }
 
-// Which panel of a target is open. One at a time: they are three views of the
-// same tree and showing all three at once buries the one being read.
-const PANELS = ["stories", "config", "revisions"];
+// Which panels a target has, and what each one renders. One is open at a time:
+// they are three views of the same tree, and showing all three at once buries
+// the one being read.
+//
+// The list is the whole switch. A button and a matching `panel === "..."` block
+// somewhere further down is how a fourth view gets a tab that opens nothing.
+const PANELS = [
+  {
+    name: "stories",
+    label: "Stories",
+    render: ({ target, afterWrite }) => <Stories target={target} onRevision={afterWrite} />,
+  },
+  {
+    name: "config",
+    label: "Config",
+    render: ({ target, afterWrite }) => <TargetConfig target={target} onSaved={afterWrite} />,
+  },
+  {
+    name: "revisions",
+    label: "Revisions",
+    render: ({ target, reloadKey }) => <Revisions target={target} key={reloadKey} />,
+  },
+];
 
 function TargetRow({ target, onChange }) {
   const navigate = useNavigate();
@@ -141,6 +161,8 @@ function TargetRow({ target, onChange }) {
     onChange?.();
   }
 
+  const open = PANELS.find((p) => p.name === panel);
+
   return (
     <div className="target-row">
       <div className="target-meta">
@@ -156,13 +178,13 @@ function TargetRow({ target, onChange }) {
             View target code ↗
           </a>
           <DeliveryBadge state={delivery} />
-          {PANELS.map((name) => (
+          {PANELS.map(({ name, label }) => (
             <button
               key={name}
               className="btn ghost sm"
               onClick={() => setPanel(panel === name ? null : name)}
             >
-              {panel === name ? `Hide ${name}` : name[0].toUpperCase() + name.slice(1)}
+              {panel === name ? `Hide ${name}` : label}
             </button>
           ))}
         </span>
@@ -188,21 +210,7 @@ function TargetRow({ target, onChange }) {
         </button>
       </form>
       {error && <div className="error">{error}</div>}
-      {panel === "stories" && (
-        <div className="target-panel">
-          <Stories target={target} onRevision={afterWrite} />
-        </div>
-      )}
-      {panel === "config" && (
-        <div className="target-panel">
-          <TargetConfig target={target} onSaved={afterWrite} />
-        </div>
-      )}
-      {panel === "revisions" && (
-        <div className="target-panel">
-          <Revisions target={target} key={reloadKey} />
-        </div>
-      )}
+      {open && <div className="target-panel">{open.render({ target, afterWrite, reloadKey })}</div>}
     </div>
   );
 }

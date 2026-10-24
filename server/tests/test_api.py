@@ -284,6 +284,21 @@ def test_an_invalid_configuration_is_a_422(client):
     assert "base URL" in r.json()["detail"]
 
 
+def test_a_blank_display_name_is_refused_at_create_as_it_is_at_edit(client):
+    """Creating and editing clean through the same map, so they refuse alike.
+
+    Before P3's `clean_fields` the create path validated field by field and
+    simply never looked at `name`, which is how a target could be born with no
+    name that the edit form would then refuse to save.
+    """
+    pid = client.post("/projects", json={"name": "demo"}).json()["id"]
+
+    r = client.post(f"/projects/{pid}/targets", json=target_body(app="nameless", name="   "))
+
+    assert r.status_code == 422
+    assert "name is required" in r.json()["detail"]
+
+
 def test_events_replays_history_of_a_finished_run(client, session):
     from app import repo
     from app.orchestrator.bus import bus

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
-import { Field, Spinner } from "../components.jsx";
+import { Field, LiveRunBanner, Spinner } from "../components.jsx";
 
 // The story editor for one target.
 //
@@ -100,7 +100,7 @@ export default function Stories({ target, onRevision }) {
     }
   }
 
-  async function open(storyId) {
+  async function edit(storyId) {
     setError("");
     setConflict("");
     try {
@@ -128,12 +128,7 @@ export default function Stories({ target, onRevision }) {
         </button>
       </div>
 
-      {conflict && (
-        <div className="banner banner-bad">
-          <strong>Not saved — this target has a live run.</strong>
-          <div>{conflict}</div>
-        </div>
-      )}
+      <LiveRunBanner detail={conflict} />
       {error && <div className="error">{error}</div>}
       {notice && <div className="banner">{notice}</div>}
 
@@ -161,7 +156,7 @@ export default function Stories({ target, onRevision }) {
                 <td>{s.title}</td>
                 <td className="muted mono">{s.file}</td>
                 <td className="row-actions">
-                  <button className="btn ghost sm" onClick={() => open(s.story_id)} disabled={busy}>
+                  <button className="btn ghost sm" onClick={() => edit(s.story_id)} disabled={busy}>
                     Edit
                   </button>
                   <button

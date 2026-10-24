@@ -187,12 +187,13 @@ Steps 1–6 are the agent's work; it stops at step 6. Delivery is a separate hum
 │   │   │   ├── hooks/close-test-browsers.sh  # closes paused test browsers (§7.3)
 │   │   │   └── mcp.json, settings.json   # the MCP server; the agent's env, permissions and hooks
 │   │   ├── apphub.py                     # prompts + settings + the optional infra sync
+│   │   ├── package_data.py               # where the three package-data directories are (no mount)
 │   │   ├── artifacts.py, storage.py      # classify + store artifact blobs (SeaweedFS/S3)
 │   │   └── reaper.py                     # frees targets whose run died holding the lock
 │   ├── alembic/                        # migrations; the test schema is built by running these from zero
 │   └── tests/                          # pytest; delivery_helpers.py = real git + fake GitHub REST + fake catalog
 ├── web/                                # React + Vite portal (Vitest)
-├── .env.example                        # template: GITHUB_PAT= (copy to .env, which is git-ignored)
+├── .env.example                        # template: GITHUB_PAT= (copy to .env, git-ignored, and source it)
 └── LICENSE
 ```
 
@@ -336,7 +337,7 @@ The shell tools had no `2`: `qa-lib.sh`'s `qa_die` exited `1` for everything, so
 - Machine-made commits in customer repos are authored as **`qa-harness`** (ported from `qa-lib.sh`'s `qa_git`), so history attributes them to the harness rather than to whoever runs the server.
 - Every command works through one injected `Tools` value (GitHub client + git + token + workspace). Nothing in `app/delivery/` reaches for credentials or git outside it — that is what lets the tests run offline.
 
-**Auth: `GITHUB_PAT` only.** `gh` is gone and so is its `gh auth token` fallback — this is an **intentional behavior change**, not a regression. If you authenticated with `gh auth login` and nothing else, delivery fails with a `CredentialError` naming `GITHUB_PAT`; put the token in the environment or in `.env`. It needs **push + pull-request rights and `workflow`** (bootstrap pushes `.github/workflows/playwright.yml`); `reset` additionally needs force-push and branch-delete rights. A fine-grained PAT reports no scopes at all, so the client treats "no scopes" as "cannot tell" and lets the push fail loudly rather than pre-rejecting a valid token.
+**Auth: `GITHUB_PAT` only.** `gh` is gone and so is its `gh auth token` fallback — this is an **intentional behavior change**, not a regression. If you authenticated with `gh auth login` and nothing else, delivery fails with a `CredentialError` naming `GITHUB_PAT`; it must be in the process environment (§6.5 — there is no file fallback). It needs **push + pull-request rights and `workflow`** (bootstrap pushes `.github/workflows/playwright.yml`); `reset` additionally needs force-push and branch-delete rights. A fine-grained PAT reports no scopes at all, so the client treats "no scopes" as "cannot tell" and lets the push fail loudly rather than pre-rejecting a valid token.
 
 Delivery is **run by a human** (or by the API routes behind it), never by the agent — the test-writing agent does no GitHub work and needs no credentials.
 
@@ -358,7 +359,7 @@ Delivery is **run by a human** (or by the API routes behind it), never by the ag
 ```bash
 npm ci
 npx playwright install --with-deps
-cp .env.example .env        # then put the real token in .env: GITHUB_PAT=...
+cp .env.example .env        # then put the real token in it: GITHUB_PAT=... (and source it -- §6.5)
 cd server && uv sync        # backend deps
 cd web && npm install       # portal deps
 ```
@@ -414,7 +415,7 @@ make test                                                   # the harness's own 
 ### 6.5 Secrets
 
 - The only secret is `GITHUB_PAT` (plus `QA_ADMIN_PASSWORD` for the portal login).
-- **Locally:** keep it in `.env` (git-ignored). The delivery tools read `GITHUB_PAT` from the environment, falling back to the repo-root `.env`, so `make deliver` works without sourcing anything.
+- **Locally:** keep it in `.env` (git-ignored) and **source it yourself** — `set -a; . ./.env; set +a` — before `make deliver`. Nothing reads the file for you: the delivery tools read `GITHUB_PAT` from the process environment and nowhere else.
 - **CI/sandbox:** inject it as a platform secret (e.g. a GitHub Actions secret named `GITHUB_PAT`; `GITHUB_TOKEN` is a reserved name). This repo's own CI needs **no** secrets — it never touches a target repo.
 - Never put a real value in `.env.example`, `server/app/agent_runtime/mcp.json` or any committed file. **The PAT comes from the environment only** — the `.env`-beside-the-workspace fallback was deleted in P3, because the delivery workspace is a tree an LLM wrote while reading a live customer website.
 - In a container, pass it at run time (`docker run -e GITHUB_PAT`), never at build time.
