@@ -429,13 +429,25 @@ not a P1 fix: see the queue note in §5.
 ## 12. What changes from today
 
 - `apps/<app>/*` files → config in `targets`; stories, plans, seed and tests become
-  SeaweedFS blobs indexed by `revision`.
+  SeaweedFS blobs indexed by `revision`. **Done (P3.)** `apps/` and `app.json` are deleted.
 - Prompts → code-shipped defaults seeded into Postgres, tenant-overridable, versioned.
-- The long-lived mounted repo (`QA_REPO_ROOT`) disappears; the API becomes stateless and
-  horizontally scalable.
+  **Half done (P3):** they are code-shipped package data under `server/app/prompts/`, read
+  from the installed package. The `prompts` table, tenant overrides and versioning are P5.
+- The long-lived mounted repo (`QA_REPO_ROOT`) disappears. **Done (P3)**, and the sentence
+  that followed it here was too strong, so it is corrected rather than deleted: removing the
+  mount removed the *shared authoritative* disk — no replica needs another replica's disk to
+  answer a question or start a run — but it did **not** make the API horizontally scalable on
+  its own. The worktree and the run directory are local scratch and the SSE log bus is
+  in-process, so a live run is still pinned to the replica that started it. That is P4's job,
+  and `tests/test_no_repo_mount.py` is what keeps the mount from coming back in the meantime.
 - The runner moves out of a thread in the API process ([launcher.py](../../server/app/launcher.py))
-  into a container-per-run sandbox.
+  into a container-per-run sandbox. **P4.** It inherits hydrate, ingest and teardown as three
+  plain functions the launcher composes around the pipeline, a worktree path travelling
+  through `StepContext`, and dependency install already isolated as the single step a
+  prebaked image replaces.
 - Delivery stops being a shell script a human runs and becomes an approved portal action.
+  **Done (P1 for the mechanism, P3 for the reads):** it works through one injected `Tools`
+  value, pushes a materialized head revision, and records `delivered_sha`.
 
 ---
 

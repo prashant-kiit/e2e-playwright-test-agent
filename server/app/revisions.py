@@ -1,9 +1,11 @@
-"""Snapshot a target's tracked tree into content-addressed blobs + a revision.
+"""Commit a tracked tree into content-addressed blobs + a revision, and read it back.
 
-This is P2's whole mechanism, and it is **dual-write only**: nothing here is
-read to make a decision, `apps/` stays authoritative for the entire phase, and a
-total failure of every function in this module would leave runs, delivery and
-the portal behaving exactly as they did in P1. P3 is where truth moves.
+P2 built this and never read it; P3 moved truth into it. A target's head
+revision plus its configuration row are what hydrate builds a worktree from,
+what ingest commits to, and what delivery pushes. There is no second copy to
+compare against -- the property parity used to check by comparison is checked by
+construction instead, by materializing a revision and re-scanning the result
+(app/sandbox/hydrate.py).
 
 The ordering is the invariant (DESIGN.md §5, "blob before row"):
 
@@ -30,7 +32,6 @@ from sqlalchemy.orm import Session
 
 from .delivery.render import tracked_tree
 from .models import FileIndex, Revision, Target
-from .parity import Parity, compare_trees, no_revision
 from .storage import Storage
 from .tenancy import current_tenant_id
 
@@ -283,28 +284,3 @@ def get_file(session: Session, revision_id: int, path: str) -> FileIndex | None:
             FileIndex.tenant_id == current_tenant_id(),
         )
     ).one_or_none()
-
-
-def target_parity(session: Session, target: Target, root: Path) -> Parity:
-    """Compare a target's head revision against the tracked tree under `root`.
-
-    The I/O half: load the head's file_index rows, walk the disk, and hand both
-    to the pure comparison in app/parity.py. Read-only -- parity never repairs,
-    re-snapshots or writes anything, because a "helpful" repair would let the
-    check hide the very drift it exists to surface.
-    """
-    head = head_revision(session, target.id)
-    if head is None:
-        return no_revision()
-
-    in_db = {
-        row.path: sha256_from_blob_key(row.blob_key)
-        for row in list_files(session, head.id)
-    }
-    on_disk = scan_tracked_tree(root).blobs
-    return Parity(
-        has_revision=True,
-        rev=head.rev,
-        tree_hash=head.tree_hash,
-        diff=compare_trees(in_db, on_disk),
-    )

@@ -15,7 +15,6 @@ them, and whether a step ever got to run.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
 
@@ -302,11 +301,12 @@ def test_the_worktree_is_not_inside_the_run_directory(monkeypatch, tmp_path):
     assert not run_dir.is_relative_to(worktree)
 
 
-def test_the_worktrees_dir_defaults_to_a_sibling_of_the_runs_dir(monkeypatch, tmp_path):
+def test_the_defaults_keep_the_worktree_out_of_the_run_dir(monkeypatch):
+    """With nothing configured at all, the two are still separate trees."""
     from app import config
 
     monkeypatch.delenv("QA_WORKTREES_DIR", raising=False)
-    monkeypatch.setenv("QA_RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.delenv("QA_RUNS_DIR", raising=False)
 
-    assert config.worktrees_dir().parent == Path(tmp_path)
-    assert not config.worktree_dir("r1").is_relative_to(config.run_dir("r1"))
+    assert not config.worktree_dir("r1").is_relative_to(config.runs_dir())
+    assert not config.run_dir("r1").is_relative_to(config.worktrees_dir())

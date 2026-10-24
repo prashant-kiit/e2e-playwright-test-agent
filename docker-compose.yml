@@ -1,7 +1,8 @@
-# Dev stack for the QA admin portal.
-#   M0 (this file): Postgres (state) + the API health endpoint.
-#   M4 adds the artifact store (choice pending — see the portal README/plan).
-#   M5/M7 add the web container.
+# Dev stack for the QA admin portal: Postgres (state) + SeaweedFS (blobs) +
+# the API + the web container.
+#
+# There is no repo mount. P3 removed the shared authoritative disk: truth is
+# Postgres plus blob storage, and the API's only local state is per-run scratch.
 services:
   postgres:
     image: postgres:16-alpine
@@ -49,17 +50,22 @@ services:
       S3_ACCESS_KEY: qa
       S3_SECRET_KEY: qa-secret
       S3_BUCKET: qa-artifacts
-      # The repo is mounted at /workspace so the backend can read apps/ and
-      # prompts/ and bootstrap new targets. Run working-dirs stay on a volume.
-      QA_REPO_ROOT: /workspace
+      # No repo mount. A target's configuration is a row, its tree is a
+      # revision in blob storage, and the prompts and agent runtime ship inside
+      # the server package -- so the API needs no shared disk to run an agent
+      # (DESIGN.md §12). What is left is per-run scratch on a local volume: the
+      # worktree hydrated from the head revision, and the run's output.
       QA_RUNS_DIR: /data/runs
+      QA_WORKTREES_DIR: /data/worktrees
+      QA_NPM_CACHE: /data/npm-cache
       # Orchestrator knobs (host-overridable): fake runner by default so the
       # stack runs token-free; QA_FAKE_DELAY slows fake steps for pause demos.
       QA_RUNNER: "${QA_RUNNER:-fake}"
       QA_FAKE_DELAY: "${QA_FAKE_DELAY:-0}"
     volumes:
-      - .:/workspace    # the repo: apps/ and prompts/ (read + bootstrap)
-      - apidata:/data   # per-run working dirs (run logs + Playwright output)
+      # Per-run scratch only: hydrated worktrees, run output, the npm cache.
+      # Nothing here is authoritative, and nothing is shared between replicas.
+      - apidata:/data
     ports:
       - "8000:8000"
     depends_on:
