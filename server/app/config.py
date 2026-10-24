@@ -1,11 +1,12 @@
-"""Filesystem/runtime config for the orchestrator.
+"""Runtime paths for the orchestrator: where a run works and where it writes.
 
-Config still lives on the filesystem, so the backend needs to know where the repo
-root is (apps/ and prompts/ live there) and where to put per-run working dirs.
-All overridable by env for containers/tests.
+A target's configuration lives in Postgres and its tree lives in blobs, so what
+is left here is scratch space -- the per-run worktree hydrated from the database,
+the per-run directory its output goes to, and the shared npm cache. All
+overridable by env for containers and tests.
 
-DESIGN.md P3 removes repo_root() entirely: config moves into Postgres and the
-worktree is hydrated per run.
+`repo_root()` is on its way out with the mount (P3-08); while it is here it
+serves only the cutover and the two P2 revision routes.
 """
 
 from __future__ import annotations
@@ -27,6 +28,32 @@ def runs_dir() -> Path:
 
 def run_dir(run_key: str) -> Path:
     return runs_dir() / run_key
+
+
+def worktrees_dir() -> Path:
+    """Where per-run worktrees live: a **sibling** of the runs dir, never inside it.
+
+    Artifact collection sweeps the run dir recursively (artifacts.py), so a
+    worktree under it would upload the whole source tree and `node_modules` as
+    run artifacts on every step boundary. Siblings keep "what the agent works
+    in" and "what we collect as evidence" structurally separate rather than
+    separated by an exclusion list somebody has to remember.
+    """
+    return Path(os.environ.get("QA_WORKTREES_DIR", str(runs_dir().parent / "worktrees")))
+
+
+def worktree_dir(run_key: str) -> Path:
+    """One run's worktree. Hydrated before the pipeline, deleted after it."""
+    return worktrees_dir() / run_key
+
+
+def npm_cache_dir() -> Path:
+    """A shared npm cache, so each run's install is not a cold download.
+
+    P4 replaces the install step with a prebaked image and a warm cache; until
+    then this is the warm half.
+    """
+    return Path(os.environ.get("QA_NPM_CACHE", str(worktrees_dir().parent / "npm-cache")))
 
 
 def runner_kind() -> str:

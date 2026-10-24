@@ -12,12 +12,26 @@ from sqlalchemy.orm import Session
 
 from app import repo, target_config
 from app.models import Target
+from app.target_config import TargetConfig
 from app.tenancy import current_tenant_id
 
 BASE_URL = "https://demo.example.com"
 TARGET_REPO = "o/r"
 LOCATORS = "data-testid attributes: page.getByTestId('...')"
 AGENT_NOTES = ("The seed opens the home page logged out.",)
+
+# The same configuration as a detached value, for the fixtures that need to
+# render the generated infra entries without a database -- and so the tree a
+# fixture commits is the tree hydrate would render from the row it created.
+CONFIG = TargetConfig(
+    app="demo",
+    name="Demo",
+    base_url=BASE_URL,
+    locators=LOCATORS,
+    agent_notes=AGENT_NOTES,
+    target_repo=TARGET_REPO,
+    target_branch=target_config.DEFAULT_BRANCH,
+)
 
 
 def create_target(

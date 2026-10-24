@@ -21,13 +21,22 @@ Emit = Callable[[str], None]
 
 @dataclass(frozen=True)
 class StepContext:
+    """Everything a Runner needs for one step, and nothing it has to look up.
+
+    `worktree` arrived with P3: the tree hydrate built from the head revision,
+    which is the only place the agent works. It reaches a sandboxed runner the
+    same way it reaches the in-process one, which is the whole reason it travels
+    in the context rather than being read from config inside the runner.
+    """
+
     run_id: int
     run_key: str
-    app: str            # apps/<app> folder name
+    app: str            # the target's slug
     story_id: str       # e.g. SCRUM-201
     mode: str           # "changed" | "full"
     step: Step
     run_dir: Path       # per-run working dir (logs + Playwright output)
+    worktree: Path      # per-run hydrated tree: the agent's working directory
     prev_session_id: str | None  # Claude Code session to --resume, if any
 
 

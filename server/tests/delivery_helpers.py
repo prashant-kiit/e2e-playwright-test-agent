@@ -15,6 +15,7 @@ from pathlib import Path
 
 from app.delivery.git import Git
 from app.delivery.github import PullRequest
+from app.delivery.render import write_infra
 from app.delivery.tools import Tools
 
 INFRA_CONTENT = {
@@ -176,18 +177,26 @@ def remote_log(bare: Path, branch: str = "master") -> list[str]:
     return [line for line in out.stdout.splitlines() if line]
 
 
-def make_worktree(root: Path, *, story: str = "SCRUM-1", slug: str = "checkout") -> Path:
+def make_worktree(
+    root: Path, *, story: str = "SCRUM-1", slug: str = "checkout", cfg=None
+) -> Path:
     """A hydrated worktree: one target's whole tree at the root, nothing else.
 
     The shape P3 hydrates and ingests -- the infra entries at their destination
     paths, the target's own content beside them, and no apps/<app>/ prefix
     anywhere, because the on-disk shape and the stored shape are now the same
     shape.
+
+    The infra is written by the **real** `write_infra`, generated config and
+    all. That matters: a fixture that committed some other bytes for
+    `playwright.config.ts` would make the first run's hydrate differ from the
+    revision it hydrated, and every run would commit a spurious revision for
+    the config alone.
     """
-    for rel, text in INFRA_CONTENT.items():
-        path = root / rel
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
+    from tests.target_helpers import CONFIG
+
+    root.mkdir(parents=True, exist_ok=True)
+    write_infra(root, cfg or CONFIG)
 
     (root / "user-stories").mkdir(parents=True, exist_ok=True)
     (root / "specs").mkdir(exist_ok=True)

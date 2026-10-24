@@ -43,6 +43,10 @@ def run_pipeline(
 
     start = resume_step(last_completed)
     rd = config.run_dir(run_key)
+    # The worktree the launcher hydrated, named by the same function it used.
+    # Derived rather than passed in, so the driver keeps exactly one injected
+    # callable (DESIGN.md §13) and the two cannot disagree about the path.
+    wt = config.worktree_dir(run_key)
 
     if start is None:  # every step already done; just finalize
         with session_factory() as s:
@@ -80,6 +84,7 @@ def run_pipeline(
             mode=mode,
             step=step,
             run_dir=rd,
+            worktree=wt,
             prev_session_id=prev_sid,
         )
 
