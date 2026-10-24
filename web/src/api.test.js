@@ -75,3 +75,61 @@ describe("api wrapper", () => {
     expect(await api.revisionFile(3, "playwright.config.ts")).toBe("export default {};\n");
   });
 });
+
+// --- the authoring surface (P3) -----------------------------------------
+//
+// With the mount gone the portal is the only way a story gets in, so these
+// paths and verbs are part of the contract rather than an implementation
+// detail of one page.
+
+describe("the authoring surface", () => {
+  beforeEach(() => mockFetch(200, {}));
+
+  it("creates a target under its project", async () => {
+    await api.createTarget(3, { app: "demo", name: "Demo" });
+    const [path, opts] = global.fetch.mock.calls[0];
+    expect(path).toBe("/projects/3/targets");
+    expect(opts.method).toBe("POST");
+  });
+
+  it("edits a target's configuration with PATCH, so one field can be sent", async () => {
+    await api.updateTargetConfig(3, { base_url: "https://x.example.com" });
+    const [path, opts] = global.fetch.mock.calls[0];
+    expect(path).toBe("/targets/3/config");
+    expect(opts.method).toBe("PATCH");
+  });
+
+  it("writes a story by its id, so a save is idempotent", async () => {
+    await api.writeStory(3, "SCRUM-1", { story_id: "SCRUM-1", slug: "a", content: "#" });
+    const [path, opts] = global.fetch.mock.calls[0];
+    expect(path).toBe("/targets/3/stories/SCRUM-1");
+    expect(opts.method).toBe("PUT");
+  });
+
+  it("deletes a story by its id", async () => {
+    await api.deleteStory(3, "SCRUM-1");
+    const [path, opts] = global.fetch.mock.calls[0];
+    expect(path).toBe("/targets/3/stories/SCRUM-1");
+    expect(opts.method).toBe("DELETE");
+  });
+
+  it("reads a target's stories from its own route, not from an app list", async () => {
+    await api.listStories(3);
+    expect(global.fetch.mock.calls[0][0]).toBe("/targets/3/stories");
+  });
+
+  it("asks the database whether a target is delivered", async () => {
+    await api.deliveryState(3);
+    const [path, opts] = global.fetch.mock.calls[0];
+    expect(path).toBe("/targets/3/delivery");
+    expect(opts.method).toBe("GET");
+  });
+
+  it("offers no way to snapshot a filesystem or to read parity", () => {
+    // Both described a second copy of the truth that no longer exists.
+    expect(api.snapshotTarget).toBeUndefined();
+    expect(api.targetParity).toBeUndefined();
+    expect(api.listApps).toBeUndefined();
+    expect(api.bootstrapApp).toBeUndefined();
+  });
+});

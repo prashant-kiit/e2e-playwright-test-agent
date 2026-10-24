@@ -2,18 +2,19 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { Spinner } from "../components.jsx";
 
-// The read-only Revisions panel for one target (P2).
+// The read-only Revisions panel for one target.
 //
-// Everything here reads the dual-written revision model: the parity banner, the
-// revision list, one revision's files and one file's contents out of blob
-// storage. Nothing on this panel writes a revision, a file index row or a blob
-// -- that would let the portal make the database disagree with the authoritative
-// filesystem, which is the one thing this phase must not do.
+// The operator's window into the tree the database holds: the revision list,
+// one revision's files, and one file's contents streamed out of blob storage.
+// This is where the generated suite is read.
 //
-// The single exception is the snapshot button, which is P2-only scaffolding: it
-// exists so a target that has never run still has a head revision to compare
-// parity against. In P3 the filesystem is not authoritative and "snapshot the
-// disk" stops meaning anything.
+// Nothing here writes. The writers are a run's ingest, at each step boundary
+// that changed something, and the operator's own story and config edits. There
+// is no snapshot button: the filesystem is not authoritative, so "snapshot the
+// disk" stopped meaning anything. There is no parity banner either -- with one
+// copy of the truth left there is nothing to compare it against, and the
+// property parity checked by comparison is now checked by construction
+// (the materialize/re-scan round trip in the backend tests).
 
 const SHORT_HASH = 12;
 
@@ -29,44 +30,18 @@ function humanSize(bytes) {
 
 export default function Revisions({ target }) {
   const [revisions, setRevisions] = useState(null);
-  const [parity, setParity] = useState(null);
   const [selected, setSelected] = useState(null);
   const [error, setError] = useState("");
-  const [notice, setNotice] = useState("");
-  const [busy, setBusy] = useState(false);
 
   async function load() {
-    const [revs, par] = await Promise.all([
-      api.listRevisions(target.id),
-      api.targetParity(target.id),
-    ]);
+    const revs = await api.listRevisions(target.id);
     setRevisions(revs);
-    setParity(par);
     return revs;
   }
 
   useEffect(() => {
     load().catch((e) => setError(String(e.message || e)));
   }, [target.id]);
-
-  async function snapshot() {
-    setBusy(true);
-    setError("");
-    setNotice("");
-    try {
-      const out = await api.snapshotTarget(target.id);
-      setNotice(
-        out.created
-          ? `Snapshotted: revision ${out.revision.rev}.`
-          : `No change — the tree still matches revision ${out.revision.rev}, so nothing was committed.`,
-      );
-      await load();
-    } catch (e) {
-      setError(String(e.message || e));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   if (error && revisions === null) return <div className="error">{error}</div>;
   if (revisions === null) return <Spinner label="Loading revisions…" />;
@@ -88,19 +63,14 @@ export default function Revisions({ target }) {
             </span>
           ) : null}
         </h2>
-        <button className="btn" onClick={snapshot} disabled={busy}>
-          {busy ? "Snapshotting…" : "Snapshot now"}
-        </button>
       </div>
 
-      <ParityBanner parity={parity} />
-      {notice && <div className="banner">{notice}</div>}
       {error && <div className="error">{error}</div>}
 
       {revisions.length === 0 ? (
         <p className="muted">
-          No revisions yet. Take a snapshot to give this target a head revision to compare
-          against, or start a run — a run baselines the target before its first step.
+          No revisions yet. A target created in the portal has revision 1 from the moment it
+          exists, so an empty history here means this target predates that and cannot be run.
         </p>
       ) : (
         <>
@@ -138,65 +108,19 @@ export default function Revisions({ target }) {
               ))}
             </tbody>
           </table>
-          {/* Two revisions for what feels like one piece of work reads like an
-              off-by-one unless the portal says why. */}
+          {/* A run producing fewer revisions than steps reads like a bug
+              unless the panel says why. */}
           <p className="muted hint">
-            A target&rsquo;s first run leaves <strong>two revisions</strong>: the{" "}
-            <code>baseline</code>, which is the tree the run inherited, and then the run&rsquo;s
-            own changes. That pair is expected, not an off-by-one.
+            A run commits a revision only at the step boundaries that <strong>changed</strong>{" "}
+            something: reading the story and exploring normally change nothing, so a five-step run
+            usually leaves two or three revisions, not five. <code>operator</code> revisions are
+            story and configuration edits made here.
           </p>
         </>
       )}
 
       {selected && <RevisionFiles revision={selected} />}
     </section>
-  );
-}
-
-function ParityBanner({ parity }) {
-  if (!parity) return null;
-
-  if (!parity.has_revision) {
-    // Not "in sync" (that would be a lie) and not an error (it is a normal
-    // state for a target nobody has snapshotted yet).
-    return (
-      <div className="banner">
-        No revisions yet, so there is nothing to compare against the files on disk.
-      </div>
-    );
-  }
-
-  if (parity.in_sync) {
-    return (
-      <div className="banner success">
-        In sync — revision {parity.rev} matches the files on disk.
-      </div>
-    );
-  }
-
-  return (
-    <div className="banner parity-bad">
-      <strong>Not in sync</strong> — revision {parity.rev} disagrees with the files on disk.
-      <ParityPaths label="Only in the database (missing on disk)" paths={parity.only_in_db} />
-      <ParityPaths label="Only on disk (never snapshotted)" paths={parity.only_on_disk} />
-      <ParityPaths label="Different contents" paths={parity.modified} />
-    </div>
-  );
-}
-
-function ParityPaths({ label, paths }) {
-  if (!paths || paths.length === 0) return null;
-  return (
-    <div className="parity-group">
-      <span className="parity-label">{label}</span>
-      <ul className="parity-paths">
-        {paths.map((p) => (
-          <li key={p} className="mono">
-            {p}
-          </li>
-        ))}
-      </ul>
-    </div>
   );
 }
 

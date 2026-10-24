@@ -46,13 +46,26 @@ export const api = {
   login: (password) => req("POST", "/auth/login", { password }),
   logout: () => req("POST", "/auth/logout"),
 
-  // projects + targets
+  // projects + targets. A target carries its own configuration now: creating
+  // one writes the row and commits its revision 1 from the templates.
   listProjects: () => req("GET", "/projects"),
   createProject: (name) => req("POST", "/projects", { name }),
   listTargets: (projectId) =>
     req("GET", projectId ? `/targets?project_id=${projectId}` : "/targets"),
-  createTarget: (projectId, app, name) =>
-    req("POST", `/projects/${projectId}/targets`, { app, name }),
+  createTarget: (projectId, body) => req("POST", `/projects/${projectId}/targets`, body),
+  updateTargetConfig: (targetId, body) => req("PATCH", `/targets/${targetId}/config`, body),
+
+  // stories: the portal is the only way one gets in, and every write commits
+  // one operator-authored revision.
+  listStories: (targetId) => req("GET", `/targets/${targetId}/stories`),
+  readStory: (targetId, storyId) => req("GET", `/targets/${targetId}/stories/${storyId}`),
+  writeStory: (targetId, storyId, body) =>
+    req("PUT", `/targets/${targetId}/stories/${storyId}`, body),
+  deleteStory: (targetId, storyId) =>
+    req("DELETE", `/targets/${targetId}/stories/${storyId}`),
+
+  // delivery: "delivered" or "N revisions ahead", from one Postgres query.
+  deliveryState: (targetId) => req("GET", `/targets/${targetId}/delivery`),
 
   // runs
   listRuns: (targetId) =>
@@ -68,13 +81,12 @@ export const api = {
 
   artifactContentUrl: (id) => `/artifacts/${id}/content`,
 
-  // revisions (P2): the dual-written snapshot of a target's tracked tree.
-  // Read-only except snapshotTarget, which is P2-only scaffolding -- in P3 the
-  // filesystem is not authoritative and "snapshot the disk" stops meaning
-  // anything.
+  // revisions: the operator's window into a target's tree. Read-only -- the
+  // writers are ingest (at a run's step boundaries) and the story/config
+  // writes above. There is no snapshot action: the filesystem is not
+  // authoritative, so "snapshot the disk" stopped meaning anything. There is no
+  // parity either: with one copy of the truth there is nothing to compare it to.
   listRevisions: (targetId) => req("GET", `/targets/${targetId}/revisions`),
-  snapshotTarget: (targetId) => req("POST", `/targets/${targetId}/revisions/snapshot`),
-  targetParity: (targetId) => req("GET", `/targets/${targetId}/parity`),
   revisionFiles: (revisionId) => req("GET", `/revisions/${revisionId}/files`),
   // A tracked path contains slashes, so it travels as a query parameter and
   // needs no escaping scheme beyond the usual encoding.
@@ -83,10 +95,7 @@ export const api = {
   revisionFile: (revisionId, path) =>
     req("GET", `/revisions/${revisionId}/file?path=${encodeURIComponent(path)}`),
 
-  // repo introspection + bootstrap + settings
-  listApps: () => req("GET", "/apps"),
-  listStories: (app) => req("GET", `/apps/${app}/stories`),
-  bootstrapApp: (body) => req("POST", "/apps/bootstrap", body),
+  // prompts + settings
   getPrompts: () => req("GET", "/prompts"),
   getSettings: () => req("GET", "/settings"),
 };

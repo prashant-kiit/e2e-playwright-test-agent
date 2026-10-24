@@ -1,121 +1,98 @@
-"""M6: repo/file introspection and bootstrap (no DB, no gh)."""
+"""Prompts, settings, and the optional infra sync (no database, no network)."""
 
-import json
+from __future__ import annotations
 
 import pytest
 
 from app import apphub
+from app.delivery import render
 from tests.delivery_helpers import (
     FakeGitHub,
     make_bare_remote,
     make_tools,
-    make_workspace,
+    make_worktree,
 )
 
+# --- prompts: package data, not a checkout --------------------------------
+
+def test_prompts_are_read_from_the_package(tmp_path, monkeypatch):
+    """What the portal shows is what the agent is sent, and neither needs a
+    mounted repo to find it."""
+    monkeypatch.chdir(tmp_path)
+
+    names = [p["name"] for p in apphub.read_prompts()]
+
+    assert "qa_system_prompt.md" in names
+    assert "steps/_context.md" in names
+    assert all(p["content"] for p in apphub.read_prompts())
+
+
+def test_the_step_prompts_are_listed_in_order():
+    names = [p["name"] for p in apphub.read_prompts() if p["name"].startswith("steps/")]
+    assert names == sorted(names)
+
+
+# --- settings: no repo root -----------------------------------------------
+
+def test_settings_report_the_runner_and_the_scratch_directories():
+    s = apphub.settings()
+    assert s["runner"] in ("fake", "claude")
+    assert s["runs_dir"]
+    assert s["worktrees_dir"]
+
+
+def test_settings_do_not_report_a_repo_root():
+    """P3 removed the shared authoritative mount; a UI still reporting one would
+    be describing a disk that does not exist."""
+    assert "repo_root" not in apphub.settings()
+
+
+def test_the_worktrees_directory_is_not_inside_the_runs_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("QA_RUNS_DIR", str(tmp_path / "runs"))
+    monkeypatch.delenv("QA_WORKTREES_DIR", raising=False)
+
+    s = apphub.settings()
+    assert not s["worktrees_dir"].startswith(s["runs_dir"])
+
+
+# --- the optional infra sync ----------------------------------------------
 
 @pytest.fixture()
-def repo_root(tmp_path, monkeypatch):
-    monkeypatch.setenv("QA_REPO_ROOT", str(tmp_path))
-    (tmp_path / "apps").mkdir()
-    (tmp_path / "prompts" / "steps").mkdir(parents=True)
-    return tmp_path
+def env(tmp_path):
+    return make_worktree(tmp_path / "source"), make_bare_remote(tmp_path)
 
 
-def _make_app(root, app, repo="owner/repo", stories=()):
-    d = root / "apps" / app
-    (d / "user-stories").mkdir(parents=True)
-    (d / "app.json").write_text(
-        json.dumps({"name": app.title(), "baseURL": "https://x", "targetRepo": repo})
+def test_a_successful_sync_reports_what_it_pushed(env):
+    source, remote = env
+
+    outcome = apphub.run_bootstrap(
+        "demo", tools=make_tools(source, remote, FakeGitHub(has_commits=False))
     )
-    for sid, title in stories:
-        (d / "user-stories" / f"{sid}-slug.md").write_text(f"# User Story: {sid} - {title}\n")
-
-
-def test_list_apps_skips_template_and_counts_stories(repo_root):
-    _make_app(repo_root, "foo", stories=[("SCRUM-1", "Login")])
-    (repo_root / "apps" / "_template").mkdir()  # must be skipped
-    apps = apphub.list_apps()
-    assert [a["app"] for a in apps] == ["foo"]
-    assert apps[0]["repoUrl"] == "https://github.com/owner/repo"
-    assert apps[0]["storyCount"] == 1
-
-
-def test_list_apps_null_repo_url_when_unset(repo_root):
-    _make_app(repo_root, "foo", repo="")
-    assert apphub.list_apps()[0]["repoUrl"] is None
-
-
-def test_list_stories_parses_id_and_title(repo_root):
-    _make_app(repo_root, "foo", stories=[("SCRUM-201", "Authentication and Dashboard")])
-    s = apphub.list_stories("foo")
-    assert s[0]["story_id"] == "SCRUM-201"
-    assert s[0]["title"] == "Authentication and Dashboard"
-
-
-def test_read_prompts(repo_root):
-    (repo_root / "prompts" / "qa_system_prompt.md").write_text("# system")
-    (repo_root / "prompts" / "steps" / "1-read_story.md").write_text("step1")
-    names = [p["name"] for p in apphub.read_prompts()]
-    assert "qa_system_prompt.md" in names
-    assert "steps/1-read_story.md" in names
-
-
-def test_bootstrap_writes_files_and_runs_script(repo_root):
-    calls = []
-
-    def fake(app):
-        calls.append(app)
-        return apphub.BootstrapOutcome(ok=True, output="bootstrapped")
-
-    res = apphub.bootstrap_app(
-        {"app": "newapp", "name": "New", "baseURL": "https://n", "targetRepo": "o/r"},
-        run=fake,
-    )
-    assert calls == ["newapp"]
-    d = repo_root / "apps" / "newapp"
-    assert (d / "app.json").exists() and (d / "seed.spec.ts").exists()
-    assert json.loads((d / "app.json").read_text())["targetRepo"] == "o/r"
-    assert res["bootstrap"] == apphub.BootstrapOutcome(ok=True, output="bootstrapped")
-
-
-def test_bootstrap_can_skip_the_script(repo_root):
-    res = apphub.bootstrap_app({"app": "n2", "name": "N"}, do_bootstrap=False)
-    assert res["bootstrap"] is None
-
-
-def test_bootstrap_rejects_bad_name(repo_root):
-    with pytest.raises(apphub.BootstrapError):
-        apphub.bootstrap_app({"app": "Bad Name"}, do_bootstrap=False)
-
-
-def test_bootstrap_rejects_existing_app(repo_root):
-    _make_app(repo_root, "foo")
-    with pytest.raises(apphub.BootstrapError):
-        apphub.bootstrap_app({"app": "foo", "name": "x"}, do_bootstrap=False)
-
-
-# --- the target-repo bootstrap step (P1: typed result, not {"rc", "output"}) --
-# Real git against a bare remote, fake GitHub REST: the delivery prior art.
-
-def _delivery_env(tmp_path, monkeypatch, app="demo"):
-    workspace = make_workspace(tmp_path / "ws", app)
-    remote = make_bare_remote(tmp_path)
-    monkeypatch.setenv("QA_REPO_ROOT", str(workspace))
-    return make_tools(workspace, remote, FakeGitHub(has_commits=False))
-
-
-def test_run_bootstrap_reports_a_successful_outcome(tmp_path, monkeypatch):
-    outcome = apphub.run_bootstrap("demo", tools=_delivery_env(tmp_path, monkeypatch))
 
     assert outcome.ok is True
-    assert "o/r" in outcome.output  # the operator is told which target was synced
+    assert "o/r (master)" in outcome.output
+    assert "done (bootstrap)" in outcome.output
 
 
-def test_run_bootstrap_turns_a_delivery_failure_into_an_outcome(tmp_path, monkeypatch):
-    """A DeliveryError is an outcome the form can show, never a server error."""
-    tools = _delivery_env(tmp_path, monkeypatch)
+def test_a_failed_sync_is_an_outcome_not_an_exception(env):
+    """The target and its revision 1 exist either way, so the form shows why the
+    sync did not land rather than losing the target to a 500."""
+    source, remote = env
 
-    outcome = apphub.run_bootstrap("no-such-app", tools=tools)
+    outcome = apphub.run_bootstrap(
+        "ghost", tools=make_tools(source, remote, FakeGitHub(has_commits=False))
+    )
 
     assert outcome.ok is False
-    assert "no-such-app" in outcome.output
+    assert "ghost" in outcome.output
+
+
+def test_the_sync_pushes_the_infra_entries(env):
+    from tests.delivery_helpers import remote_files
+
+    source, remote = env
+    apphub.run_bootstrap(
+        "demo", tools=make_tools(source, remote, FakeGitHub(has_commits=False))
+    )
+
+    assert remote_files(remote) == set(render.INFRA_DESTINATIONS)

@@ -34,10 +34,18 @@ class NotFound(RepoError):
 
 
 class RunConflict(RepoError):
-    """A live run already holds this app's lock."""
+    """A live run already holds this target's lock.
 
-    def __init__(self, target_id: int, run_id: int) -> None:
-        super().__init__(f"app (target {target_id}) already has a live run {run_id}")
+    Raised by two different callers and answered as 409 by both: a second run
+    for the same target, and an operator write while a run is live. The reason
+    differs, so it is a parameter -- an operator told "already has a live run"
+    when they tried to edit a story would not know what to do next.
+    """
+
+    def __init__(self, target_id: int, run_id: int, reason: str | None = None) -> None:
+        super().__init__(
+            reason or f"app (target {target_id}) already has a live run {run_id}"
+        )
         self.target_id = target_id
         self.run_id = run_id
 
@@ -127,6 +135,32 @@ def update_target_config(session: Session, target_id: int, **fields) -> Target:
     session.commit()
     session.refresh(target)
     return target
+
+
+def assert_no_live_run(session: Session, target_id: int) -> None:
+    """Refuse a write while the target has a live run.
+
+    A live run hydrated from an older head; its next ingest would commit a tree
+    that does not contain the write, silently reverting it. Resolving that would
+    need merge logic, and there is no merge logic anywhere in this system
+    (DESIGN.md invariant 2) -- so the write is refused, not queued.
+
+    The lock row is the same one `start_run` takes, so "is a run live?" has one
+    answer rather than two that can disagree.
+    """
+    lock = session.get(AppLock, target_id)
+    if lock is None:
+        return
+    raise RunConflict(
+        target_id,
+        lock.run_id,
+        reason=(
+            f"target {target_id} has a live run ({lock.run_id}), which is working from "
+            f"an older revision. Saving now would be reverted by that run's next "
+            f"snapshot, and there is no merge. Wait for it to finish, or pause or "
+            f"stop it, then save again."
+        ),
+    )
 
 
 def list_targets(session: Session, project_id: int | None = None) -> list[Target]:

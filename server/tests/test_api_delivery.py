@@ -67,20 +67,25 @@ class _StubDelivery:
 
 @pytest.fixture()
 def client(session):
+    from app.api import get_storage
+    from tests.storage_helpers import FakeStorage
+
     app.dependency_overrides[get_session] = lambda: session
     app.dependency_overrides[get_launcher] = lambda: (lambda run_id: None)
     app.dependency_overrides[require_auth] = lambda: None
     app.dependency_overrides[get_delivery_tools] = lambda: _StubDelivery()
+    # Creating a target commits its revision 1.
+    app.dependency_overrides[get_storage] = lambda: FakeStorage()
     yield TestClient(app)
     app.dependency_overrides.clear()
 
 
 def _make_target(client, app_name="practice-target"):
     project = client.post("/projects", json={"name": "demo"}).json()
-    target = client.post(
+    created = client.post(
         f"/projects/{project['id']}/targets", json=target_body(app=app_name, name="T")
     ).json()
-    return target["id"]
+    return created["target"]["id"]
 
 
 # --- GET /targets/{id}/delivery ----------------------------------------
