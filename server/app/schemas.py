@@ -21,9 +21,35 @@ class ProjectOut(BaseModel):
     created_at: datetime
 
 
-class TargetCreate(BaseModel):
-    app: str = Field(min_length=1, max_length=100)  # apps/<app> folder name
+class TargetConfigBody(BaseModel):
+    """A target's configuration, as the portal's form sends it.
+
+    Only the format checks Pydantic can do cheaply live here; what a *valid*
+    base URL or target repo is belongs to app/target_config.py, which is the
+    one definition the write path and the cutover both use.
+    """
+
+    base_url: str = Field(min_length=1, max_length=500)
+    target_repo: str = Field(min_length=1, max_length=200)
+    target_branch: str = Field(default="", max_length=200)
+    locators: str = ""
+    agent_notes: list[str] = Field(default_factory=list)
+
+
+class TargetCreate(TargetConfigBody):
+    app: str = Field(min_length=1, max_length=100)  # the target's slug
     name: str = Field(min_length=1, max_length=200)
+
+
+class TargetConfigUpdate(BaseModel):
+    """A config edit. Every field is optional: the form sends what changed."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    base_url: str | None = Field(default=None, max_length=500)
+    target_repo: str | None = Field(default=None, max_length=200)
+    target_branch: str | None = Field(default=None, max_length=200)
+    locators: str | None = None
+    agent_notes: list[str] | None = None
 
 
 class TargetOut(BaseModel):
@@ -32,6 +58,11 @@ class TargetOut(BaseModel):
     project_id: int
     app: str
     name: str
+    base_url: str
+    locators: str
+    agent_notes: list[str]
+    target_repo: str
+    target_branch: str
     created_at: datetime
 
 

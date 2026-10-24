@@ -9,6 +9,7 @@ from app.models import Artifact
 from app.orchestrator.driver import run_pipeline
 from app.orchestrator.fake import FakeRunner
 from tests.storage_helpers import FakeStorage
+from tests.target_helpers import create_target
 
 
 @pytest.fixture()
@@ -16,7 +17,7 @@ def run_env(session_factory, tmp_path, monkeypatch):
     monkeypatch.setenv("QA_RUNS_DIR", str(tmp_path))
     with session_factory() as s:
         p = repo.create_project(s, name="demo")
-        t = repo.create_target(s, project_id=p.id, app="practice-target", name="Practice")
+        t = create_target(s, p.id, app="practice-target", name="Practice")
         run = repo.start_run(s, target_id=t.id, story_id="SCRUM-201", mode="full")
         return run.id, run.run_key, tmp_path
 

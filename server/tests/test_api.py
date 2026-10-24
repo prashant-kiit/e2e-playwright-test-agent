@@ -15,6 +15,7 @@ from app.db import get_session
 from app.main import app
 from app.tenancy import current_tenant_id
 from tests.storage_helpers import FakeStorage
+from tests.target_helpers import target_body
 
 
 @pytest.fixture()
@@ -34,7 +35,8 @@ def client(session):
 def _make_target(client, app_name="practice-target"):
     pid = client.post("/projects", json={"name": "demo"}).json()["id"]
     tid = client.post(
-        f"/projects/{pid}/targets", json={"app": app_name, "name": "Practice Target"}
+        f"/projects/{pid}/targets",
+        json=target_body(app=app_name, name="Practice Target"),
     ).json()["id"]
     return pid, tid
 
@@ -48,7 +50,7 @@ def test_create_and_list_projects(client):
 
 
 def test_create_target_under_missing_project_404(client):
-    r = client.post("/projects/999/targets", json={"app": "x", "name": "X"})
+    r = client.post("/projects/999/targets", json=target_body(app="x", name="X"))
     assert r.status_code == 404
 
 

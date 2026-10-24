@@ -16,6 +16,7 @@ from app.api import get_delivery_tools, get_launcher
 from app.auth import require_auth
 from app.db import get_session
 from app.main import app
+from tests.target_helpers import target_body
 
 
 class _StubDelivery:
@@ -36,7 +37,7 @@ def client(session):
 def _make_target(client, app_name="practice-target"):
     project = client.post("/projects", json={"name": "demo"}).json()
     target = client.post(
-        f"/projects/{project['id']}/targets", json={"app": app_name, "name": "T"}
+        f"/projects/{project['id']}/targets", json=target_body(app=app_name, name="T")
     ).json()
     return target["id"]
 

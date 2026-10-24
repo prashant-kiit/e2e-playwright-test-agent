@@ -8,7 +8,7 @@ API_URL := http://localhost:8000
 .DEFAULT_GOAL := help
 
 .PHONY: help up down start stop restart build rebuild logs ps health open dev-web dev-api clean \
-        test lint ci-test check bootstrap deliver reset
+        test lint ci-test check bootstrap deliver reset cutover
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -78,6 +78,11 @@ lint: ## Lint the backend (ruff). Run by `make test` and by CI
 
 ci-test: ## `make test` as CI runs it: fails instead of skipping if Postgres is absent
 	QA_REQUIRE_DB=1 $(MAKE) test
+
+# --- P3 cutover (one-shot, run with the repo mount still present) --------
+
+cutover: ## Snapshot every target, gate on parity, import its app.json into the row
+	cd server && uv run python -m app.cutover
 
 # --- target-repo delivery (app/delivery; was scripts/*.sh) ---------------
 # APP and STORY are required where shown. GITHUB_PAT comes from the environment

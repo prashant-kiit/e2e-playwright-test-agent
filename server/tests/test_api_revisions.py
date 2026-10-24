@@ -20,6 +20,7 @@ from app.models import FileIndex, Revision, Tenant
 from app.tenancy import current_tenant_id
 from tests.delivery_helpers import make_workspace
 from tests.storage_helpers import FakeStorage
+from tests.target_helpers import create_target
 
 
 @pytest.fixture()
@@ -43,7 +44,7 @@ def client(session, tmp_path, monkeypatch):
 @pytest.fixture()
 def target(session):
     project = repo.create_project(session, name="demo")
-    return repo.create_target(session, project_id=project.id, app="demo", name="Demo")
+    return create_target(session, project.id, app="demo", name="Demo")
 
 
 # --- the snapshot action (P2-only scaffolding) --------------------------

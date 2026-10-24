@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import apphub, delivery, repo, revisions, storage
+from . import apphub, delivery, repo, revisions, storage, target_config
 from .auth import AuthDep
 from .db import get_session
 from .domain.status import is_terminal
@@ -133,10 +133,27 @@ def list_projects(session: Session = Depends(get_session)):
 def create_target(
     project_id: int, body: TargetCreate, session: Session = Depends(get_session)
 ):
+    """Create a target and its configuration.
+
+    A configuration the write path refuses is the operator's typo, not a server
+    fault, so it answers 422 with the reason rather than 500.
+    """
     try:
-        return repo.create_target(session, project_id=project_id, app=body.app, name=body.name)
+        return repo.create_target(
+            session,
+            project_id=project_id,
+            app=body.app,
+            name=body.name,
+            base_url=body.base_url,
+            target_repo=body.target_repo,
+            target_branch=body.target_branch,
+            locators=body.locators,
+            agent_notes=body.agent_notes,
+        )
     except repo.NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except target_config.ConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/targets", response_model=list[TargetOut])

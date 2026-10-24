@@ -15,6 +15,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from . import target_config
 from .domain import lease
 from .domain.status import RunStatus, assert_transition, is_live
 from .domain.steps import Step
@@ -62,12 +63,67 @@ def get_project(session: Session, project_id: int) -> Project:
     return project
 
 
-def create_target(session: Session, project_id: int, app: str, name: str) -> Target:
+def create_target(
+    session: Session,
+    project_id: int,
+    app: str,
+    name: str,
+    *,
+    base_url: str,
+    target_repo: str,
+    target_branch: str | None = None,
+    locators: str = "",
+    agent_notes: list[str] | None = None,
+) -> Target:
+    """Create a target with its configuration, validated before the insert.
+
+    A target without a usable base URL and target repo is a target no run can
+    hydrate and no delivery can push, so the configuration is required here
+    rather than being filled in later (app/target_config.py says what "usable"
+    means). Validating first means a refused write leaves no half-made target.
+    """
     get_project(session, project_id)  # ensure the project exists
     target = Target(
-        tenant_id=current_tenant_id(), project_id=project_id, app=app, name=name
+        tenant_id=current_tenant_id(),
+        project_id=project_id,
+        app=app,
+        name=name,
+        base_url=target_config.clean_base_url(base_url),
+        target_repo=target_config.clean_target_repo(target_repo),
+        target_branch=target_config.clean_target_branch(target_branch),
+        locators=target_config.clean_locators(locators),
+        agent_notes=target_config.clean_agent_notes(agent_notes),
     )
     session.add(target)
+    session.commit()
+    session.refresh(target)
+    return target
+
+
+def update_target_config(session: Session, target_id: int, **fields) -> Target:
+    """Change a target's configuration, validated the same way as a create.
+
+    Only the fields named are touched, so the portal's form can send one changed
+    value. `app`, `name` and the identity columns are not configuration and are
+    not settable here.
+    """
+    target = get_target(session, target_id)
+    cleaners = {
+        "base_url": target_config.clean_base_url,
+        "target_repo": target_config.clean_target_repo,
+        "target_branch": target_config.clean_target_branch,
+        "locators": target_config.clean_locators,
+        "agent_notes": target_config.clean_agent_notes,
+        "name": lambda v: str(v or "").strip(),
+    }
+    unknown = set(fields) - set(cleaners)
+    if unknown:
+        raise ValueError(f"not configuration: {', '.join(sorted(unknown))}")
+    for field, value in fields.items():
+        cleaned = cleaners[field](value)
+        if field == "name" and not cleaned:
+            raise ValueError("name is required")
+        setattr(target, field, cleaned)
     session.commit()
     session.refresh(target)
     return target

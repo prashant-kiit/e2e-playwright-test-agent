@@ -7,11 +7,12 @@ import pytest
 from app import repo
 from app.domain import lease
 from app.domain.status import RunStatus
+from tests.target_helpers import create_target
 
 
 def _project_with_target(session, app="practice-target"):
     p = repo.create_project(session, name="demo")
-    t = repo.create_target(session, project_id=p.id, app=app, name="Practice Target")
+    t = create_target(session, p.id, app=app, name="Practice Target")
     return p, t
 
 
@@ -24,13 +25,13 @@ def test_create_and_list_projects(session):
 
 def test_create_target_requires_existing_project(session):
     with pytest.raises(repo.NotFound):
-        repo.create_target(session, project_id=999, app="x", name="X")
+        create_target(session, 999, app="x", name="X")
 
 
 def test_list_targets_filtered_by_project(session):
     p1, _ = _project_with_target(session, app="practice-target")
     p2 = repo.create_project(session, name="other")
-    repo.create_target(session, project_id=p2.id, app="saucedemo", name="SauceDemo")
+    create_target(session, p2.id, app="saucedemo", name="SauceDemo")
     apps_p1 = [t.app for t in repo.list_targets(session, project_id=p1.id)]
     assert apps_p1 == ["practice-target"]
     assert len(repo.list_targets(session)) == 2

@@ -18,6 +18,7 @@ from app.models import FileIndex, Revision
 from app.tenancy import current_tenant_id
 from tests.delivery_helpers import make_workspace
 from tests.storage_helpers import FakeStorage
+from tests.target_helpers import create_target
 
 # sha256("alpha") and sha256("beta"), and the tree hash over the two-file tree
 # {"a.txt": "alpha", "b/c.txt": "beta"}. All three computed with `shasum -a 256`
@@ -93,7 +94,7 @@ def target_env(session, tmp_path, monkeypatch):
     workspace = make_workspace(tmp_path, app="demo")
     monkeypatch.setenv("QA_REPO_ROOT", str(workspace))
     project = repo.create_project(session, name="demo")
-    target = repo.create_target(session, project_id=project.id, app="demo", name="Demo")
+    target = create_target(session, project.id, app="demo", name="Demo")
     return target, workspace
 
 
@@ -198,8 +199,8 @@ def test_two_targets_with_identical_infra_share_one_blob(session, tmp_path, monk
     monkeypatch.setenv("QA_REPO_ROOT", str(workspace))
 
     project = repo.create_project(session, name="demo")
-    one = repo.create_target(session, project_id=project.id, app="one", name="One")
-    two = repo.create_target(session, project_id=project.id, app="two", name="Two")
+    one = create_target(session, project.id, app="one", name="One")
+    two = create_target(session, project.id, app="two", name="Two")
     store = FakeStorage()
 
     rev_one = revisions.snapshot_target(session, one, store, author="operator")
@@ -258,7 +259,7 @@ def test_an_existing_blob_is_not_re_uploaded(target_env, session):
 
     # A second target over the same infra re-walks the same bytes.
     project_id = target.project_id
-    other = repo.create_target(session, project_id=project_id, app="demo2", name="Demo2")
+    other = create_target(session, project_id, app="demo2", name="Demo2")
     store.put_calls = 0
     revisions.snapshot_target(session, other, store, author="operator")
 
