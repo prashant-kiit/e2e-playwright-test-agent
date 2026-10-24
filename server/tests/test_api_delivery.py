@@ -338,7 +338,8 @@ def test_a_missing_git_or_pat_is_a_503_not_a_bare_500(session, monkeypatch):
     """Dependencies resolve before the handler, so this path bypasses the
     routes' own try/except. It was a 500 until get_delivery_tools caught it."""
 
-    from app.api import get_delivery_tools
+    from app.api import get_delivery_tools, get_storage
+    from tests.storage_helpers import FakeStorage
 
     def boom():
         raise delivery.GitError(("--version",), 127, "missing dependency: git")
@@ -347,6 +348,8 @@ def test_a_missing_git_or_pat_is_a_503_not_a_bare_500(session, monkeypatch):
     app.dependency_overrides[get_session] = lambda: session
     app.dependency_overrides[get_launcher] = lambda: (lambda run_id: None)
     app.dependency_overrides[require_auth] = lambda: None
+    # Creating a target commits its revision 1.
+    app.dependency_overrides[get_storage] = lambda: FakeStorage()
     # Deliberately NOT overriding get_delivery_tools: the real one must run.
     app.dependency_overrides.pop(get_delivery_tools, None)
     try:

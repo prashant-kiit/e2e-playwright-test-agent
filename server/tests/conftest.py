@@ -98,6 +98,33 @@ def _clear_bus():
     bus.reset()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_blob_storage(monkeypatch):
+    """No test may reach a live S3 endpoint.
+
+    `storage.from_env()` defaults to the dev stack's SeaweedFS on localhost, so
+    a test that forgets to override the `get_storage` dependency passes on a
+    developer machine with the stack up and fails in CI, which stands up
+    Postgres but no object store. That is exactly how one got in: a route test
+    built its own TestClient, overrode four dependencies, and committed its
+    target's revision 1 against real S3.
+
+    Blocking the seam here turns that into an immediate, self-explaining failure
+    on the machine that wrote the test. The sibling of QA_REQUIRE_DB: the suite
+    is designed to run against the in-memory fake, so reaching for the real
+    client is always the bug, never the environment.
+    """
+
+    def refuse(*args, **kwargs):
+        raise AssertionError(
+            "a test reached real blob storage via storage.from_env(); override "
+            "the app.api.get_storage dependency (or pass store=) with "
+            "tests.storage_helpers.FakeStorage"
+        )
+
+    monkeypatch.setattr("app.storage.from_env", refuse)
+
+
 # `tenants` is deliberately not truncated: its single row is seeded by the
 # migration, so it is schema-level reference data rather than test state. Wiping
 # it would leave every tenant_id FK dangling and make the fixture describe a
