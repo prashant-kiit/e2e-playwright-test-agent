@@ -32,8 +32,10 @@ from .orchestrator.runner import Emit, Runner
 from .reaper import heartbeat_during
 from .sandbox import hydrate
 from .storage import Storage
+from .target_config import config_of
 
 # A step-boundary half: it is handed the run and the step that just completed.
+# One of the two may raise, and that is deliberate -- see make_step_boundary_hook.
 BoundaryHalf = Callable[[int, Step], None]
 
 
@@ -57,10 +59,10 @@ def make_collector(
     return collect
 
 
-def make_sync_out(
+def make_ingest(
     *, session_factory: SessionFactory = SessionLocal, store: Storage | None = None
 ) -> BoundaryHalf:
-    """A sync_out(run_id, step) callback that commits a revision of the worktree.
+    """An ingest(run_id, step) callback that commits a revision of the worktree.
 
     Upload the tracked tree's blobs, then commit one revision naming them. A
     step that changed no tracked file commits nothing: three of the five steps
@@ -69,23 +71,34 @@ def make_sync_out(
 
     It reads the run's own hydrated worktree, which is the only tree the agent
     worked in, so a revision describes that run's work and nothing else.
+
+    **The generated entries are re-rendered before the scan.** Paired with
+    hydrate's render step, that gives the generated config exactly one author:
+    whatever the agent did to it is overwritten by the row's version before the
+    tree is decided, so an edit to it is not a tree change and never reaches a
+    revision. An edit to a real file in the same step still is one.
+
+    Raises on failure, and the caller does not catch it. See
+    make_step_boundary_hook.
     """
     store = store or storage.from_env()
 
-    def sync_out(run_id: int, step: Step) -> None:
+    def ingest(run_id: int, step: Step) -> None:
         with session_factory() as s:
             run = repo.get_run(s, run_id)
+            root = config.worktree_dir(run.run_key)
+            hydrate.render_generated(root, config_of(run.target))
             revisions.commit_revision(
                 s,
                 run.target,
                 store,
-                config.worktree_dir(run.run_key),
+                root,
                 # Fits Revision.author's 100 chars: run_key is at most 80.
                 author=f"run:{run.run_key}",
                 produced_by_run_id=run.id,
             )
 
-    return sync_out
+    return ingest
 
 
 def make_step_boundary_hook(
@@ -94,49 +107,56 @@ def make_step_boundary_hook(
     session_factory: SessionFactory = SessionLocal,
     store: Storage | None = None,
     collect: BoundaryHalf | None = None,
-    sync_out: BoundaryHalf | None = None,
+    ingest: BoundaryHalf | None = None,
 ) -> BoundaryHalf:
     """The driver's ONE step-boundary callable, with both halves composed in.
 
-    Order is deliberate: **artifacts first, then the revision snapshot.** The
-    existing behavior runs first and is never delayed by the new work.
+    Order is deliberate: **artifacts first, then ingest.** Evidence collection
+    runs first and is never delayed by the work that matters more.
 
-    Each half catches its own failures. The driver wraps the whole callable in a
-    single best-effort try/except, so without per-half isolation an exception
-    from artifact collection would skip the revision commit entirely -- and vice
-    versa. Both failures are reported to the run's log stream instead.
+    The two halves are treated differently, and the asymmetry is the phase:
 
-    **A failed revision write must never fail a run in P2.** While `apps/` is
-    authoritative, the driver's best-effort treatment of this hook is exactly
-    right, and it is what makes the phase's "no behavior change" promise true: a
-    total failure of the revision model costs nothing today. P3 inverts this --
-    once truth has moved into Postgres, a failed sync-out *has* to fail the run.
-    Do not "fix" the swallowed exception before then.
+    - **Artifact collection stays best-effort.** Its failure is reported to the
+      run's log and swallowed. Evidence is not the work; losing a trace is not a
+      reason to fail a run that produced a healed suite.
+    - **A failed ingest fails the run.** It is reported to the log and then
+      re-raised. P2's code said so in a comment, because while `apps/` was
+      authoritative a swallowed failure cost nothing -- and once truth has moved
+      into Postgres, a swallowed failure means a run that reports success having
+      dropped its work. That inversion is not a regression in robustness; it is
+      the point at which a dropped write stops being free.
+
+    Catching the artifact half here (rather than relying on the driver) is what
+    lets the ingest half still run when the sweep fails, and what lets ingest's
+    exception reach the driver rather than being lost behind the first failure.
     """
     # Both halves talk to the same object store, so build the client once
     # rather than once per half.
-    if store is None and (collect is None or sync_out is None):
+    if store is None and (collect is None or ingest is None):
         store = storage.from_env()
 
-    halves: tuple[tuple[str, BoundaryHalf], ...] = (
-        (
-            "artifact collection",
-            collect if collect is not None
-            else make_collector(session_factory=session_factory, store=store),
-        ),
-        (
-            "revision snapshot",
-            sync_out if sync_out is not None
-            else make_sync_out(session_factory=session_factory, store=store),
-        ),
+    collect_half = (
+        collect if collect is not None
+        else make_collector(session_factory=session_factory, store=store)
+    )
+    ingest_half = (
+        ingest if ingest is not None
+        else make_ingest(session_factory=session_factory, store=store)
     )
 
     def on_step_boundary(run_id: int, step: Step) -> None:
-        for name, half in halves:
-            try:
-                half(run_id, step)
-            except Exception as exc:
-                emit(f"=== step {step.value}: {name} failed: {exc} ===")
+        try:
+            collect_half(run_id, step)
+        except Exception as exc:
+            emit(f"=== step {step.value}: artifact collection failed: {exc} ===")
+
+        try:
+            ingest_half(run_id, step)
+        except Exception as exc:
+            # Reported *and* propagated: the run fails, and the operator reading
+            # the log does not have to infer the reason from a status.
+            emit(f"=== step {step.value}: ingest failed: {exc} ===")
+            raise
 
     return on_step_boundary
 

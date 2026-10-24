@@ -18,7 +18,7 @@ import pytest
 from app import launcher, repo, revisions
 from app.domain.status import RunStatus
 from app.domain.steps import STEP_ORDER, Step
-from app.models import FileIndex, Revision
+from app.models import AppLock, FileIndex
 from app.orchestrator.fake import FakeRunner
 from tests.delivery_helpers import make_worktree
 from tests.storage_helpers import FakeStorage
@@ -176,12 +176,13 @@ def test_a_second_run_starts_from_the_first_runs_revision(run_env, session_facto
     assert inherited == ["// first\n"]
 
 
-# --- the step-boundary halves -------------------------------------------
+# --- the step-boundary halves, and the inverted failure policy -------------
 #
-# P2's failure policy, unchanged here: artifact collection and the revision
-# commit each catch their own failures and a run still completes. P3-05 inverts
-# the revision half -- a failed ingest must fail the run -- which is that
-# ticket's whole point and is asserted there.
+# P3 inverts P2's central safety property, and the inversion is the phase.
+# While `apps/` was authoritative a swallowed revision-write failure cost
+# nothing; now that truth has moved, it means a run that reports success having
+# dropped its work. So: **a failed ingest fails the run.** Artifact collection
+# stays best-effort and still runs first.
 
 def test_artifacts_are_collected_before_the_revision_snapshot(run_env, session_factory):
     """Existing behavior runs first and is never delayed by new work."""
@@ -205,35 +206,10 @@ def test_artifacts_are_collected_before_the_revision_snapshot(run_env, session_f
     assert "revision" in order
 
 
-def test_an_artifact_collector_that_raises_does_not_prevent_the_revision_commit(
-    run_env, session_factory
-):
-    """Without per-half isolation a failing collector would silently skip the
-    revision commit, and vice versa."""
+def test_an_ingest_that_raises_fails_the_run(run_env, session_factory):
+    """The inversion. A run reported as succeeded must never mean "the work it
+    did was dropped"."""
     run_id, target_id, store = run_env
-
-    def exploding_collect(run_id, step):
-        raise RuntimeError("artifact sweep failed")
-
-    lines = _drive(
-        session_factory,
-        run_id,
-        store,
-        _ChangesOn({Step.GENERATE: "// gen\n"}),
-        collect_override=exploding_collect,
-    )
-
-    assert [r.rev for r in _revs(session_factory, target_id)] == [2, 1]
-    with session_factory() as s:
-        assert repo.get_run(s, run_id).status is RunStatus.COMPLETED
-    assert any("artifact sweep failed" in line for line in lines)
-
-
-def test_a_revision_write_that_raises_does_not_prevent_artifact_collection(
-    run_env, session_factory
-):
-    run_id, _target_id, store = run_env
-    collected: list[Step] = []
 
     class Exploding(_SharesBlobs):
         def put_file(self, key, path, content_type=None):
@@ -244,19 +220,94 @@ def test_a_revision_write_that_raises_does_not_prevent_artifact_collection(
         run_id,
         Exploding(store),
         _ChangesOn({Step.GENERATE: "// gen\n"}),
-        collect_override=lambda run_id, step: collected.append(step),
     )
 
-    assert collected == list(STEP_ORDER), "artifacts are swept at every boundary"
     with session_factory() as s:
-        assert list(s.scalars(repo.select(Revision).where(Revision.rev > 1))) == []
-        assert repo.get_run(s, run_id).status is RunStatus.COMPLETED
+        run = repo.get_run(s, run_id)
+        assert run.status is RunStatus.FAILED
+        assert "object store is down" in (run.error or "")
     assert any("object store is down" in line for line in lines)
+
+
+def test_a_failed_ingest_frees_the_lock(run_env, session_factory):
+    """Exactly as a crashed runner does: the target is not held by a dead run."""
+    run_id, target_id, store = run_env
+
+    class Exploding(_SharesBlobs):
+        def put_file(self, key, path, content_type=None):
+            raise RuntimeError("object store is down")
+
+    _drive(
+        session_factory, run_id, Exploding(store), _ChangesOn({Step.GENERATE: "// g\n"})
+    )
+
+    with session_factory() as s:
+        assert s.get(AppLock, target_id) is None
+        # ...and the target can be run again.
+        again = repo.start_run(s, target_id=target_id, story_id="SCRUM-1", mode="full")
+        assert again.id != run_id
+
+
+def test_a_failed_ingest_stops_the_run_at_that_step(run_env, session_factory):
+    """It fails the step and the run, so no later step runs on work that was
+    never recorded."""
+    run_id, _target_id, store = run_env
+    attempted: list[Step] = []
+
+    class Exploding(_SharesBlobs):
+        def put_file(self, key, path, content_type=None):
+            raise RuntimeError("object store is down")
+
+    class Recording(_ChangesOn):
+        def run_step(self, ctx, emit):
+            attempted.append(ctx.step)
+            return super().run_step(ctx, emit)
+
+    _drive(
+        session_factory,
+        run_id,
+        Exploding(store),
+        Recording({Step.READ_STORY: "// first step changes the tree\n"}),
+    )
+
+    assert attempted == [Step.READ_STORY], "no step after the failed boundary"
+
+
+def test_an_artifact_collector_that_raises_still_does_not_fail_the_run(
+    run_env, session_factory
+):
+    """Artifact collection stays best-effort: evidence is not the work."""
+    run_id, target_id, store = run_env
+    ingested: list[int] = []
+
+    class Counting(_SharesBlobs):
+        def put_file(self, key, path, content_type=None):
+            ingested.append(1)
+            super().put_file(key, path, content_type)
+
+    def exploding_collect(run_id, step):
+        raise RuntimeError("artifact sweep failed")
+
+    lines = _drive(
+        session_factory,
+        run_id,
+        Counting(store),
+        _ChangesOn({Step.GENERATE: "// gen\n"}),
+        collect_override=exploding_collect,
+    )
+
+    with session_factory() as s:
+        assert repo.get_run(s, run_id).status is RunStatus.COMPLETED
+    assert [r.rev for r in _revs(session_factory, target_id)] == [2, 1]
+    assert ingested, "the ingest half ran even though the artifact half raised"
+    assert any("artifact sweep failed" in line for line in lines)
 
 
 def test_both_halves_report_their_failures_to_the_runs_log_stream(
     run_env, session_factory
 ):
+    """The ingest half propagates *and* reports: the operator reading the log
+    should not have to infer the reason from the run's status."""
     run_id, _target_id, store = run_env
 
     class Exploding(_SharesBlobs):
@@ -276,9 +327,11 @@ def test_both_halves_report_their_failures_to_the_runs_log_stream(
 
     assert any("artifacts are gone" in line for line in lines)
     assert any("blobs are gone" in line for line in lines)
+    with session_factory() as s:
+        assert repo.get_run(s, run_id).status is RunStatus.FAILED
 
 
-def test_a_failed_revision_commit_leaves_the_previous_head_intact(
+def test_a_failed_ingest_leaves_the_previous_head_intact(
     run_env, session_factory
 ):
     """Blob before row (invariant 3): a failure may leave an unreferenced blob,
@@ -303,3 +356,82 @@ def test_a_failed_revision_commit_leaves_the_previous_head_intact(
             if row.path == "tests/checkout/generated.spec.ts"
         ]
     assert orphans == [], "no partial file_index"
+
+
+# --- generated entries have exactly one author ----------------------------
+
+def test_an_agent_edit_to_a_generated_file_is_discarded_at_ingest(
+    run_env, session_factory
+):
+    """Ingest re-renders the generated entries before it scans, so an agent's
+    edit to the config never reaches a revision."""
+    run_id, target_id, store = run_env
+
+    class EditsTheConfig(FakeRunner):
+        def run_step(self, ctx, emit):
+            if ctx.step is Step.GENERATE:
+                (ctx.worktree / "playwright.config.ts").write_text(
+                    "// the agent rewrote this\n"
+                )
+            return super().run_step(ctx, emit)
+
+    _drive(session_factory, run_id, store, EditsTheConfig())
+
+    assert [r.rev for r in _revs(session_factory, target_id)] == [1], (
+        "an edit to a generated file is not a tree change"
+    )
+    with session_factory() as s:
+        head = revisions.head_revision(s, target_id)
+        row = revisions.get_file(s, head.id, "playwright.config.ts")
+        blob, _ct = store.objects[row.blob_key]
+    assert b"the agent rewrote this" not in blob
+
+
+def test_an_agent_edit_to_a_generated_file_does_not_mask_a_real_change(
+    run_env, session_factory
+):
+    run_id, target_id, store = run_env
+
+    class EditsBoth(FakeRunner):
+        def run_step(self, ctx, emit):
+            if ctx.step is Step.GENERATE:
+                (ctx.worktree / "playwright.config.ts").write_text("// rewritten\n")
+                (ctx.worktree / "tests" / "checkout" / "new.spec.ts").write_text("// new\n")
+            return super().run_step(ctx, emit)
+
+    _drive(session_factory, run_id, store, EditsBoth())
+
+    assert [r.rev for r in _revs(session_factory, target_id)] == [2, 1]
+    with session_factory() as s:
+        head = revisions.head_revision(s, target_id)
+        paths = {row.path for row in revisions.list_files(s, head.id)}
+        row = revisions.get_file(s, head.id, "playwright.config.ts")
+        blob, _ct = store.objects[row.blob_key]
+    assert "tests/checkout/new.spec.ts" in paths
+    assert b"rewritten" not in blob
+
+
+# --- blob before row, the skip check and the single transaction ------------
+
+def test_blob_before_row_still_holds(run_env, session_factory):
+    """A revision never names bytes that are not in the store yet."""
+    run_id, target_id, store = run_env
+    order: list[str] = []
+
+    class Watching(_SharesBlobs):
+        def put_file(self, key, path, content_type=None):
+            order.append("blob")
+            super().put_file(key, path, content_type)
+
+    _drive(
+        session_factory,
+        run_id,
+        Watching(store),
+        _ChangesOn({Step.GENERATE: "// gen\n"}),
+    )
+
+    head = _revs(session_factory, target_id)[0]
+    assert order, "a blob was uploaded"
+    with session_factory() as s:
+        for row in revisions.list_files(s, head.id):
+            assert row.blob_key in store.objects

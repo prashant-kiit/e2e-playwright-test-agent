@@ -26,11 +26,13 @@ def run_pipeline(
     collect: Callable[[int, object], None] | None = None,
 ) -> None:
     """`collect` is the driver's ONE step-boundary hook, fired after each
-    completed step. Artifact collection is composed into it by the launcher.
+    completed step. Artifact collection and ingest are composed into it by the
+    launcher, which decides which of them may fail a run.
 
     Keep it single (DESIGN.md §13). Work that needs to happen at a step boundary
-    -- P2's sync-out, uploading blobs and committing a revision -- is composed
-    into this callable by the caller, not added as a second parameter.
+    -- uploading blobs and committing revision N+1 -- is composed into this
+    callable by the caller, not added as a second parameter. Hydrate and
+    teardown run in the launcher *around* this function for the same reason.
     """
     emit = emit or (lambda line: None)
     collect = collect or (lambda run_id, step: None)
@@ -110,13 +112,22 @@ def run_pipeline(
 
         with session_factory() as s:
             repo.complete_step(s, run_id, step)
-        try:  # the step-boundary hook is best-effort; never fail the run on it
+
+        # The step-boundary hook is NOT best-effort. Its ingest half is what
+        # records the step's work, so a hook that raises means the work was
+        # dropped -- and a run that reports success having dropped its work is
+        # the failure mode P3 exists to make impossible. It therefore fails the
+        # step and the run exactly as a crashed runner does, freeing the lock
+        # and recording the reason. (P2 swallowed this, correctly, while `apps/`
+        # was authoritative; that is the behaviour P3 inverts.)
+        try:
             collect(run_id, step)
         except Exception as exc:
-            # A backstop, not the usual path: the launcher's composed hook
-            # catches and reports each half itself, so reaching here means the
-            # composition raised rather than one of the halves.
-            emit(f"=== step {step.value}: step-boundary hook failed: {exc} ===")
+            with session_factory() as s:
+                repo.fail_step(s, run_id, step)
+                repo.fail_run(s, run_id, f"{step.value} step boundary failed: {exc}")
+            emit(f"=== step {step.value}: step boundary FAILED: {exc} ===")
+            return
         emit(f"=== step {step.value} done ===")
 
     with session_factory() as s:
