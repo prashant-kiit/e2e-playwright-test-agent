@@ -173,11 +173,23 @@ class ResetBody(BaseModel):
     dry_run: bool = False
 
 
-class BootstrappedOut(BaseModel):
+class DeliveryStateOut(BaseModel):
+    """"Is this delivered?", answered from Postgres (invariant 5).
+
+    `delivered` and `revisions_ahead` are the two states the portal shows. They
+    cost one query and no network call, so the answer is the same for everyone
+    and does not depend on GitHub being reachable.
+    """
+
     app: str
     repo: str
     branch: str
     bootstrapped: bool
+    delivered: bool
+    rev: int | None
+    delivered_sha: str | None
+    revisions_ahead: int
+    summary: str
 
 
 class DeliveryOut(BaseModel):

@@ -18,9 +18,23 @@ import pytest
 
 from app import cutover, monorepo, repo, revisions
 from app.models import FileIndex
+from app.target_config import TargetConfig
 from tests.delivery_helpers import make_workspace
 from tests.storage_helpers import FakeStorage
 from tests.target_helpers import backfilled_target
+
+# The configuration apps/demo/app.json holds in the test workspace, as the
+# cutover will import it -- so a snapshot taken here renders the same generated
+# config the cutover's own staging does.
+STAGED_CONFIG = TargetConfig(
+    app="demo",
+    name="Demo",
+    base_url="https://demo.example.com",
+    locators="data-testid",
+    agent_notes=(),
+    target_repo="o/r",
+    target_branch="master",
+)
 
 
 @pytest.fixture()
@@ -102,7 +116,7 @@ def test_a_red_target_is_not_imported(session, target, workspace):
     """The gate refuses *before* writing the row, so a blocked cutover leaves
     the configuration exactly as it was."""
     store = FakeStorage()
-    with monorepo.staged_tree(target.app) as root:
+    with monorepo.staged_tree(target.app, STAGED_CONFIG) as root:
         revisions.commit_revision(session, target, store, root, author="operator")
     head = revisions.head_revision(session, target.id)
     row = session.get(FileIndex, {"revision_id": head.id, "path": "seed.spec.ts"})

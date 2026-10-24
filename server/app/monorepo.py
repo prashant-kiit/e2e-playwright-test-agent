@@ -22,12 +22,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from . import config
-from .delivery.render import (
-    TRACKED_APP_FILES,
-    TRACKED_APP_TREES,
-    read_target_config,
-    write_infra,
-)
+from .delivery.render import TRACKED_APP_FILES, TRACKED_APP_TREES, write_infra
+from .target_config import TargetConfig
 
 
 def app_dir(app: str) -> Path:
@@ -35,13 +31,14 @@ def app_dir(app: str) -> Path:
 
 
 @contextmanager
-def staged_tree(app: str) -> Iterator[Path]:
+def staged_tree(app: str, cfg: TargetConfig) -> Iterator[Path]:
     """`apps/<app>/` plus the rendered infra set, as a worktree root.
 
-    The configuration the generated entry is rendered from still comes from
-    app.json, because this runs while that file is what there is.
+    `cfg` is passed in rather than read here: during the cutover it comes from
+    the app.json being imported, and for the two P2 revision routes it comes
+    from the target's row. Either way the generated entry is rendered from a
+    configuration the caller vouches for.
     """
-    cfg = read_target_config(app)
     tmp = Path(tempfile.mkdtemp(prefix="qa-monorepo-"))
     try:
         root = tmp / "worktree"

@@ -9,14 +9,21 @@ wholesale-replace semantics for real, with no network and no credentials.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.delivery.catalog import DeliveryState
+from app.delivery.errors import DeliveryError
 from app.delivery.git import Git
 from app.delivery.github import PullRequest
 from app.delivery.render import write_infra
 from app.delivery.tools import Tools
+from app.target_config import TargetConfig
 
 INFRA_CONTENT = {
     "package.json": '{"name": "qa"}\n',
@@ -83,12 +90,67 @@ class LocalTools(Tools):
         return str(self.remote)
 
 
-class FakeGitHub:
-    """Only the operations the delivery tools call, with recorded state."""
+class DictCatalog:
+    """A Catalog backed by a directory and a config value.
 
-    def __init__(self, *, has_commits: bool = False, bootstrapped: bool = False) -> None:
+    The delivery seam's fourth field, faked the way the other three are: one
+    more object on the double, no database. The source directory stands in for a
+    materialized head revision, so git and the filesystem stay real and only the
+    things that genuinely need a database are substituted.
+    """
+
+    def __init__(self, source: Path, cfg: TargetConfig, *, rev: int | None = 1) -> None:
+        self.source = source
+        self.cfg = cfg
+        self.rev = rev
+        self.delivered: list[str] = []
+        self.materialized = 0
+
+    def config(self, app: str) -> TargetConfig:
+        if app != self.cfg.app:
+            raise DeliveryError(f"no such target: {app!r}")
+        return self.cfg
+
+    @contextmanager
+    def materialize(self, app: str) -> Iterator[Path]:
+        """A copy, removed afterwards -- like the real one, so a test that
+        mutates the workspace cannot quietly edit the fixture."""
+        self.config(app)
+        if self.rev is None:
+            raise DeliveryError(f"target {app!r} has no head revision")
+        self.materialized += 1
+        tmp = Path(tempfile.mkdtemp(prefix="fake-delivery-"))
+        try:
+            root = tmp / "workspace"
+            shutil.copytree(self.source, root)
+            yield root
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def state(self, app: str) -> DeliveryState:
+        self.config(app)
+        return DeliveryState(
+            rev=self.rev,
+            tree_hash=None,
+            delivered_sha=self.delivered[-1] if self.delivered else None,
+            revisions_ahead=0 if self.delivered else (self.rev or 0),
+            ever_delivered=bool(self.delivered),
+        )
+
+    def record_delivered(self, app: str, sha: str) -> None:
+        self.config(app)
+        self.delivered.append(sha)
+
+
+class FakeGitHub:
+    """Only the operations the delivery tools call, with recorded state.
+
+    `is_bootstrapped`/`file_exists` are gone: "has anything been delivered to
+    this repo?" is a Postgres query now, so it is the catalog that answers it.
+    """
+
+    def __init__(self, *, has_commits: bool = False) -> None:
         self.has_commits = has_commits
-        self.bootstrapped = bootstrapped
         self.prs: dict[str, PullRequest] = {}
         self.created: list[str] = []
         self.updated: list[int] = []
@@ -96,12 +158,6 @@ class FakeGitHub:
 
     def repo_has_commits(self, repo: str) -> bool:
         return self.has_commits
-
-    def file_exists(self, repo: str, path: str, ref: str) -> bool:
-        return self.bootstrapped
-
-    def is_bootstrapped(self, repo: str, app: str, branch: str) -> bool:
-        return self.bootstrapped
 
     def branch_exists(self, repo: str, branch: str) -> bool:
         return branch in self.prs
@@ -140,8 +196,28 @@ class FakeGitHub:
         return pr
 
 
-def make_tools(workspace: Path, remote: Path, gh: FakeGitHub) -> LocalTools:
-    return LocalTools(gh=gh, git=Git(), token="t0ken", workspace=workspace, remote=remote)
+def make_tools(
+    source: Path,
+    remote: Path,
+    gh: FakeGitHub,
+    *,
+    cfg: TargetConfig | None = None,
+    catalog: DictCatalog | None = None,
+) -> LocalTools:
+    """Delivery's whole seam, with only the REST boundary and the database faked.
+
+    `source` is a worktree-shaped tree standing in for the materialized head
+    revision; git, the filesystem and the infra templates are all real.
+    """
+    from tests.target_helpers import CONFIG
+
+    return LocalTools(
+        gh=gh,
+        git=Git(),
+        token="t0ken",
+        catalog=catalog or DictCatalog(source, cfg or CONFIG),
+        remote=remote,
+    )
 
 
 def remote_files(bare: Path, branch: str = "master") -> set[str]:
@@ -164,6 +240,22 @@ def remote_branches(bare: Path) -> set[str]:
         check=True,
     )
     return set(out.stdout.split())
+
+
+def remote_commit_messages(bare: Path, branch: str = "master") -> str:
+    """Every commit message on `branch`, bodies included.
+
+    `remote_log` reports subjects (`%s`), which is what most assertions want.
+    The Run-ID lives in the *body*, so asserting on it needs `%B`.
+    """
+    out = subprocess.run(
+        ["git", "log", "--format=%B", branch],
+        cwd=str(bare),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return out.stdout
 
 
 def remote_log(bare: Path, branch: str = "master") -> list[str]:

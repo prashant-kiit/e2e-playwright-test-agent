@@ -1,9 +1,14 @@
 """GitHub over REST, replacing the `gh` CLI (DESIGN.md §11, decision 20).
 
-Six operations are all the delivery tools ever needed from `gh`. The httpx
-client is injected rather than constructed here, so tests drive the whole
-surface through httpx.MockTransport with no network -- the same
-constructor-injection seam `Storage` uses in app/storage.py.
+Five operations are all the delivery tools ever need from `gh`. The httpx client
+is injected rather than constructed here, so tests drive the whole surface
+through httpx.MockTransport with no network -- the same constructor-injection
+seam `Storage` uses in app/storage.py.
+
+P3 deleted the sixth. "Is this target bootstrapped?" used to be two REST calls
+asking whether the branch carried an `app.json` and a `playwright.config.ts`;
+it is a Postgres query now (`delivery.catalog`), because the answer must be the
+same for everyone and must not depend on the network being up.
 """
 
 from __future__ import annotations
@@ -11,7 +16,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -51,26 +55,24 @@ class TokenInfo:
         return "repo" in self.scopes and "workflow" in self.scopes
 
 
-def token_from_env(repo_root: Path | None = None) -> str:
-    """GITHUB_PAT from the environment, else from the repo-root .env.
+def token_from_env() -> str:
+    """GITHUB_PAT from the environment. The environment only.
 
-    Ports qa-lib.sh `qa_load_env` + `qa_token`, minus the `gh auth token`
-    fallback -- `gh` is gone, so the PAT is the only credential path.
+    qa-lib.sh read it from a `.env` beside the workspace as a fallback, and that
+    fallback is deleted here. From P3 the workspace is a tree an LLM wrote while
+    reading a live customer website, so looking for a credential anywhere near
+    it is an exfiltration path -- the single most dangerous line this phase could
+    have introduced. DESIGN.md §6 ("no GitHub credentials ever enter a sandbox")
+    does not formally bind until P4; the lookup path is introduced here, so the
+    rule is applied here.
+
+    Per-tenant encrypted credentials are P5; this stays a process-level
+    environment variable until then.
     """
     token = os.environ.get("GITHUB_PAT", "").strip()
     if token:
         return token
-    if repo_root is not None:
-        env_file = repo_root / ".env"
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                if key.strip() == "GITHUB_PAT":
-                    return value.strip().strip("'\"")
-    raise CredentialError("no GitHub token: set GITHUB_PAT in the environment or in .env")
+    raise CredentialError("no GitHub token: set GITHUB_PAT in the environment")
 
 
 def clone_url(repo: str, token: str) -> str:
@@ -125,7 +127,7 @@ class GitHubClient:
                 f"{resp.request.method} {resp.request.url.path}"
             )
 
-    # --- the six operations ----------------------------------------------
+    # --- the five operations ---------------------------------------------
 
     def repo_has_commits(self, repo: str) -> bool:
         """Ports `qa_repo_has_commits`: the API answers 409 for an empty repo."""
@@ -135,17 +137,6 @@ class GitHubClient:
         if resp.status_code == 404:
             raise DeliveryError(f"no such repo (or no access): {repo}")
         return resp.is_success
-
-    def file_exists(self, repo: str, path: str, ref: str) -> bool:
-        """Ports `qa_file_on_branch`."""
-        return self._get(f"/repos/{repo}/contents/{path}", ref=ref).is_success
-
-    def is_bootstrapped(self, repo: str, app: str, branch: str) -> bool:
-        """Ports `qa_is_bootstrapped`: the branch carries this app's app.json
-        AND playwright.config.ts."""
-        return self.file_exists(repo, f"apps/{app}/app.json", branch) and self.file_exists(
-            repo, "playwright.config.ts", branch
-        )
 
     def branch_exists(self, repo: str, branch: str) -> bool:
         return self._get(f"/repos/{repo}/branches/{branch}").is_success

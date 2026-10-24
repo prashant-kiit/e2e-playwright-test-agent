@@ -23,15 +23,16 @@ than a runbook with a "did you already do step 2?" footnote.
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from . import monorepo, repo, revisions, storage, target_config
+from . import config, monorepo, repo, revisions, storage, target_config
 from .delivery.errors import DeliveryError
-from .delivery.render import read_app_json
 from .models import Target
 from .storage import Storage
 
@@ -39,6 +40,26 @@ from .storage import Storage
 # command is testable without a particular on-disk layout, and so the one place
 # that still reads app.json is visible from here.
 ConfigReader = Callable[[str], dict]
+
+
+def app_json_path(app: str) -> Path:
+    return config.repo_root() / "apps" / app / "app.json"
+
+
+def read_app_json(app: str) -> dict:
+    """The configuration file this command exists to import.
+
+    It lives here rather than in app/delivery because delivery does not read it
+    any more: a target's configuration reaches delivery through `Tools` as a row
+    (P3-07). This is the last reader, and it goes with the mount.
+    """
+    path = app_json_path(app)
+    if not path.exists():
+        raise DeliveryError(f"no such app: apps/{app}/app.json not found")
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise DeliveryError(f"apps/{app}/app.json is not valid JSON: {exc}") from exc
 
 
 class CutoverError(Exception):
@@ -126,8 +147,19 @@ def _cut_over_target(
     config = _config_from_app_json(target.app, read_config)
 
     # The P2 path, unchanged -- over `apps/<app>/` staged as the worktree the
-    # tracked tree is now defined against.
-    with monorepo.staged_tree(target.app) as root:
+    # tracked tree is now defined against. The generated entry is rendered from
+    # the configuration being imported, so the snapshot is the tree this target
+    # will hydrate once the cutover has written that configuration down.
+    staged_config = target_config.TargetConfig(
+        app=target.app,
+        name=config["name"],
+        base_url=config["base_url"],
+        locators=config["locators"],
+        agent_notes=tuple(config["agent_notes"]),
+        target_repo=config["target_repo"],
+        target_branch=config["target_branch"],
+    )
+    with monorepo.staged_tree(target.app, staged_config) as root:
         committed = revisions.commit_revision(
             session, target, store, root, author="cutover"
         )

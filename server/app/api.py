@@ -28,9 +28,9 @@ from .schemas import (
     ArtifactOut,
     BootstrapAppOut,
     BootstrapBody,
-    BootstrappedOut,
     DeliverBody,
     DeliveryOut,
+    DeliveryStateOut,
     FileIndexOut,
     ParityOut,
     ProjectCreate,
@@ -47,6 +47,7 @@ from .schemas import (
     TargetOut,
 )
 from .storage import Storage
+from .target_config import config_of
 
 # Everything on this router requires a valid session cookie (tests override
 # require_auth to a no-op). Health and /auth/* live off this router.
@@ -163,19 +164,29 @@ def list_targets(project_id: int | None = None, session: Session = Depends(get_s
 
 # --- delivery: bootstrap-check / deliver / reset (P1) --------------------
 
-@router.get("/targets/{target_id}/bootstrapped", response_model=BootstrappedOut)
-def target_bootstrapped(
+@router.get("/targets/{target_id}/delivery", response_model=DeliveryStateOut)
+def target_delivery_state(
     target_id: int,
     session: Session = Depends(get_session),
     tools: delivery.Tools = Depends(get_delivery_tools),
 ):
+    """Delivered, or N revisions ahead. One Postgres query, no network call."""
     target = _target_or_404(session, target_id)
     try:
-        ready, ref = delivery.is_bootstrapped(target.app, tools=tools)
+        ref = delivery.target_ref(tools.catalog.config(target.app))
+        state = tools.state(target.app)
     except delivery.DeliveryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return BootstrappedOut(
-        app=ref.app, repo=ref.repo, branch=ref.branch, bootstrapped=ready
+    return DeliveryStateOut(
+        app=ref.app,
+        repo=ref.repo,
+        branch=ref.branch,
+        bootstrapped=state.bootstrapped,
+        delivered=state.delivered,
+        rev=state.rev,
+        delivered_sha=state.delivered_sha,
+        revisions_ahead=state.revisions_ahead,
+        summary=state.describe(),
     )
 
 
@@ -202,8 +213,6 @@ def deliver_story(
             dry_run=body.dry_run,
             tools=tools,
         )
-    except delivery.NotBootstrapped as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except delivery.CredentialError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except delivery.DeliveryError as exc:
@@ -213,7 +222,11 @@ def deliver_story(
         message=result.message,
         pr_url=result.pr_url,
         pr_number=result.pr_number,
-        detail={"branch": result.branch, "committed": result.committed},
+        detail={
+            "branch": result.branch,
+            "committed": result.committed,
+            "delivered_sha": result.delivered_sha,
+        },
     )
 
 
@@ -305,7 +318,7 @@ def snapshot_target_tree(
     """
     target = _target_or_404(session, target_id)
     try:
-        with monorepo.staged_tree(target.app) as root:
+        with monorepo.staged_tree(target.app, config_of(target)) as root:
             committed = revisions.commit_revision(
                 session, target, store, root, author="operator"
             )
@@ -349,7 +362,7 @@ def target_parity(target_id: int, session: Session = Depends(get_session)):
     to surface.
     """
     target = _target_or_404(session, target_id)
-    with monorepo.staged_tree(target.app) as root:
+    with monorepo.staged_tree(target.app, config_of(target)) as root:
         parity = revisions.target_parity(session, target, root)
     return ParityOut(
         has_revision=parity.has_revision,

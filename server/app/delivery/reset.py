@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import ConfirmationMismatch
-from .render import resolve_target
+from .render import target_ref
 from .tools import Tools, default_tools
 
 
@@ -37,7 +37,7 @@ class ResetResult:
 def plan_reset(app: str, *, tools: Tools | None = None) -> ResetResult:
     """What a reset would do, changing nothing (the --dry-run path)."""
     tools = tools or default_tools()
-    target = resolve_target(app)
+    target = target_ref(tools.catalog.config(app))
 
     if not tools.gh.repo_has_commits(target.repo):
         return ResetResult(
@@ -79,7 +79,7 @@ def reset_target(
     tools: Tools | None = None,
 ) -> ResetResult:
     tools = tools or default_tools()
-    target = resolve_target(app)
+    target = target_ref(tools.catalog.config(app))
 
     if dry_run:
         return plan_reset(app, tools=tools)

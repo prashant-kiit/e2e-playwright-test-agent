@@ -18,8 +18,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import config
-from ..target_config import DEFAULT_BRANCH, PLACEHOLDER_REPO, TargetConfig
+from ..target_config import TargetConfig
 from .errors import DeliveryError
 
 # A story heading: "# User Story: SCRUM-202 - Account Sign-up Form"
@@ -292,69 +291,29 @@ def _is_untracked(rel: str) -> bool:
     return parts[-1].endswith(UNTRACKED_SUFFIXES)
 
 
-def app_json_path(app: str) -> Path:
-    return config.repo_root() / "apps" / app / "app.json"
-
-
-def read_app_json(app: str) -> dict:
-    path = app_json_path(app)
-    if not path.exists():
-        raise DeliveryError(f"no such app: apps/{app}/app.json not found")
-    try:
-        return json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
-        raise DeliveryError(f"apps/{app}/app.json is not valid JSON: {exc}") from exc
-
-
-def read_target_config(app: str) -> TargetConfig:
-    """A target's configuration, read from app.json.
-
-    **Interim.** P3-07 replaces this with the `targets` row reached through
-    delivery's injected `Tools`, which is what makes delivery stop touching the
-    filesystem. It exists for one ticket so the infra renderer has a
-    configuration to render from while apps/ is still authoritative.
-    """
-    data = read_app_json(app)
-    return TargetConfig(
-        app=app,
-        name=data.get("name") or app,
-        base_url=str(data.get("baseURL") or "").strip(),
-        locators=str(data.get("locators") or "").strip(),
-        agent_notes=tuple(data.get("agentNotes") or ()),
-        target_repo=str(data.get("targetRepo") or "").strip(),
-        target_branch=str(data.get("targetBranch") or "").strip() or DEFAULT_BRANCH,
-    )
-
-
-def infra_files(app: str) -> tuple[str, ...]:
-    """Every path bootstrap puts in the target repo, at its destination.
-
-    The infra entries' destinations plus the two app-scoped files. `app.json` is
-    here only while apps/ is still authoritative -- P3-07 stops delivering it,
-    and P3-08 deletes it.
-    """
-    return INFRA_DESTINATIONS + (f"apps/{app}/app.json", f"apps/{app}/seed.spec.ts")
+def infra_files(app: str = "") -> tuple[str, ...]:
+    """Every path bootstrap puts in the target repo, at its destination."""
+    return INFRA_DESTINATIONS
 
 
 @dataclass(frozen=True)
 class TargetRef:
+    """Where a target's tests are delivered. A projection of its row."""
+
     app: str
     repo: str
     branch: str
 
 
-def resolve_target(app: str) -> TargetRef:
-    """Ports `qa_resolve`, including its refusal to act on the placeholder."""
-    if not app:
-        raise DeliveryError("an <app> is required (a folder under apps/)")
-    data = read_app_json(app)
-    repo = (data.get("targetRepo") or "").strip()
-    branch = (data.get("targetBranch") or "").strip() or DEFAULT_BRANCH
-    if not repo or repo == PLACEHOLDER_REPO:
-        raise DeliveryError(f'apps/{app}/app.json: set a real "targetRepo" (owner/repo)')
-    if "/" not in repo:
-        raise DeliveryError(f'apps/{app}/app.json: "targetRepo" must be owner/repo, got {repo!r}')
-    return TargetRef(app=app, repo=repo, branch=branch)
+def target_ref(cfg: TargetConfig) -> TargetRef:
+    """The delivery coordinates a target's configuration names.
+
+    There is no validation here any more. An empty or placeholder target repo is
+    refused on the **write** path (app/target_config.py), where the operator who
+    typed it is still around to be told, rather than hours later when a delivery
+    goes to read a file.
+    """
+    return TargetRef(app=cfg.app, repo=cfg.target_repo, branch=cfg.target_branch)
 
 
 @dataclass(frozen=True)

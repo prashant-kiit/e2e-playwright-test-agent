@@ -13,38 +13,55 @@ from app.delivery import errors, render
 
 
 def test_infra_files_is_the_single_canonical_list():
-    files = render.infra_files("saucedemo")
-    assert files == (
+    """app.json and the seed have left it: config is never delivered, and the
+    seed is tracked tree content that arrives with the revision."""
+    assert render.infra_files() == (
         "package.json",
         "package-lock.json",
         "playwright.config.ts",
         ".gitignore",
         ".github/workflows/playwright.yml",
-        "apps/saucedemo/app.json",
-        "apps/saucedemo/seed.spec.ts",
     )
 
 
-def test_resolve_target_reads_app_json():
-    target = render.resolve_target("practice-target")
-    assert target.app == "practice-target"
-    assert "/" in target.repo
-    assert target.branch  # defaults to master when app.json omits it
+# --- delivery coordinates come from the row, not from a file --------------
+#
+# `resolve_target` read apps/<app>/app.json and refused an empty or placeholder
+# target repo at read time. P3 moved both halves: the values come from the
+# `targets` row through delivery's `Tools`, and the refusal happens on the write
+# path (app/target_config.py), where the operator who typed it is still around.
+
+def test_target_ref_is_a_projection_of_the_rows_configuration():
+    from app.target_config import TargetConfig
+
+    ref = render.target_ref(
+        TargetConfig(
+            app="saucedemo",
+            name="SauceDemo",
+            base_url="https://www.saucedemo.com",
+            locators="data-test",
+            agent_notes=(),
+            target_repo="owner/tests",
+            target_branch="trunk",
+        )
+    )
+    assert (ref.app, ref.repo, ref.branch) == ("saucedemo", "owner/tests", "trunk")
 
 
-def test_resolve_target_refuses_the_template_placeholder():
-    with pytest.raises(errors.DeliveryError, match="targetRepo"):
-        render.resolve_target("_template")
+def test_delivery_no_longer_reads_a_configuration_file():
+    """Structural: no module under app/delivery names app.json as a path.
 
+    Prose about the file it replaced is fine and useful; a string literal would
+    mean something still goes looking for it.
+    """
+    from pathlib import Path as _Path
 
-def test_resolve_target_rejects_an_unknown_app():
-    with pytest.raises(errors.DeliveryError, match="no such app"):
-        render.resolve_target("not-an-app")
+    from app import delivery as delivery_pkg
 
-
-def test_resolve_target_requires_an_app():
-    with pytest.raises(errors.DeliveryError):
-        render.resolve_target("")
+    for module in _Path(delivery_pkg.__file__).parent.rglob("*.py"):
+        text = module.read_text()
+        assert '"app.json"' not in text, module.name
+        assert "'app.json'" not in text, module.name
 
 
 # --- story resolution: a query over a path set, not a glob ----------------

@@ -1,13 +1,21 @@
-"""Bootstrap (or re-bootstrap) an app's target repo. SYNC mode: this repo is the
-source of truth, and files only ever move outward (DESIGN.md invariant 2).
+"""Bootstrap (or re-bootstrap) a target repo's infra. SYNC mode: the harness is
+the source of truth, and files only ever move outward (DESIGN.md invariant 2).
 
-Pushes the infra files so the target matches the agent repo exactly. An empty
-target repo gets its first commit on <targetBranch>; an existing one gets only
-the files that differ, and nothing at all when already in sync. Story artifacts
-are not touched -- that is push.py.
+Pushes the infra entries so the target repo is a runnable Playwright project
+before any story lands in it. An empty target repo gets its first commit on its
+branch; an existing one gets only the files that differ, and nothing at all when
+already in sync. Story artifacts are not touched -- that is push.py.
 
 DESIGN.md §7 folds this into the first delivery under the same approval, which
 is why `ensure_bootstrapped` exists as a separate, callable step.
+
+**"Bootstrapped" is a Postgres query now.** It used to be two REST calls asking
+GitHub whether the branch carried an `app.json` and a `playwright.config.ts`. It
+is `any revision of this target carries a delivered_sha`, which is the same
+answer for everyone and does not depend on the network. If a customer wipes
+their repo it stays true and the next delivery appends over the drift: customer
+drift is a non-event, and its deliberate repair is the "re-sync infra" action
+(DESIGN.md §7), not a silent re-bootstrap.
 """
 
 from __future__ import annotations
@@ -17,14 +25,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .errors import DeliveryError, NotBootstrapped
-from .render import (
-    INFRA_ENTRIES,
-    TargetRef,
-    infra_files,
-    read_target_config,
-    resolve_target,
-)
+from .render import INFRA_DESTINATIONS, INFRA_ENTRIES, TargetRef, target_ref
 from .tools import Tools, default_tools
 
 
@@ -41,32 +42,29 @@ class BootstrapResult:
 
 
 def is_bootstrapped(app: str, *, tools: Tools | None = None) -> tuple[bool, TargetRef]:
-    """Read-only check (ports check-bootstrapped.sh). Never writes."""
+    """Read-only, and read from the database. Never writes, never dials out."""
     tools = tools or default_tools()
-    target = resolve_target(app)
-    return tools.gh.is_bootstrapped(target.repo, target.app, target.branch), target
+    ref = target_ref(tools.catalog.config(app))
+    return tools.state(app).bootstrapped, ref
 
 
 def ensure_bootstrapped(app: str, *, tools: Tools | None = None) -> BootstrapResult | None:
-    """Bootstrap only if the target branch lacks infra; None when already ready."""
+    """Bootstrap only if we have never delivered to this repo; None otherwise.
+
+    This is what makes one approval mean "set the repo up and deliver this
+    story" (DESIGN.md decision 16).
+    """
     tools = tools or default_tools()
-    ready, _ = is_bootstrapped(app, tools=tools)
-    if ready:
+    if tools.state(app).bootstrapped:
         return None
     return bootstrap(app, tools=tools)
 
 
-def require_bootstrapped(app: str, *, tools: Tools | None = None) -> TargetRef:
-    ready, target = is_bootstrapped(app, tools=tools)
-    if not ready:
-        raise NotBootstrapped(target.repo, target.branch, target.app)
-    return target
-
-
 def bootstrap(app: str, *, dry_run: bool = False, tools: Tools | None = None) -> BootstrapResult:
     tools = tools or default_tools()
-    target = resolve_target(app)
-    files = infra_files(app)
+    cfg = tools.catalog.config(app)
+    target = target_ref(cfg)
+    files = INFRA_DESTINATIONS
 
     if dry_run:
         return BootstrapResult(
@@ -83,15 +81,6 @@ def bootstrap(app: str, *, dry_run: bool = False, tools: Tools | None = None) ->
             ),
         )
 
-    # The infra entries come from the templates in this package and from the
-    # generated config's renderer; only the two app-scoped files still come off
-    # the workspace. Fail before cloning if one of those is missing.
-    cfg = read_target_config(app)
-    workspace_files = tuple(f for f in files if f.startswith(f"apps/{app}/"))
-    for rel in workspace_files:
-        if not (tools.workspace / rel).is_file():
-            raise DeliveryError(f"missing workspace file: {rel}")
-
     tmp = Path(tempfile.mkdtemp(prefix="qa-bootstrap-"))
     try:
         url = tools.clone_url(target.repo)
@@ -105,15 +94,12 @@ def bootstrap(app: str, *, dry_run: bool = False, tools: Tools | None = None) ->
             repo_git = tools.git.clone(url, work, depth=1)
             repo_git.checkout_new(target.branch)
 
+        # Every entry from its source: a template in this package, or the
+        # renderer that reads the target's row. Nothing is read off a mount.
         for entry in INFRA_ENTRIES:
             dest = work / entry.destination
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(entry.render(cfg))
-
-        for rel in workspace_files:
-            dest = work / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(tools.workspace / rel, dest)
 
         repo_git.add_all()
         if not repo_git.has_staged_changes():

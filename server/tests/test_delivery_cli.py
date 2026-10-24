@@ -11,44 +11,59 @@ import pytest
 
 from app.delivery import __main__ as cli
 from app.delivery import errors
-from tests.delivery_helpers import FakeGitHub, make_bare_remote, make_tools, make_workspace
+from tests.delivery_helpers import (
+    DictCatalog,
+    FakeGitHub,
+    make_bare_remote,
+    make_tools,
+    make_worktree,
+)
+from tests.target_helpers import CONFIG
 
 
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
-    workspace = make_workspace(tmp_path / "ws")
+    source = make_worktree(tmp_path / "source")
     remote = make_bare_remote(tmp_path)
-    monkeypatch.setenv("QA_REPO_ROOT", str(workspace))
     monkeypatch.setenv("GITHUB_PAT", "t0ken")
-    return workspace, remote
+    return source, remote
 
 
-def _stub_tools(monkeypatch, workspace, remote, gh):
-    monkeypatch.setattr(cli, "default_tools", lambda: make_tools(workspace, remote, gh))
+def _stub_tools(monkeypatch, source, remote, gh, catalog=None):
+    monkeypatch.setattr(
+        cli, "default_tools", lambda: make_tools(source, remote, gh, catalog=catalog)
+    )
 
 
-def test_check_exits_zero_when_bootstrapped(env, monkeypatch, capsys):
-    workspace, remote = env
-    _stub_tools(monkeypatch, workspace, remote, FakeGitHub(bootstrapped=True))
+def test_check_reports_delivered_once_something_has_been_delivered(
+    env, monkeypatch, capsys
+):
+    source, remote = env
+    catalog = DictCatalog(source, CONFIG)
+    catalog.record_delivered("demo", "a" * 40)
+    _stub_tools(monkeypatch, source, remote, FakeGitHub(), catalog)
 
     assert cli.main(["check", "demo"]) == cli.EXIT_OK
-    assert "bootstrapped: o/r" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Target: o/r (master)" in out
+    assert "delivered (revision 1)" in out
+    assert "a" * 40 in out
 
 
-def test_check_exits_one_when_not_bootstrapped(env, monkeypatch, capsys):
-    """The gate the batch runner depended on."""
-    workspace, remote = env
-    _stub_tools(monkeypatch, workspace, remote, FakeGitHub(bootstrapped=False))
+def test_check_exits_one_when_nothing_has_been_delivered(env, monkeypatch, capsys):
+    """The gate the batch runner depended on, answered from the database."""
+    source, remote = env
+    _stub_tools(monkeypatch, source, remote, FakeGitHub())
 
     assert cli.main(["check", "demo"]) == cli.EXIT_NOT_BOOTSTRAPPED
-    err = capsys.readouterr().err
-    assert "NOT bootstrapped" in err
-    assert "python -m app.delivery bootstrap demo" in err
+    captured = capsys.readouterr()
+    assert "never delivered" in captured.out
+    assert "NOT bootstrapped" in captured.err
 
 
 def test_bootstrap_prints_the_file_list_and_result(env, monkeypatch, capsys):
-    workspace, remote = env
-    _stub_tools(monkeypatch, workspace, remote, FakeGitHub(has_commits=False))
+    source, remote = env
+    _stub_tools(monkeypatch, source, remote, FakeGitHub(has_commits=False))
 
     assert cli.main(["bootstrap", "demo"]) == cli.EXIT_OK
     out = capsys.readouterr().out
@@ -58,8 +73,8 @@ def test_bootstrap_prints_the_file_list_and_result(env, monkeypatch, capsys):
 
 
 def test_bootstrap_dry_run_changes_nothing(env, monkeypatch, capsys):
-    workspace, remote = env
-    _stub_tools(monkeypatch, workspace, remote, FakeGitHub())
+    source, remote = env
+    _stub_tools(monkeypatch, source, remote, FakeGitHub())
 
     assert cli.main(["bootstrap", "demo", "--dry-run"]) == cli.EXIT_OK
     assert "(dry-run)" in capsys.readouterr().out
@@ -78,32 +93,32 @@ def test_push_prints_the_pr_url(env, monkeypatch, capsys):
 
 
 def test_a_delivery_error_exits_two_with_a_message_not_a_traceback(env, monkeypatch, capsys):
-    workspace, remote = env
-    _stub_tools(monkeypatch, workspace, remote, FakeGitHub(bootstrapped=True))
+    source, remote = env
+    _stub_tools(monkeypatch, source, remote, FakeGitHub(has_commits=True))
 
     assert cli.main(["push", "demo", "SCRUM-999"]) == cli.EXIT_ERROR
     assert "expected exactly one" in capsys.readouterr().err
 
 
 def test_reset_without_a_confirmation_refuses(env, monkeypatch, capsys):
-    workspace, remote = env
-    _stub_tools(monkeypatch, workspace, remote, FakeGitHub(has_commits=True))
+    source, remote = env
+    _stub_tools(monkeypatch, source, remote, FakeGitHub(has_commits=True))
 
     assert cli.main(["reset", "demo"]) == cli.EXIT_ERROR
     assert "--confirm-repo" in capsys.readouterr().err
 
 
 def test_reset_with_a_wrong_confirmation_exits_two(env, monkeypatch, capsys):
-    workspace, remote = env
-    _stub_tools(monkeypatch, workspace, remote, FakeGitHub(has_commits=True))
+    source, remote = env
+    _stub_tools(monkeypatch, source, remote, FakeGitHub(has_commits=True))
 
     assert cli.main(["reset", "demo", "--confirm-repo", "o/nope"]) == cli.EXIT_ERROR
     assert "did not match" in capsys.readouterr().err
 
 
 def test_reset_dry_run_needs_no_confirmation(env, monkeypatch, capsys):
-    workspace, remote = env
-    _stub_tools(monkeypatch, workspace, remote, FakeGitHub(has_commits=True))
+    source, remote = env
+    _stub_tools(monkeypatch, source, remote, FakeGitHub(has_commits=True))
 
     assert cli.main(["reset", "demo", "--dry-run"]) == cli.EXIT_OK
 

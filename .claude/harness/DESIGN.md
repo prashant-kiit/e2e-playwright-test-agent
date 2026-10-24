@@ -104,9 +104,18 @@ a target. There is no mutable `targets.head_revision_id`, because revisions are
 append-only and a second place recording "which is current" is a second thing that can
 be wrong.
 
-`delivered_sha` is added by P2 and **left null for the whole phase** — delivery still
-works off the filesystem there, so invariant 5 ("'in sync?' is a Postgres query") is
-satisfied in P3, not P2.
+`delivered_sha` was added by P2 and left null for that whole phase, because delivery
+still worked off the filesystem there. **P3-07 writes it**, and it is the only writer:
+after a successful push, the commit the push produced is recorded on the revision it
+delivered. When the branch already held those bytes and no commit was created, the
+existing sha is recorded anyway — "delivered" is about the bytes, not about whether we
+happened to create a commit.
+
+That satisfies invariant 5. "In sync?" is now one query: the head is *delivered* if it
+carries a `delivered_sha`, otherwise it is *N revisions ahead* of the newest revision
+that does. **Bootstrap state is derived from the same column** — a target is bootstrapped
+if any of its revisions carries a sha — so the `ls-remote` and the worktree diff are both
+gone, and the answer is the same for everyone whether or not GitHub is reachable.
 
 ---
 

@@ -19,9 +19,50 @@ from app.main import app
 from tests.target_helpers import target_body
 
 
+class _StubCatalog:
+    """The catalog field of the delivery seam, for routes that read it directly.
+
+    `/targets/{id}/delivery` asks the catalog rather than a module function, so
+    unlike the push and reset routes it needs more than an identity stub.
+    """
+
+    def __init__(self, state=None, cfg=None):
+        from app.delivery.catalog import DeliveryState
+        from app.target_config import TargetConfig
+
+        self._state = state or DeliveryState(
+            rev=3,
+            tree_hash="f" * 64,
+            delivered_sha="a" * 40,
+            revisions_ahead=0,
+            ever_delivered=True,
+        )
+        self._cfg = cfg or TargetConfig(
+            app="practice-target",
+            name="T",
+            base_url="https://t.example.com",
+            locators="",
+            agent_notes=(),
+            target_repo="o/r",
+            target_branch="master",
+        )
+
+    def config(self, app):
+        return self._cfg
+
+    def state(self, app):
+        return self._state
+
+
 class _StubDelivery:
-    """Stands in for app.delivery.Tools; only identity matters here since the
-    module functions are patched per test."""
+    """Stands in for app.delivery.Tools; the module functions are patched per
+    test, so only the catalog it carries has to behave."""
+
+    def __init__(self, catalog=None):
+        self.catalog = catalog or _StubCatalog()
+
+    def state(self, app):
+        return self.catalog.state(app)
 
 
 @pytest.fixture()
@@ -42,38 +83,64 @@ def _make_target(client, app_name="practice-target"):
     return target["id"]
 
 
-# --- GET /targets/{id}/bootstrapped ------------------------------------
+# --- GET /targets/{id}/delivery ----------------------------------------
+#
+# The answer the portal shows, from one Postgres query. No `ls-remote`, no
+# worktree diff, no fetch.
 
-def test_bootstrapped_reports_state(client, monkeypatch):
+def test_delivery_state_reports_delivered(client):
     tid = _make_target(client)
-    monkeypatch.setattr(
-        delivery,
-        "is_bootstrapped",
-        lambda app, tools=None: (True, delivery.TargetRef("practice-target", "o/r", "master")),
+
+    body = client.get(f"/targets/{tid}/delivery").json()
+
+    assert body["repo"] == "o/r"
+    assert body["branch"] == "master"
+    assert body["delivered"] is True
+    assert body["bootstrapped"] is True
+    assert body["rev"] == 3
+    assert body["delivered_sha"] == "a" * 40
+    assert body["revisions_ahead"] == 0
+    assert "delivered" in body["summary"]
+
+
+def test_delivery_state_reports_n_revisions_ahead(client):
+    from app.delivery.catalog import DeliveryState
+
+    tid = _make_target(client)
+    ahead = DeliveryState(
+        rev=5,
+        tree_hash="e" * 64,
+        delivered_sha=None,
+        revisions_ahead=2,
+        ever_delivered=True,
     )
-    body = client.get(f"/targets/{tid}/bootstrapped").json()
-    assert body == {
-        "app": "practice-target",
-        "repo": "o/r",
-        "branch": "master",
-        "bootstrapped": True,
-    }
+    app.dependency_overrides[get_delivery_tools] = lambda: _StubDelivery(
+        _StubCatalog(state=ahead)
+    )
+
+    body = client.get(f"/targets/{tid}/delivery").json()
+
+    assert body["delivered"] is False
+    assert body["revisions_ahead"] == 2
+    assert body["bootstrapped"] is True
+    assert "2 revision(s) ahead" in body["summary"]
 
 
-def test_bootstrapped_404s_for_an_unknown_target(client):
-    assert client.get("/targets/999/bootstrapped").status_code == 404
+def test_delivery_state_404s_for_an_unknown_target(client):
+    assert client.get("/targets/999/delivery").status_code == 404
 
 
-def test_bootstrapped_400s_on_a_config_problem(client, monkeypatch):
+def test_delivery_state_400s_on_a_config_problem(client):
+    class Broken(_StubCatalog):
+        def config(self, app):
+            raise delivery.DeliveryError("no such target: 'ghost'")
+
     tid = _make_target(client)
+    app.dependency_overrides[get_delivery_tools] = lambda: _StubDelivery(Broken())
 
-    def boom(app, tools=None):
-        raise delivery.DeliveryError("set a real targetRepo")
-
-    monkeypatch.setattr(delivery, "is_bootstrapped", boom)
-    resp = client.get(f"/targets/{tid}/bootstrapped")
+    resp = client.get(f"/targets/{tid}/delivery")
     assert resp.status_code == 400
-    assert "targetRepo" in resp.json()["detail"]
+    assert "ghost" in resp.json()["detail"]
 
 
 # --- POST /targets/{id}/deliver ----------------------------------------
@@ -88,6 +155,7 @@ def _push_result(**kw):
         pr_url="https://github.com/o/r/pull/1",
         pr_number=1,
         pr_created=True,
+        delivered_sha="a" * 40,
         message="PR: https://github.com/o/r/pull/1",
     )
     return delivery.PushResult(**{**defaults, **kw})
@@ -111,7 +179,11 @@ def test_deliver_bootstraps_first_then_pushes(client, monkeypatch):
     assert resp.status_code == 200
     assert order == ["bootstrap", "push"]
     assert resp.json()["pr_url"].endswith("/pull/1")
-    assert resp.json()["detail"] == {"branch": "qa/SCRUM-201-x", "committed": True}
+    assert resp.json()["detail"] == {
+        "branch": "qa/SCRUM-201-x",
+        "committed": True,
+        "delivered_sha": "a" * 40,
+    }
 
 
 def test_deliver_dry_run_does_not_bootstrap(client, monkeypatch):
@@ -150,17 +222,6 @@ def test_deliver_passes_the_run_id_through(client, monkeypatch):
     assert seen["run_id"] == "run-9"
 
 
-def test_deliver_409s_when_the_target_is_not_bootstrapped(client, monkeypatch):
-    tid = _make_target(client)
-    monkeypatch.setattr(delivery, "ensure_bootstrapped", lambda a, tools=None: None)
-
-    def boom(a, s, **kw):
-        raise delivery.NotBootstrapped("o/r", "master", "practice-target")
-
-    monkeypatch.setattr(delivery, "push_artifacts", boom)
-    assert client.post(f"/targets/{tid}/deliver", json={"story_id": "SCRUM-201"}).status_code == 409
-
-
 def test_deliver_502s_on_a_credential_failure(client, monkeypatch):
     """§8 fail-loud: a bad PAT is surfaced, never silently retried."""
     tid = _make_target(client)
@@ -179,7 +240,7 @@ def test_deliver_400s_when_there_is_no_test_suite(client, monkeypatch):
     monkeypatch.setattr(delivery, "ensure_bootstrapped", lambda a, tools=None: None)
 
     def boom(a, s, **kw):
-        raise delivery.DeliveryError("no test suite at apps/x/tests/y")
+        raise delivery.DeliveryError("no test suite at tests/y in the head revision")
 
     monkeypatch.setattr(delivery, "push_artifacts", boom)
     assert client.post(f"/targets/{tid}/deliver", json={"story_id": "SCRUM-201"}).status_code == 400
@@ -253,7 +314,7 @@ def test_a_missing_git_or_pat_is_a_503_not_a_bare_500(session, monkeypatch):
     try:
         c = TestClient(app)
         tid = _make_target(c)
-        resp = c.get(f"/targets/{tid}/bootstrapped")
+        resp = c.get(f"/targets/{tid}/delivery")
         assert resp.status_code == 503
         assert "missing dependency: git" in resp.json()["detail"]
     finally:

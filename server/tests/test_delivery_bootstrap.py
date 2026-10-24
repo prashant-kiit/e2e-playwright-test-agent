@@ -1,21 +1,24 @@
-"""bootstrap-target.sh, ported: real git against a local bare remote."""
+"""bootstrap-target.sh, ported: real git against a local bare remote.
+
+P3 changed where the files come from and how "bootstrapped" is answered. The
+infra entries are rendered from the templates in the server package and from the
+target's row, so there is nothing in a workspace to be missing; and
+"bootstrapped" is a Postgres query -- has anything ever been delivered to this
+repo? -- rather than two REST calls asking GitHub what the branch holds.
+"""
 
 from __future__ import annotations
 
 import pytest
 
-from app.delivery import errors, render
-from app.delivery.bootstrap import (
-    bootstrap,
-    ensure_bootstrapped,
-    is_bootstrapped,
-    require_bootstrapped,
-)
+from app.delivery import render
+from app.delivery.bootstrap import bootstrap, ensure_bootstrapped, is_bootstrapped
 from tests.delivery_helpers import (
+    DictCatalog,
     FakeGitHub,
     make_bare_remote,
     make_tools,
-    make_workspace,
+    make_worktree,
     remote_branches,
     remote_files,
     remote_log,
@@ -23,31 +26,42 @@ from tests.delivery_helpers import (
 
 
 @pytest.fixture()
-def env(tmp_path, monkeypatch):
-    workspace = make_workspace(tmp_path / "ws")
+def env(tmp_path):
+    """A worktree-shaped source and a bare remote standing in for GitHub."""
+    source = make_worktree(tmp_path / "source")
     remote = make_bare_remote(tmp_path)
-    monkeypatch.setenv("QA_REPO_ROOT", str(workspace))
-    return workspace, remote
+    return source, remote
 
 
 def test_first_bootstrap_creates_the_branch_with_every_infra_file(env):
-    workspace, remote = env
+    source, remote = env
     gh = FakeGitHub(has_commits=False)
-    result = bootstrap("demo", tools=make_tools(workspace, remote, gh))
+    result = bootstrap("demo", tools=make_tools(source, remote, gh))
 
     assert result.mode == "bootstrap"
     assert result.pushed is True
-    assert remote_files(remote) == set(render.infra_files("demo"))
+    assert remote_files(remote) == set(render.INFRA_DESTINATIONS)
     assert remote_log(remote) == ["chore: bootstrap Playwright project (demo)"]
 
 
-def test_second_bootstrap_with_no_changes_pushes_nothing(env):
-    workspace, remote = env
-    tools = make_tools(workspace, remote, FakeGitHub(has_commits=False))
-    bootstrap("demo", tools=tools)
+def test_the_infra_comes_from_the_package_not_from_a_workspace(env):
+    """Each entry's bytes are its source's bytes: a template in this package, or
+    the renderer reading the target's row."""
+    source, remote = env
+    bootstrap("demo", tools=make_tools(source, remote, FakeGitHub(has_commits=False)))
 
-    tools = make_tools(workspace, remote, FakeGitHub(has_commits=True))
-    result = bootstrap("demo", tools=tools)
+    files = remote_files(remote)
+    assert ".github/workflows/playwright.yml" in files
+    assert "playwright.config.ts" in files
+    assert not any(f.startswith("apps/") for f in files)
+    assert "app.json" not in files, "SaaS-internal config is never delivered"
+
+
+def test_second_bootstrap_with_no_changes_pushes_nothing(env):
+    source, remote = env
+    bootstrap("demo", tools=make_tools(source, remote, FakeGitHub(has_commits=False)))
+
+    result = bootstrap("demo", tools=make_tools(source, remote, FakeGitHub(has_commits=True)))
 
     assert result.mode == "in-sync"
     assert result.pushed is False
@@ -55,96 +69,86 @@ def test_second_bootstrap_with_no_changes_pushes_nothing(env):
 
 
 def test_re_bootstrap_pushes_only_what_changed(env):
-    """The changed file is an app-scoped one: the infra entries come from the
-    templates in this package, so there is nothing in the workspace to edit."""
-    workspace, remote = env
-    bootstrap("demo", tools=make_tools(workspace, remote, FakeGitHub(has_commits=False)))
+    """The changed file is the generated config, because a base-URL change is
+    the only way an infra file changes without this repo changing."""
+    source, remote = env
+    import dataclasses
 
-    (workspace / "apps" / "demo" / "seed.spec.ts").write_text("// seed v2\n")
+    from tests.target_helpers import CONFIG
+
+    bootstrap("demo", tools=make_tools(source, remote, FakeGitHub(has_commits=False)))
+
+    moved = dataclasses.replace(CONFIG, base_url="https://moved.example.com")
     result = bootstrap(
-        "demo", tools=make_tools(workspace, remote, FakeGitHub(has_commits=True))
+        "demo",
+        tools=make_tools(source, remote, FakeGitHub(has_commits=True), cfg=moved),
     )
 
     assert result.mode == "re-bootstrap"
-    assert "apps/demo/seed.spec.ts" in result.changes
+    assert "playwright.config.ts" in result.changes
     assert "package.json" not in result.changes
     assert remote_log(remote)[0] == "chore: re-bootstrap Playwright project (demo)"
 
 
-def test_the_generated_config_is_pushed_from_the_target_row_not_the_workspace(env):
-    """A base-URL change arrives in the delivered config without any file in
-    this repo changing: that is what "generated" buys."""
-    workspace, remote = env
-    bootstrap("demo", tools=make_tools(workspace, remote, FakeGitHub(has_commits=False)))
-
-    import json
-
-    app_json = workspace / "apps" / "demo" / "app.json"
-    data = json.loads(app_json.read_text())
-    data["baseURL"] = "https://moved.example.com"
-    app_json.write_text(json.dumps(data, indent=2) + "\n")
-
-    result = bootstrap(
-        "demo", tools=make_tools(workspace, remote, FakeGitHub(has_commits=True))
-    )
-
-    assert "playwright.config.ts" in result.changes
-    assert result.pushed is True
-
-
 def test_dry_run_touches_nothing(env):
-    workspace, remote = env
-    result = bootstrap(
-        "demo", dry_run=True, tools=make_tools(workspace, remote, FakeGitHub())
-    )
+    source, remote = env
+    result = bootstrap("demo", dry_run=True, tools=make_tools(source, remote, FakeGitHub()))
 
     assert result.mode == "dry-run"
     assert result.pushed is False
     assert remote_branches(remote) == set()
 
 
-def test_a_missing_workspace_file_fails_before_cloning(env):
-    """Only the app-scoped files still come off the workspace; the infra set
-    comes from the package, so it cannot be missing."""
-    workspace, remote = env
-    (workspace / "apps" / "demo" / "seed.spec.ts").unlink()
+# --- "bootstrapped" is a Postgres query -----------------------------------
 
-    with pytest.raises(errors.DeliveryError, match="missing workspace file"):
-        bootstrap("demo", tools=make_tools(workspace, remote, FakeGitHub()))
+def test_is_bootstrapped_is_read_only_and_reads_the_database(env):
+    source, remote = env
+    from tests.target_helpers import CONFIG
 
-    from tests.delivery_helpers import remote_branches
+    catalog = DictCatalog(source, CONFIG)
+    catalog.record_delivered("demo", "a" * 40)
 
-    assert remote_branches(remote) == set()
-
-
-def test_is_bootstrapped_is_read_only(env):
-    workspace, remote = env
-    gh = FakeGitHub(bootstrapped=True)
-    ready, target = is_bootstrapped("demo", tools=make_tools(workspace, remote, gh))
+    ready, target = is_bootstrapped(
+        "demo", tools=make_tools(source, remote, FakeGitHub(), catalog=catalog)
+    )
 
     assert ready is True
     assert target.repo == "o/r"
-    assert remote_branches(remote) == set()
+    assert remote_branches(remote) == set(), "a read-only check pushes nothing"
 
 
-def test_ensure_bootstrapped_is_a_no_op_when_ready(env):
-    workspace, remote = env
-    gh = FakeGitHub(bootstrapped=True, has_commits=True)
-    assert ensure_bootstrapped("demo", tools=make_tools(workspace, remote, gh)) is None
+def test_a_target_nothing_has_been_delivered_to_is_not_bootstrapped(env):
+    source, remote = env
+    ready, _target = is_bootstrapped("demo", tools=make_tools(source, remote, FakeGitHub()))
+    assert ready is False
 
 
-def test_ensure_bootstrapped_bootstraps_when_not_ready(env):
-    workspace, remote = env
-    gh = FakeGitHub(bootstrapped=False, has_commits=False)
-    result = ensure_bootstrapped("demo", tools=make_tools(workspace, remote, gh))
+def test_ensure_bootstrapped_is_a_no_op_once_something_has_been_delivered(env):
+    source, remote = env
+    from tests.target_helpers import CONFIG
+
+    catalog = DictCatalog(source, CONFIG)
+    catalog.record_delivered("demo", "a" * 40)
+
+    tools = make_tools(source, remote, FakeGitHub(has_commits=True), catalog=catalog)
+    assert ensure_bootstrapped("demo", tools=tools) is None
+
+
+def test_ensure_bootstrapped_bootstraps_on_the_first_delivery(env):
+    """One approval still means "set the repo up and deliver this story"
+    (DESIGN.md decision 16)."""
+    source, remote = env
+    result = ensure_bootstrapped(
+        "demo", tools=make_tools(source, remote, FakeGitHub(has_commits=False))
+    )
 
     assert result is not None and result.pushed is True
-    assert remote_files(remote) == set(render.infra_files("demo"))
+    assert remote_files(remote) == set(render.INFRA_DESTINATIONS)
 
 
-def test_require_bootstrapped_raises_when_not_ready(env):
-    workspace, remote = env
-    gh = FakeGitHub(bootstrapped=False)
-    with pytest.raises(errors.NotBootstrapped) as exc:
-        require_bootstrapped("demo", tools=make_tools(workspace, remote, gh))
-    assert exc.value.app == "demo"
+def test_an_unknown_target_is_refused(env):
+    from app.delivery import errors
+
+    source, remote = env
+    with pytest.raises(errors.DeliveryError, match="ghost"):
+        bootstrap("ghost", tools=make_tools(source, remote, FakeGitHub()))
