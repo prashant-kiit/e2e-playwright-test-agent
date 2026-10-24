@@ -3,6 +3,11 @@
 The properties worth protecting are the ones a customer would notice:
 delivery appends (never force-pushes), and a test deleted in the agent repo
 disappears from the branch.
+
+P3 made the delivered paths **root-relative** -- `user-stories/...`, not
+`apps/<app>/user-stories/...`. The stored shape, the hydrated shape and the
+delivered shape are one shape now, which is what lets the generated
+single-target config find the suite it ships beside.
 """
 
 from __future__ import annotations
@@ -52,10 +57,10 @@ def test_delivery_pushes_the_story_plan_and_tests_and_opens_a_pr(env):
     assert gh.prs[BRANCH].base == "master"
 
     files = remote_files(remote, BRANCH)
-    assert "apps/demo/user-stories/SCRUM-1-checkout.md" in files
-    assert "apps/demo/specs/SCRUM-1-checkout-test-plan.md" in files
-    assert "apps/demo/tests/checkout/cart.spec.ts" in files
-    assert "apps/demo/tests/checkout/pay.spec.ts" in files
+    assert "user-stories/SCRUM-1-checkout.md" in files
+    assert "specs/SCRUM-1-checkout-test-plan.md" in files
+    assert "tests/checkout/cart.spec.ts" in files
+    assert "tests/checkout/pay.spec.ts" in files
     # Infra is bootstrap's job, and it is already there from the fixture.
     assert "playwright.config.ts" in files
 
@@ -82,14 +87,14 @@ def test_a_deleted_test_disappears_from_the_branch(env):
     workspace, remote = env
     gh = FakeGitHub(has_commits=True, bootstrapped=True)
     push_artifacts("demo", "SCRUM-1", tools=ready_tools(workspace, remote, gh))
-    assert "apps/demo/tests/checkout/pay.spec.ts" in remote_files(remote, BRANCH)
+    assert "tests/checkout/pay.spec.ts" in remote_files(remote, BRANCH)
 
     (workspace / "apps/demo/tests/checkout/pay.spec.ts").unlink()
     push_artifacts("demo", "SCRUM-1", tools=ready_tools(workspace, remote, gh))
 
     files = remote_files(remote, BRANCH)
-    assert "apps/demo/tests/checkout/pay.spec.ts" not in files
-    assert "apps/demo/tests/checkout/cart.spec.ts" in files
+    assert "tests/checkout/pay.spec.ts" not in files
+    assert "tests/checkout/cart.spec.ts" in files
 
 
 def test_unchanged_artifacts_make_no_new_commit_but_still_sync_the_pr(env):
@@ -172,5 +177,5 @@ def test_a_story_with_no_plan_still_delivers(env):
     push_artifacts("demo", "SCRUM-1", tools=ready_tools(workspace, remote, gh))
 
     files = remote_files(remote, BRANCH)
-    assert "apps/demo/specs/SCRUM-1-checkout-test-plan.md" not in files
-    assert "apps/demo/tests/checkout/cart.spec.ts" in files
+    assert "specs/SCRUM-1-checkout-test-plan.md" not in files
+    assert "tests/checkout/cart.spec.ts" in files

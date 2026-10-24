@@ -7,9 +7,9 @@
       "mcp__playwright-test",
       "Bash(npx playwright test:*)",
       "Bash(npx playwright show-report:*)",
-      "Edit(apps/*/specs/**)",
-      "Edit(apps/*/tests/**)",
-      "Edit(apps/*/reports/**)"
+      "Edit(specs/**)",
+      "Edit(tests/**)",
+      "Edit(reports/**)"
     ]
   },
   "hooks": {
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/apps/agent/runtime/hooks/close-test-browsers.sh",
+            "command": "\"{HOOKS_DIR}/close-test-browsers.sh\"",
             "timeout": 15
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/apps/agent/runtime/hooks/close-test-browsers.sh",
+            "command": "\"{HOOKS_DIR}/close-test-browsers.sh\"",
             "timeout": 15
           }
         ]

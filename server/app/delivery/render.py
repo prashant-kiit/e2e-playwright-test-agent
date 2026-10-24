@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,11 +29,27 @@ HEADING = re.compile(r"#\s*(?:User Story:\s*)?([A-Za-z]+-\d+)\s*[-–]\s*(.+)")
 STORY_FILE = re.compile(r"^([A-Za-z]+-\d+)-(.+)$")
 APP_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
+# The folders the agent's prompts name, and where the seed lands. One
+# definition, because the prompts, the tracked tree and the delivered paths all
+# have to agree about them.
+STORIES_DIR = "user-stories"
+PLANS_DIR = "specs"
+TESTS_DIR = "tests"
+SEED_DESTINATION = "seed.spec.ts"
+
 # Where the infra templates live: inside the server package, so an API image
 # needs no mounted repo to deliver one.
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
 APP_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+# The folders the agent's prompts name, and where the seed lands. One
+# definition, because the prompts, the tracked tree and the delivered paths all
+# have to agree about them.
+STORIES_DIR = "user-stories"
+PLANS_DIR = "specs"
+TESTS_DIR = "tests"
+SEED_DESTINATION = "seed.spec.ts"
 
 
 # --- infra entries: (source, destination) ---------------------------------
@@ -199,11 +215,11 @@ def write_infra(root: Path, cfg: TargetConfig, *, only_generated: bool = False) 
 # that defines what counts inside them. The globs are not `**` by accident --
 # stories and plans are markdown, and anything else that lands in those folders
 # is somebody's scratch file, not something to version and hydrate back out.
-TRACKED_APP_FILES: tuple[str, ...] = ("seed.spec.ts",)
+TRACKED_APP_FILES: tuple[str, ...] = (SEED_DESTINATION,)
 TRACKED_APP_TREES: tuple[tuple[str, str], ...] = (
-    ("user-stories", "*.md"),
-    ("specs", "*.md"),
-    ("tests", "**/*"),
+    (STORIES_DIR, "*.md"),
+    (PLANS_DIR, "*.md"),
+    (TESTS_DIR, "**/*"),
 )
 
 # Never tree content wherever they turn up. artifacts.py skips .DS_Store for the
@@ -343,6 +359,14 @@ def resolve_target(app: str) -> TargetRef:
 
 @dataclass(frozen=True)
 class StoryRef:
+    """One story's derived paths and names, all worktree-relative.
+
+    P3 made them worktree-relative: `user-stories/...` rather than
+    `apps/<app>/user-stories/...`. The stored shape, the hydrated shape and the
+    delivered shape are now one shape, so the agent's prompts name folders
+    rather than a path that encodes this repo's monorepo layout.
+    """
+
     app: str
     story_id: str
     slug: str
@@ -352,27 +376,48 @@ class StoryRef:
     story_rel: str
     plan_rel: str
     tests_rel: str
+    seed_rel: str = SEED_DESTINATION
 
 
-def resolve_story(app: str, story_id: str) -> StoryRef:
-    """Derive every delivered path from the story's filename.
+def story_filename(paths: Iterable[str], story_id: str) -> str:
+    """The one tracked path that is this story's file.
 
-    Exactly one apps/<app>/user-stories/<ID>-*.md must match -- an ambiguous
-    glob was a hard error in push-artifacts.sh and stays one here.
+    Exactly one `user-stories/<ID>-*.md` must match. That was a hard error in
+    push-artifacts.sh and stays one: two files for one story means nobody knows
+    which suite is being delivered, and picking either is worse than stopping.
+
+    `paths` is a set of tracked paths -- from `file_index` for delivery, from the
+    worktree scan for a run -- rather than a glob over a mounted directory. The
+    rule is unchanged; it is a query against truth now.
     """
     if not story_id:
         raise DeliveryError("a <STORY_ID> is required (e.g. SCRUM-201)")
-    stories_dir = config.repo_root() / "apps" / app / "user-stories"
-    matches = sorted(stories_dir.glob(f"{story_id}-*.md")) if stories_dir.exists() else []
+    prefix = f"{STORIES_DIR}/{story_id}-"
+    matches = sorted(
+        path for path in paths if path.startswith(prefix) and path.endswith(".md")
+    )
     if len(matches) != 1:
         raise DeliveryError(
-            f"expected exactly one apps/{app}/user-stories/{story_id}-*.md "
+            f"expected exactly one {STORIES_DIR}/{story_id}-*.md in the tree "
             f"(found {len(matches)})"
         )
-    story_file = matches[0]
-    base = story_file.stem
+    return matches[0]
+
+
+def resolve_story(
+    root: Path, story_id: str, *, paths: Iterable[str], app: str = ""
+) -> StoryRef:
+    """Derive every path and name from the story's filename.
+
+    `paths` says which files the tree holds; `root` is where their bytes are, so
+    the title can be read from the story's first heading. Callers pass both
+    explicitly, because where the path set came from -- `file_index` or a scan --
+    is the thing P3 changed and should be visible at the call site.
+    """
+    story_path = story_filename(paths, story_id)
+    base = Path(story_path).stem
     slug = base[len(story_id) + 1 :] if base.startswith(f"{story_id}-") else base
-    title = _story_title(story_file) or slug
+    title = _story_title(root / story_path) or slug
     return StoryRef(
         app=app,
         story_id=story_id,
@@ -380,9 +425,9 @@ def resolve_story(app: str, story_id: str) -> StoryRef:
         title=title,
         branch=f"qa/{story_id}-{slug}",
         pr_title=f"{story_id}: {title} E2E test suite",
-        story_rel=f"apps/{app}/user-stories/{base}.md",
-        plan_rel=f"apps/{app}/specs/{story_id}-{slug}-test-plan.md",
-        tests_rel=f"apps/{app}/tests/{slug}",
+        story_rel=f"{STORIES_DIR}/{base}.md",
+        plan_rel=f"{PLANS_DIR}/{story_id}-{slug}-test-plan.md",
+        tests_rel=f"{TESTS_DIR}/{slug}",
     )
 
 
@@ -393,6 +438,8 @@ def _story_title(path: Path) -> str | None:
     answer and tolerates an en-dash, so it is preferred with the shell
     behaviour kept as the fallback.
     """
+    if not path.is_file():
+        return None
     for line in path.read_text().splitlines():
         if not line.startswith("#"):
             continue

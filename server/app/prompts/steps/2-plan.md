@@ -20,4 +20,4 @@ Ensure each test scenario includes:
 - Detailed step-by-step instructions
 - Expected results for each step
 - Test data requirements
-- The stable locators found (following the app's locator convention)
+- The stable locators found (following this target's locator convention)

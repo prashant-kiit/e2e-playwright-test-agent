@@ -15,8 +15,12 @@
 
 set -u
 GRACE_SECONDS=5
-PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
-LOG="$PROJECT_DIR/.playwright-mcp/close-test-browsers.log"
+# The log belongs with the run's other output. CLAUDE_PROJECT_DIR is the
+# hydrated worktree from P3 onward -- a tree that becomes a revision and is then
+# deleted -- so writing a debug log there would be both lost and, briefly, a
+# stray file inside the tree being versioned.
+LOG_DIR="${QA_RUN_DIR:-${TMPDIR:-/tmp}}"
+LOG="$LOG_DIR/close-test-browsers.log"
 mkdir -p "$(dirname "$LOG")"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
 

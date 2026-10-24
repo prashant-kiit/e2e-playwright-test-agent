@@ -6,7 +6,7 @@ Please review:
 
 Using insights from the manual exploratory testing:
 - Leverage the element selectors and locators that were successfully used while exploring
-- Use stable element properties (the app's test-id attribute, roles, IDs) discovered
+- Use stable element properties (this target's test-id attribute, roles, IDs) discovered
   during exploration
 - Apply wait strategies and UI behaviors observed during manual testing
 - Incorporate any workarounds for UI quirks discovered
@@ -28,9 +28,9 @@ Requirements for all scripts:
 - Use proper wait strategies based on actual application behavior (no fixed timeouts)
 - Add proper test hooks (beforeEach, afterEach). Repeat the seed's setup steps in
   beforeEach; don't import the seed file
-- Use relative URLs (baseURL is set per project in playwright.config.ts)
-- Do not change playwright.config.ts: the browser projects for every app are already
-  configured there
+- Use relative URLs: {BASE_URL} is already the baseURL of every browser project
+- Do not change playwright.config.ts. It is generated from this target's configuration
+  and your edits to it are discarded
 
 After generating the scripts, run them on Chromium only to verify they pass:
 npx playwright test {TEST_DIR} --project={CHROMIUM_PROJECT}

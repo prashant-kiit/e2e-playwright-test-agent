@@ -18,6 +18,7 @@ from . import config
 from .delivery.render import APP_NAME as _APP_NAME
 from .delivery.render import HEADING as _HEADING
 from .delivery.render import STORY_FILE as _STORY_FILE
+from .orchestrator.claude import prompts_dir
 
 _SEED_TEMPLATE = """import { test, expect } from '@playwright/test';
 
@@ -90,12 +91,17 @@ def _first_title(path: Path) -> str | None:
 
 
 def read_prompts() -> list[dict]:
-    root = config.repo_root() / "prompts"
+    """Every prompt the agent can be given, for the portal's Prompts page.
+
+    Read from package data (the same directory the runner reads), so what the
+    portal shows is what the agent is actually sent. Prompts move into Postgres
+    with tenant overrides in P5 (DESIGN.md §12).
+    """
+    root = prompts_dir()
     files: list[Path] = []
-    for name in ("qa_system_prompt.md", "qa_user_prompt.md"):
-        p = root / name
-        if p.exists():
-            files.append(p)
+    overview = root / "qa_system_prompt.md"
+    if overview.exists():
+        files.append(overview)
     steps = root / "steps"
     if steps.exists():
         files.extend(sorted(steps.glob("*.md")))

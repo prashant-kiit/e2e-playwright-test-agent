@@ -9,8 +9,8 @@ Then execute the test scenarios defined in that plan:
 2. Follow the step-by-step instructions in each test case
 3. Verify expected results match actual results
 4. Screenshots are optional and only to aid your own analysis; keep them out of the
-   delivery (do not save them under the app folder). The QA results report is produced by
-   CI, not here.
+   delivery (do not save them anywhere under {TEST_DIR}/ or specs/). The QA results
+   report is produced by CI, not here.
 5. Document your findings:
    - Test execution results for each scenario
    - Any UI inconsistencies or unexpected behaviors

@@ -17,9 +17,10 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import monorepo
 from .bootstrap import require_bootstrapped
 from .errors import DeliveryError
-from .render import StoryRef, commit_message, pr_body, resolve_story
+from .render import StoryRef, commit_message, pr_body, resolve_story, tracked_tree
 from .tools import Tools, default_tools
 
 
@@ -47,9 +48,37 @@ def push_artifacts(
     tools: Tools | None = None,
 ) -> PushResult:
     tools = tools or default_tools()
-    story = resolve_story(app, story_id)
+    # The source is a worktree-shaped tree, so the delivered paths are the
+    # stored paths. P3-07 replaces the staging with a materialized head
+    # revision, which is the same shape built from the database instead.
+    with monorepo.staged_tree(app) as source:
+        return _push_from(
+            source,
+            app,
+            story_id,
+            body=body,
+            body_file=body_file,
+            run_id=run_id,
+            dry_run=dry_run,
+            tools=tools,
+        )
 
-    tests_src = tools.workspace / story.tests_rel
+
+def _push_from(
+    source: Path,
+    app: str,
+    story_id: str,
+    *,
+    body: str | None,
+    body_file: Path | None,
+    run_id: str | None,
+    dry_run: bool,
+    tools: Tools,
+) -> PushResult:
+    paths = [path for path, _on_disk in tracked_tree(source)]
+    story = resolve_story(source, story_id, paths=paths, app=app)
+
+    tests_src = source / story.tests_rel
     if not tests_src.is_dir():
         raise DeliveryError(
             f"no test suite at {story.tests_rel} - run the QA flow (steps 4-5) first"
@@ -88,7 +117,7 @@ def push_artifacts(
         else:
             repo_git.checkout_new(story.branch)
 
-        _sync_story_files(tools.workspace, work, story)
+        _sync_story_files(source, work, story)
 
         repo_git.add_all()
         committed = repo_git.has_staged_changes()
@@ -132,7 +161,7 @@ def push_artifacts(
     )
 
 
-def _sync_story_files(workspace: Path, work: Path, story: StoryRef) -> None:
+def _sync_story_files(source: Path, work: Path, story: StoryRef) -> None:
     """Replace the story's files wholesale, so anything removed in the agent
     repo is removed on the branch too."""
     shutil.rmtree(work / story.tests_rel, ignore_errors=True)
@@ -141,13 +170,13 @@ def _sync_story_files(workspace: Path, work: Path, story: StoryRef) -> None:
     for rel in (story.story_rel, story.plan_rel):
         (work / rel).parent.mkdir(parents=True, exist_ok=True)
 
-    shutil.copyfile(workspace / story.story_rel, work / story.story_rel)
+    shutil.copyfile(source / story.story_rel, work / story.story_rel)
 
-    plan_src = workspace / story.plan_rel
+    plan_src = source / story.plan_rel
     if plan_src.is_file():
         shutil.copyfile(plan_src, work / story.plan_rel)
 
-    shutil.copytree(workspace / story.tests_rel, work / story.tests_rel)
+    shutil.copytree(source / story.tests_rel, work / story.tests_rel)
 
 
 def _resolve_body(

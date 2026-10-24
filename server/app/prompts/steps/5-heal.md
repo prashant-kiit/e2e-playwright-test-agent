@@ -13,8 +13,8 @@ playwright-test-healer agent.
 4. Re-run the healed tests on Chromium to verify they pass
 5. Repeat the heal process until all tests are stable and passing on Chromium
 6. Do NOT run a cross-browser pass. To save tokens, generate and heal on
-   {CHROMIUM_PROJECT} only. The suite still runs on all of the app's browser projects in
-   CI (the target repo's workflow runs `npx playwright test`); do not heal those here.
+   {CHROMIUM_PROJECT} only. The suite still runs on all four browser projects in CI
+   (the target repo's workflow runs `npx playwright test`); do not heal those here.
 7. Document:
    - Initial test results (pass/fail count) on {CHROMIUM_PROJECT}
    - Healing activities performed
@@ -22,5 +22,5 @@ playwright-test-healer agent.
    - Any tests that couldn't be auto-healed
 
 This is the end of the agent's work. Do NOT deliver: do not open a pull request, do not
-run any delivery script, and do not write a report file. A human reviews the healed suite
-and delivers it separately with ./scripts/push-artifacts.sh {APP} {STORY_ID}.
+push, and do not write a report file. A human reviews the healed suite and approves the
+delivery in the portal.

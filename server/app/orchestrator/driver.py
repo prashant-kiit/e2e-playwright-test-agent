@@ -13,6 +13,7 @@ from collections.abc import Callable
 
 from .. import config, repo
 from ..domain.steps import STEP_ORDER, resume_step, step_index
+from ..target_config import config_of
 from .runner import Emit, Runner, StepContext
 
 SessionFactory = Callable[[], "object"]  # a callable returning a SQLAlchemy Session
@@ -42,6 +43,9 @@ def run_pipeline(
         run = repo.get_run(s, run_id)
         run_key, app, story_id, mode = run.run_key, run.target.app, run.story_id, run.mode
         last_completed = run.last_completed_step
+        # Read once, here, where the run's other immutable facts are read: a
+        # Runner must not need a session, least of all a sandboxed one.
+        target_cfg = config_of(run.target)
 
     start = resume_step(last_completed)
     rd = config.run_dir(run_key)
@@ -87,6 +91,7 @@ def run_pipeline(
             step=step,
             run_dir=rd,
             worktree=wt,
+            target=target_cfg,
             prev_session_id=prev_sid,
         )
 
