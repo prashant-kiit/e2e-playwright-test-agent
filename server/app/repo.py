@@ -82,6 +82,7 @@ def create_target(
     target_branch: str | None = None,
     locators: str = "",
     agent_notes: list[str] | None = None,
+    resolve=None,
 ) -> Target:
     """Create a target with its configuration, validated before the insert.
 
@@ -96,6 +97,11 @@ def create_target(
     visible for `clean_fields` to tell the operator which field they mistyped.
     Creating and editing then clean through the same map, which is the part that
     matters -- a sixth field cannot reach one path and miss the other.
+
+    `resolve` is the injected DNS resolver the base-URL check uses (P4, §6).
+    It is a parameter rather than a module default because the check is
+    load-bearing and has to be testable without DNS; left unset, the real
+    resolver is used.
     """
     get_project(session, project_id)  # ensure the project exists
     cleaned = target_config.clean_fields(
@@ -106,7 +112,8 @@ def create_target(
             "target_branch": target_branch,
             "locators": locators,
             "agent_notes": agent_notes,
-        }
+        },
+        resolve=resolve,
     )
     target = Target(
         tenant_id=current_tenant_id(),
@@ -120,7 +127,9 @@ def create_target(
     return target
 
 
-def update_target_config(session: Session, target_id: int, **fields) -> Target:
+def update_target_config(
+    session: Session, target_id: int, *, resolve=None, **fields
+) -> Target:
     """Change a target's editable fields, validated the same way as a create.
 
     Only the fields named are touched, so the portal's form can send one changed
@@ -129,7 +138,7 @@ def update_target_config(session: Session, target_id: int, **fields) -> Target:
     `name` is, because it is only ever a label.
     """
     target = get_target(session, target_id)
-    cleaned = target_config.clean_fields(fields)
+    cleaned = target_config.clean_fields(fields, resolve=resolve)
     for field, value in cleaned.items():
         setattr(target, field, value)
     session.commit()

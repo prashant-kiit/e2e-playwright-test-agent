@@ -24,7 +24,7 @@ from app import authoring, repo, revisions
 from app.delivery import render
 from app.sandbox import hydrate
 from tests.storage_helpers import FakeStorage
-from tests.target_helpers import BASE_URL, TARGET_REPO
+from tests.target_helpers import BASE_URL, TARGET_REPO, public_resolver
 
 
 @pytest.fixture()
@@ -47,6 +47,7 @@ def target(session, store, project):
         name="Demo",
         base_url=BASE_URL,
         target_repo=TARGET_REPO,
+        resolve=public_resolver,
     )
     return target
 
@@ -104,6 +105,7 @@ def test_creating_a_target_commits_revision_one_from_the_templates(
         name="Fresh",
         base_url=BASE_URL,
         target_repo=TARGET_REPO,
+        resolve=public_resolver,
     )
 
     assert rev.rev == 1
@@ -127,6 +129,7 @@ def test_revision_one_carries_the_generated_config_rendered_from_the_row(
         name="Fresh",
         base_url="https://fresh.example.com",
         target_repo=TARGET_REPO,
+        resolve=public_resolver,
     )
 
     config = _content(session, store, target, "playwright.config.ts")
@@ -160,6 +163,7 @@ def test_an_invalid_configuration_creates_neither_a_row_nor_a_revision(
             name="Bad",
             base_url="not-a-url",
             target_repo=TARGET_REPO,
+            resolve=public_resolver,
         )
 
     assert [t.app for t in repo.list_targets(session)] == []
@@ -300,7 +304,8 @@ def test_changing_the_base_url_commits_a_revision_with_the_new_config(
     """A configuration change is a tree diff, which is a revision, which is as
     reviewable as a code change."""
     _t, rev = authoring.update_config(
-        session, store, target, base_url="https://moved.example.com"
+        session, store, target, base_url="https://moved.example.com",
+        resolve=public_resolver,
     )
 
     assert rev is not None and rev.rev == 2
@@ -329,7 +334,9 @@ def test_an_invalid_config_edit_changes_neither_the_row_nor_the_tree(
     from app import target_config
 
     with pytest.raises(target_config.ConfigError):
-        authoring.update_config(session, store, target, base_url="nonsense")
+        authoring.update_config(
+            session, store, target, base_url="nonsense", resolve=public_resolver
+        )
 
     session.expire_all()
     assert repo.get_target(session, target.id).base_url == BASE_URL
@@ -368,7 +375,13 @@ def test_a_config_edit_is_refused_while_a_run_is_live(session, store, target):
     _start_run(session, target)
 
     with pytest.raises(repo.RunConflict):
-        authoring.update_config(session, store, target, base_url="https://moved.example.com")
+        authoring.update_config(
+            session,
+            store,
+            target,
+            base_url="https://moved.example.com",
+            resolve=public_resolver,
+        )
 
     session.expire_all()
     assert repo.get_target(session, target.id).base_url == BASE_URL

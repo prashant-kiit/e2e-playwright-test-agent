@@ -17,7 +17,7 @@ import pytest
 
 from app import repo
 from app.orchestrator.bus import InMemoryLogBus, PostgresLogBus
-from tests.target_helpers import create_target
+from tests.target_helpers import create_target, public_resolver
 
 
 @pytest.fixture()
@@ -130,7 +130,7 @@ def client(session_factory):
     """
     from fastapi.testclient import TestClient
 
-    from app.api import get_log_bus, get_storage
+    from app.api import get_log_bus, get_resolver, get_storage
     from app.auth import require_auth
     from app.db import get_session
     from app.main import app
@@ -145,6 +145,8 @@ def client(session_factory):
 
     app.dependency_overrides[get_session] = _session_dep
     app.dependency_overrides[require_auth] = lambda: None
+    # P4: the write path resolves a base URL, and no test may touch real DNS.
+    app.dependency_overrides[get_resolver] = lambda: public_resolver
     app.dependency_overrides[get_storage] = lambda: FakeStorage()
     app.dependency_overrides[get_log_bus] = lambda: PostgresLogBus(
         session_factory=session_factory

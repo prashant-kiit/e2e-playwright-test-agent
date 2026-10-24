@@ -10,8 +10,16 @@ or days after somebody typed it, with nobody around to be told. The same refusal
 lives here instead, at the moment of the write, plus the base-URL format check
 the generated Playwright config needs in order to mean anything.
 
-Validating that the host resolves to a **public** address is egress work and
-lands with P4 (DESIGN.md §6); this is format validation only.
+Validating that the host resolves to a **public** address was egress work that
+landed with P4 (DESIGN.md §6). It is here, in the cascade this module already
+owns, rather than in a second validator beside it: the write path stays the
+single author of what a valid target is, and "refused while the operator is
+still around to fix it" is the same argument that moved the target-repo check
+here in P3.
+
+Resolution is **injected** (`resolve`), defaulting to the real resolver. The
+check is load-bearing, and a check whose outcome depends on what a name resolves
+to today is a check nothing can test.
 """
 
 from __future__ import annotations
@@ -20,6 +28,8 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from urllib.parse import urlparse
+
+from .sandbox import egress
 
 # The placeholder the template set ships with; never a real target.
 PLACEHOLDER_REPO = "owner/repo-that-receives-the-tests"
@@ -104,12 +114,41 @@ CLEANERS: dict[str, Callable[[object], object]] = {
 }
 
 
-def clean_fields(fields: Mapping[str, object]) -> dict[str, object]:
+def assert_public_base_url(
+    base_url: str, *, resolve: egress.Resolver | None = None
+) -> None:
+    """Refuse a base URL whose host does not resolve to a public address.
+
+    The save-time half of §6's public-address rule; the proxy enforces the
+    run-time half with the same predicate, so a name repointed after it was
+    saved is refused too (app/sandbox/egress.py). Reported as a `ConfigError`
+    because to the operator it is a configuration they may not save, which the
+    portal already knows how to show.
+    """
+    try:
+        egress.resolve_public(host_of(base_url), resolve=resolve)
+    except egress.EgressError as exc:
+        raise ConfigError(f"base URL {base_url!r} is not usable: {exc}") from exc
+
+
+def host_of(base_url: str) -> str:
+    """The host a base URL names. Shape has already been checked by this point."""
+    return urlparse(base_url).hostname or ""
+
+
+def clean_fields(
+    fields: Mapping[str, object], *, resolve: egress.Resolver | None = None
+) -> dict[str, object]:
     """Clean a partial set of editable fields, or raise.
 
     Raises `ConfigError` for a value that is not allowed and `ValueError` for a
     field that is not configuration at all -- a different kind of mistake, made
     by a caller rather than by an operator, so it gets a different status code.
+
+    Shape first, then resolution: a URL with no host has nothing to resolve, and
+    the operator should be told the thing that is actually wrong with it. A field
+    set that does not include `base_url` resolves nothing, so editing `locators`
+    never needs DNS.
     """
     unknown = set(fields) - set(CLEANERS)
     if unknown:
@@ -117,6 +156,8 @@ def clean_fields(fields: Mapping[str, object]) -> dict[str, object]:
     cleaned = {field: CLEANERS[field](value) for field, value in fields.items()}
     if "name" in cleaned and not cleaned["name"]:
         raise ConfigError("name is required")
+    if "base_url" in cleaned:
+        assert_public_base_url(str(cleaned["base_url"]), resolve=resolve)
     return cleaned
 
 

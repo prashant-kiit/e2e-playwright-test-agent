@@ -31,6 +31,7 @@ from .domain.status import is_terminal
 from .launcher import launch_run
 from .models import Artifact
 from .orchestrator.bus import LogBus, bus_from_env
+from .sandbox import egress
 from .schemas import (
     ArtifactOut,
     DeliverBody,
@@ -69,6 +70,18 @@ def get_launcher() -> Callable[[int], None]:
 def get_storage() -> Storage:
     """The artifact blob store. Overridden with a fake in tests."""
     return storage.from_env()
+
+
+def get_resolver() -> egress.Resolver:
+    """The DNS resolver the write path checks a base URL with.
+
+    A dependency rather than a module default because the check is load-bearing
+    (DESIGN.md §6: a base URL must resolve to a **public** address) and a check
+    nothing can substitute is a check nothing can test. Overridden in tests; the
+    suite also refuses the real resolver outright, so forgetting the override
+    fails loudly instead of depending on DNS.
+    """
+    return egress.system_resolver
 
 
 def get_log_bus() -> LogBus:
@@ -148,6 +161,7 @@ def create_target(
     session: Session = Depends(get_session),
     store: Storage = Depends(get_storage),
     run_sync=Depends(get_bootstrap_runner),
+    resolve: egress.Resolver = Depends(get_resolver),
 ):
     """Create a target, its configuration, and its revision 1.
 
@@ -172,6 +186,7 @@ def create_target(
             target_branch=body.target_branch,
             locators=body.locators,
             agent_notes=body.agent_notes,
+            resolve=resolve,
         )
     except repo.NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -198,6 +213,7 @@ def update_target_config(
     body: TargetConfigUpdate,
     session: Session = Depends(get_session),
     store: Storage = Depends(get_storage),
+    resolve: egress.Resolver = Depends(get_resolver),
 ):
     """Edit a target's configuration. A changed base URL commits a revision.
 
@@ -209,7 +225,11 @@ def update_target_config(
     target = _target_or_404(session, target_id)
     with _authoring_errors(session):
         _target, revision = authoring.update_config(
-            session, store, target, **body.model_dump(exclude_none=True)
+            session,
+            store,
+            target,
+            resolve=resolve,
+            **body.model_dump(exclude_none=True),
         )
     return _write_out(session, store, target, revision)
 

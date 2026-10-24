@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 
 from app import api
-from app.api import get_bootstrap_runner, get_launcher, get_storage
+from app.api import get_bootstrap_runner, get_launcher, get_resolver, get_storage
 from app.auth import require_auth
 from app.db import get_session
 from app.delivery import render
@@ -31,7 +31,7 @@ from app.main import app
 from app.models import FileIndex, Revision, Tenant
 from app.tenancy import current_tenant_id
 from tests.storage_helpers import FakeStorage
-from tests.target_helpers import target_body
+from tests.target_helpers import public_resolver, target_body
 
 
 @pytest.fixture()
@@ -41,6 +41,8 @@ def client(session):
     app.dependency_overrides[get_launcher] = lambda: (lambda _id: None)
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[require_auth] = lambda: None
+    # P4: the write path resolves a base URL, and no test may touch real DNS.
+    app.dependency_overrides[get_resolver] = lambda: public_resolver
     app.dependency_overrides[get_bootstrap_runner] = lambda: (lambda a: None)
     c = TestClient(app)
     c.store = store

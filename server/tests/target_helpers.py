@@ -16,6 +16,10 @@ from app.target_config import TargetConfig
 from app.tenancy import current_tenant_id
 
 BASE_URL = "https://demo.example.com"
+# What BASE_URL resolves to for the write path's public-address check (P4, §6).
+# A documentation-range address would be refused -- `is_global` excludes it --
+# so this is a plainly public one.
+BASE_URL_ADDRESS = "93.184.216.34"
 TARGET_REPO = "o/r"
 LOCATORS = "data-testid attributes: page.getByTestId('...')"
 AGENT_NOTES = ("The seed opens the home page logged out.",)
@@ -34,6 +38,19 @@ CONFIG = TargetConfig(
 )
 
 
+def public_resolver(host: str) -> list[str]:
+    """The resolver the fixtures pass to the write path.
+
+    P4 made a target's base URL resolve to a public address at save time, and no
+    test may depend on real DNS: `demo.example.com` resolves nowhere, so without
+    this every fixture that creates a target would be refused. Any host is
+    answered with one public address, because what these tests are about is the
+    target, not the resolution -- the resolution itself is tested in
+    tests/test_egress.py and tests/test_target_config.py.
+    """
+    return [BASE_URL_ADDRESS]
+
+
 def create_target(
     session: Session,
     project_id: int,
@@ -41,7 +58,12 @@ def create_target(
     name: str = "Demo",
     **config,
 ) -> Target:
-    """A target with valid configuration; `config` overrides any field."""
+    """A target with valid configuration; `config` overrides any field.
+
+    `resolve` is passed through, so a test about resolution can supply its own
+    table while every other test gets a resolver that says "public".
+    """
+    config.setdefault("resolve", public_resolver)
     return repo.create_target(
         session,
         project_id=project_id,
