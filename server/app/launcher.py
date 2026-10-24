@@ -4,17 +4,21 @@ Kept separate from the API so tests can override it with a no-op (they drive the
 driver directly with a FakeRunner). The real launcher picks the configured
 runner, streams log lines to the bus, and closes the stream when the run ends.
 
-It is also where everything that happens *around* a run is composed: the
-baseline revision before the pipeline starts, and the step-boundary hook the
-driver fires after each completed step. The driver keeps exactly one injection
-point (DESIGN.md §13) and this module is what composes into it -- which is also
-where P4's hydrate will go.
+It is also where everything that happens *around* a run is composed: hydrate
+before the pipeline, teardown after it, and the step-boundary hook the driver
+fires after each completed step. The driver keeps exactly one injection point
+(DESIGN.md §13) and this module is what composes into it.
+
+Hydrate, ingest and teardown are plain functions composed here rather than
+driver parameters, which is what makes P4's move into a container-per-run a
+change of *where* they run and not of *what* they do.
 """
 
 from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
 from . import config, repo, revisions, storage
 from .artifacts import ArtifactCollector
@@ -26,9 +30,12 @@ from .orchestrator.driver import SessionFactory, run_pipeline
 from .orchestrator.fake import FakeRunner
 from .orchestrator.runner import Emit, Runner
 from .reaper import heartbeat_during
+from .sandbox import hydrate
 from .storage import Storage
+from .target_config import config_of
 
 # A step-boundary half: it is handed the run and the step that just completed.
+# One of the two may raise, and that is deliberate -- see make_step_boundary_hook.
 BoundaryHalf = Callable[[int, Step], None]
 
 
@@ -52,29 +59,46 @@ def make_collector(
     return collect
 
 
-def make_sync_out(
+def make_ingest(
     *, session_factory: SessionFactory = SessionLocal, store: Storage | None = None
 ) -> BoundaryHalf:
-    """A sync_out(run_id, step) callback that commits a revision of the tree.
+    """An ingest(run_id, step) callback that commits a revision of the worktree.
 
-    P2's dual-write: upload the tracked tree's blobs, then commit one revision
-    naming them. A step that changed no tracked file commits nothing.
+    Upload the tracked tree's blobs, then commit one revision naming them. A
+    step that changed no tracked file commits nothing: three of the five steps
+    routinely change nothing, and a revision per step would make `rev` a step
+    counter rather than a count of real changes.
+
+    It reads the run's own hydrated worktree, which is the only tree the agent
+    worked in, so a revision describes that run's work and nothing else.
+
+    **The generated entries are re-rendered before the scan.** Paired with
+    hydrate's render step, that gives the generated config exactly one author:
+    whatever the agent did to it is overwritten by the row's version before the
+    tree is decided, so an edit to it is not a tree change and never reaches a
+    revision. An edit to a real file in the same step still is one.
+
+    Raises on failure, and the caller does not catch it. See
+    make_step_boundary_hook.
     """
     store = store or storage.from_env()
 
-    def sync_out(run_id: int, step: Step) -> None:
+    def ingest(run_id: int, step: Step) -> None:
         with session_factory() as s:
             run = repo.get_run(s, run_id)
-            revisions.snapshot_target(
+            root = config.worktree_dir(run.run_key)
+            hydrate.render_generated(root, config_of(run.target))
+            revisions.commit_revision(
                 s,
                 run.target,
                 store,
+                root,
                 # Fits Revision.author's 100 chars: run_key is at most 80.
                 author=f"run:{run.run_key}",
                 produced_by_run_id=run.id,
             )
 
-    return sync_out
+    return ingest
 
 
 def make_step_boundary_hook(
@@ -83,109 +107,139 @@ def make_step_boundary_hook(
     session_factory: SessionFactory = SessionLocal,
     store: Storage | None = None,
     collect: BoundaryHalf | None = None,
-    sync_out: BoundaryHalf | None = None,
+    ingest: BoundaryHalf | None = None,
 ) -> BoundaryHalf:
     """The driver's ONE step-boundary callable, with both halves composed in.
 
-    Order is deliberate: **artifacts first, then the revision snapshot.** The
-    existing behavior runs first and is never delayed by the new work.
+    Order is deliberate: **artifacts first, then ingest.** Evidence collection
+    runs first and is never delayed by the work that matters more.
 
-    Each half catches its own failures. The driver wraps the whole callable in a
-    single best-effort try/except, so without per-half isolation an exception
-    from artifact collection would skip the revision commit entirely -- and vice
-    versa. Both failures are reported to the run's log stream instead.
+    The two halves are treated differently, and the asymmetry is the phase:
 
-    **A failed revision write must never fail a run in P2.** While `apps/` is
-    authoritative, the driver's best-effort treatment of this hook is exactly
-    right, and it is what makes the phase's "no behavior change" promise true: a
-    total failure of the revision model costs nothing today. P3 inverts this --
-    once truth has moved into Postgres, a failed sync-out *has* to fail the run.
-    Do not "fix" the swallowed exception before then.
+    - **Artifact collection stays best-effort.** Its failure is reported to the
+      run's log and swallowed. Evidence is not the work; losing a trace is not a
+      reason to fail a run that produced a healed suite.
+    - **A failed ingest fails the run.** It is reported to the log and then
+      re-raised. P2's code said so in a comment, because while `apps/` was
+      authoritative a swallowed failure cost nothing -- and once truth has moved
+      into Postgres, a swallowed failure means a run that reports success having
+      dropped its work. That inversion is not a regression in robustness; it is
+      the point at which a dropped write stops being free.
+
+    Catching the artifact half here (rather than relying on the driver) is what
+    lets the ingest half still run when the sweep fails, and what lets ingest's
+    exception reach the driver rather than being lost behind the first failure.
     """
     # Both halves talk to the same object store, so build the client once
     # rather than once per half.
-    if store is None and (collect is None or sync_out is None):
+    if store is None and (collect is None or ingest is None):
         store = storage.from_env()
 
-    halves: tuple[tuple[str, BoundaryHalf], ...] = (
-        (
-            "artifact collection",
-            collect if collect is not None
-            else make_collector(session_factory=session_factory, store=store),
-        ),
-        (
-            "revision snapshot",
-            sync_out if sync_out is not None
-            else make_sync_out(session_factory=session_factory, store=store),
-        ),
+    collect_half = (
+        collect if collect is not None
+        else make_collector(session_factory=session_factory, store=store)
+    )
+    ingest_half = (
+        ingest if ingest is not None
+        else make_ingest(session_factory=session_factory, store=store)
     )
 
     def on_step_boundary(run_id: int, step: Step) -> None:
-        for name, half in halves:
-            try:
-                half(run_id, step)
-            except Exception as exc:
-                emit(f"=== step {step.value}: {name} failed: {exc} ===")
+        try:
+            collect_half(run_id, step)
+        except Exception as exc:
+            emit(f"=== step {step.value}: artifact collection failed: {exc} ===")
+
+        try:
+            ingest_half(run_id, step)
+        except Exception as exc:
+            # Reported *and* propagated: the run fails, and the operator reading
+            # the log does not have to infer the reason from a status.
+            emit(f"=== step {step.value}: ingest failed: {exc} ===")
+            raise
 
     return on_step_boundary
 
 
-def ensure_baseline_revision(
+def hydrate_worktree(
     run_id: int,
     emit: Emit,
     *,
     session_factory: SessionFactory = SessionLocal,
     store: Storage | None = None,
-) -> None:
-    """Give a target with no history a revision of the tree as it stands now.
+) -> Path:
+    """Build the run's worktree from its target's head revision. Returns the path.
 
-    Taken **before the pipeline starts**, not at the first sync-out: a snapshot
-    taken at the first boundary would conflate the tree the run inherited with
-    the tree its first step produced, and revision 1 of every target would be
-    unreadable (user story 22). It is not a one-shot backfill script either --
-    that is code which runs once and is never exercised again.
+    Raises on anything that would leave the agent working in a tree we cannot
+    vouch for -- no head revision, a missing blob, bytes that do not match their
+    content hash -- and the caller fails the run on it. That is the inversion P3
+    is: before the flip a failed revision write cost nothing, and now a run
+    without a verified tree must not start.
 
-    The baseline is the *inherited* tree, so it records no producing run even
-    though a run triggered it.
-
-    Best-effort, for the same reason the step-boundary hook is: this is P2
-    scaffolding and must not be able to stop a run.
+    There is no baseline-from-disk fallback. P2 had one because `apps/` was the
+    tree a run inherited; there is no disk to baseline from now, and every target
+    gets revision 1 when it is created.
     """
+    store = store or storage.from_env()
+    with session_factory() as s:
+        run = repo.get_run(s, run_id)
+        dest = config.worktree_dir(run.run_key)
+        # A worktree left behind by a crashed previous attempt at this run_key is
+        # not a tree to inherit: hydrate is the only author of this directory.
+        hydrate.teardown(dest)
+        hydrate.hydrate(s, run.target, store, dest, emit=emit)
+    return dest
+
+
+def run_with_worktree(
+    run_id: int,
+    emit: Emit,
+    runner: Runner,
+    *,
+    session_factory: SessionFactory = SessionLocal,
+    store: Storage | None = None,
+    collect: BoundaryHalf | None = None,
+) -> None:
+    """Hydrate, drive the pipeline in that worktree, then tear it down.
+
+    The composition the whole phase turns on, and it is deliberately boring:
+    three function calls and a `finally`. Teardown runs at every terminal state
+    and on pause, so disk use is bounded by live runs rather than by history; a
+    resumed run comes back through here and re-hydrates from the head.
+    """
+    store = store or storage.from_env()
     try:
-        with session_factory() as s:
-            run = repo.get_run(s, run_id)
-            if revisions.head_revision(s, run.target_id) is not None:
-                return
-            committed = revisions.snapshot_target(
-                s,
-                run.target,
-                store or storage.from_env(),
-                author="baseline",
-            )
-        if committed is not None:
-            emit(
-                f"=== baseline revision {committed.rev} recorded "
-                f"(the tree this run inherited) ==="
-            )
+        worktree = hydrate_worktree(
+            run_id, emit, session_factory=session_factory, store=store
+        )
     except Exception as exc:
-        emit(f"=== baseline revision failed: {exc} ===")
+        # No tree, so no step may be attempted. Fail the run and free the app.
+        with session_factory() as s:
+            repo.fail_run(s, run_id, f"hydrate failed: {exc}")
+        emit(f"=== run failed before it started: {exc} ===")
+        return
+
+    hook = make_step_boundary_hook(
+        emit, session_factory=session_factory, store=store, collect=collect
+    )
+    try:
+        run_pipeline(session_factory, run_id, runner, emit=emit, collect=hook)
+    finally:
+        hydrate.teardown(worktree)
+        emit("=== teardown: worktree removed ===")
 
 
 def launch_run(run_id: int) -> None:
     """Start the pipeline for run_id on a daemon thread."""
     emit = bus.emitter(run_id)
-    on_step_boundary = make_step_boundary_hook(emit)
 
     def _target() -> None:
         try:
-            # A target with no history gets its baseline before any step runs.
-            ensure_baseline_revision(run_id, emit)
             # The lease is otherwise refreshed only at step boundaries, so a step
-            # longer than the TTL would look like a crash to the reaper.
+            # longer than the TTL would look like a crash to the reaper. It wraps
+            # hydrate too: `npm ci` on a cold cache outlasts the TTL easily.
             with heartbeat_during(run_id):
-                run_pipeline(
-                    SessionLocal, run_id, make_runner(), emit=emit, collect=on_step_boundary
-                )
+                run_with_worktree(run_id, emit, make_runner())
         finally:
             bus.close(run_id)
 

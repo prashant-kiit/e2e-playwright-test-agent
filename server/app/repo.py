@@ -15,6 +15,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from . import target_config
 from .domain import lease
 from .domain.status import RunStatus, assert_transition, is_live
 from .domain.steps import Step
@@ -33,10 +34,18 @@ class NotFound(RepoError):
 
 
 class RunConflict(RepoError):
-    """A live run already holds this app's lock."""
+    """A live run already holds this target's lock.
 
-    def __init__(self, target_id: int, run_id: int) -> None:
-        super().__init__(f"app (target {target_id}) already has a live run {run_id}")
+    Raised by two different callers and answered as 409 by both: a second run
+    for the same target, and an operator write while a run is live. The reason
+    differs, so it is a parameter -- an operator told "already has a live run"
+    when they tried to edit a story would not know what to do next.
+    """
+
+    def __init__(self, target_id: int, run_id: int, reason: str | None = None) -> None:
+        super().__init__(
+            reason or f"app (target {target_id}) already has a live run {run_id}"
+        )
         self.target_id = target_id
         self.run_id = run_id
 
@@ -62,15 +71,125 @@ def get_project(session: Session, project_id: int) -> Project:
     return project
 
 
-def create_target(session: Session, project_id: int, app: str, name: str) -> Target:
+def create_target(
+    session: Session,
+    project_id: int,
+    app: str,
+    name: str,
+    *,
+    base_url: str,
+    target_repo: str,
+    target_branch: str | None = None,
+    locators: str = "",
+    agent_notes: list[str] | None = None,
+) -> Target:
+    """Create a target with its configuration, validated before the insert.
+
+    A target without a usable base URL and target repo is a target no run can
+    hydrate and no delivery can push, so the configuration is required here
+    rather than being filled in later (app/target_config.py says what "usable"
+    means). Validating first means a refused write leaves no half-made target.
+
+    The values travel as keywords through the API route, `authoring` and this
+    function rather than as one bundled value, deliberately: `TargetConfig` is
+    derived *from* a row and so cannot precede one, and the names have to stay
+    visible for `clean_fields` to tell the operator which field they mistyped.
+    Creating and editing then clean through the same map, which is the part that
+    matters -- a sixth field cannot reach one path and miss the other.
+    """
     get_project(session, project_id)  # ensure the project exists
+    cleaned = target_config.clean_fields(
+        {
+            "name": name,
+            "base_url": base_url,
+            "target_repo": target_repo,
+            "target_branch": target_branch,
+            "locators": locators,
+            "agent_notes": agent_notes,
+        }
+    )
     target = Target(
-        tenant_id=current_tenant_id(), project_id=project_id, app=app, name=name
+        tenant_id=current_tenant_id(),
+        project_id=project_id,
+        app=app,
+        **cleaned,
     )
     session.add(target)
     session.commit()
     session.refresh(target)
     return target
+
+
+def update_target_config(session: Session, target_id: int, **fields) -> Target:
+    """Change a target's editable fields, validated the same way as a create.
+
+    Only the fields named are touched, so the portal's form can send one changed
+    value. `app` and the identity columns are not settable here: a target's slug
+    is what its history, its blobs and its delivered branch names are keyed on.
+    `name` is, because it is only ever a label.
+    """
+    target = get_target(session, target_id)
+    cleaned = target_config.clean_fields(fields)
+    for field, value in cleaned.items():
+        setattr(target, field, value)
+    session.commit()
+    session.refresh(target)
+    return target
+
+
+def live_run_holding(session: Session, target_id: int, now: datetime | None = None) -> Run | None:
+    """The run that genuinely holds this target, or None.
+
+    "Is a run live?" must mean the same thing here as it does in `start_run`,
+    which is why this mirrors that function's test rather than asking whether a
+    lock row exists. Three ways a lock row is not a live run:
+
+    - its run is gone or already terminal -- an orphaned row;
+    - its lease has lapsed and the run is not paused: that is a **crashed** run,
+      exactly the case `start_run` reaps in place. Treating it as live would let
+      one crash block every story and config edit until the reaper came round,
+      and the reaper is a 30-second loop that may not be running at all.
+
+    A **paused** run is live even though its lease has lapsed: the pause holds
+    the lock deliberately and `reap_expired` skips it. Its resume re-hydrates
+    from the head, so an edit made now would survive -- but it still owns the
+    target, and "refused while the target has a live run" is the contract the
+    portal states.
+    """
+    lock = session.get(AppLock, target_id)
+    if lock is None:
+        return None
+    run = session.get(Run, lock.run_id)
+    if run is None or not is_live(run.status):
+        return None  # an orphaned lock row; the next start_run deletes it
+    if run.status is RunStatus.PAUSED:
+        return run
+    if lease.is_expired(lock.lease_expires_at, now=now or lease.utcnow()):
+        return None  # crashed, and start_run would reap it
+    return run
+
+
+def assert_no_live_run(session: Session, target_id: int) -> None:
+    """Refuse a write while the target has a live run.
+
+    A live run hydrated from an older head; its next ingest would commit a tree
+    that does not contain the write, silently reverting it. Resolving that would
+    need merge logic, and there is no merge logic anywhere in this system
+    (DESIGN.md invariant 2) -- so the write is refused, not queued.
+    """
+    run = live_run_holding(session, target_id)
+    if run is None:
+        return
+    raise RunConflict(
+        target_id,
+        run.id,
+        reason=(
+            f"target {target_id} has a live run ({run.id}), which is working from "
+            f"an older revision. Saving now would be reverted by that run's next "
+            f"snapshot, and there is no merge. Wait for it to finish, or pause or "
+            f"stop it, then save again."
+        ),
+    )
 
 
 def list_targets(session: Session, project_id: int | None = None) -> list[Target]:

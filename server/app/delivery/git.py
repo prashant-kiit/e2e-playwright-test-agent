@@ -131,6 +131,10 @@ class Git:
         default branch, which the shell tool warned about rather than failing."""
         return self.run("push", remote, "--delete", branch, check=False).ok
 
+    def head_sha(self) -> str:
+        """The commit the worktree is on. What `delivered_sha` records."""
+        return self.run("rev-parse", "HEAD").out.strip()
+
     def remote_branch_exists(self, remote: str, branch: str) -> bool:
         return self.run(
             "ls-remote", "--exit-code", "--heads", remote, branch, check=False

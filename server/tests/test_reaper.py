@@ -19,12 +19,13 @@ from app import reaper, repo
 from app.domain import lease
 from app.domain.status import RunStatus
 from app.models import AppLock
+from tests.target_helpers import create_target
 
 
 def _seed_run(session_factory, *, app="practice-target", story="SCRUM-201"):
     with session_factory() as s:
         project = repo.create_project(s, name="demo")
-        target = repo.create_target(s, project_id=project.id, app=app, name="Practice")
+        target = create_target(s, project.id, app=app, name="Practice")
         run = repo.start_run(s, target_id=target.id, story_id=story, mode="full")
         return target.id, run.id
 

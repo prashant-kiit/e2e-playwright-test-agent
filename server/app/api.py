@@ -1,38 +1,42 @@
-"""HTTP API for projects, targets and runs (M1).
+"""HTTP API for projects, targets, their trees and their runs.
 
-Thin layer over app/repo.py. Repo exceptions map to HTTP status codes:
-NotFound -> 404, RunConflict -> 409 (an app already has a live run), bad input
--> 422 (handled by Pydantic / explicit ValueError).
+Thin layer over app/repo.py and app/authoring.py. Exceptions map to status
+codes: NotFound -> 404, RunConflict -> 409 (a live run holds the target, for a
+second run *or* for an operator write), a refused configuration or story ->
+422, a delivery problem -> 400/502.
+
+P3 collapsed apps and targets into one concept. There is no filesystem-backed
+app list, no story list read off a directory and no snapshot-the-disk action:
+a target is a row, its tree is a revision, and the portal is the only way a
+story gets in.
 """
 
 from __future__ import annotations
 
 import json
 import queue
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import apphub, delivery, repo, revisions, storage
+from . import apphub, authoring, delivery, repo, revisions, storage, target_config
 from .auth import AuthDep
-from .db import get_session
+from .db import SessionLocal, get_session
 from .domain.status import is_terminal
 from .launcher import launch_run
 from .models import Artifact
 from .orchestrator.bus import DONE, bus
 from .schemas import (
-    AppOut,
     ArtifactOut,
-    BootstrapAppOut,
-    BootstrapBody,
-    BootstrappedOut,
     DeliverBody,
     DeliveryOut,
+    DeliveryStateOut,
     FileIndexOut,
-    ParityOut,
     ProjectCreate,
     ProjectOut,
     PromptOut,
@@ -40,11 +44,15 @@ from .schemas import (
     RevisionOut,
     RunCreate,
     RunOut,
-    SnapshotOut,
     StepOut,
+    StoryBody,
+    StoryContentOut,
     StoryOut,
+    TargetConfigUpdate,
     TargetCreate,
+    TargetCreatedOut,
     TargetOut,
+    WriteOut,
 )
 from .storage import Storage
 
@@ -64,8 +72,21 @@ def get_storage() -> Storage:
 
 
 def get_bootstrap_runner() -> Callable[[str], apphub.BootstrapOutcome]:
-    """The target-repo step of bootstrapping. Overridden in tests (no git/network)."""
+    """The optional "sync infra to the target repo" step. Overridden in tests
+    (no git, no network)."""
     return apphub.run_bootstrap
+
+
+def get_catalog(store: Storage = Depends(get_storage)) -> delivery.Catalog:
+    """Just the database half of the delivery seam: no git, no GitHub, no PAT.
+
+    "Is this delivered?" is a Postgres question (invariant 5), so answering it
+    must not need a credential. Hanging it off `get_delivery_tools` meant an
+    operator with no `GITHUB_PAT` configured got a 503 for an answer that never
+    leaves the database -- found in a real browser, where the portal could not
+    show the badge at all.
+    """
+    return delivery.DbCatalog(SessionLocal, store)
 
 
 def get_delivery_tools() -> delivery.Tools:
@@ -86,28 +107,7 @@ def get_delivery_tools() -> delivery.Tools:
         ) from exc
 
 
-# --- repo introspection + bootstrap (M6) --------------------------------
-
-@router.get("/apps", response_model=list[AppOut])
-def list_apps():
-    return apphub.list_apps()
-
-
-@router.get("/apps/{app}/stories", response_model=list[StoryOut])
-def list_stories(app: str):
-    return apphub.list_stories(app)
-
-
-@router.post("/apps/bootstrap", status_code=201, response_model=BootstrapAppOut)
-def bootstrap_app(
-    body: BootstrapBody,
-    run=Depends(get_bootstrap_runner),
-):
-    try:
-        return apphub.bootstrap_app(body.model_dump(), run=run, do_bootstrap=body.do_bootstrap)
-    except apphub.BootstrapError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
+# --- prompts + settings --------------------------------------------------
 
 @router.get("/prompts", response_model=list[PromptOut])
 def list_prompts():
@@ -129,14 +129,184 @@ def list_projects(session: Session = Depends(get_session)):
     return repo.list_projects(session)
 
 
-@router.post("/projects/{project_id}/targets", response_model=TargetOut, status_code=201)
+@router.post(
+    "/projects/{project_id}/targets", response_model=TargetCreatedOut, status_code=201
+)
 def create_target(
-    project_id: int, body: TargetCreate, session: Session = Depends(get_session)
+    project_id: int,
+    body: TargetCreate,
+    session: Session = Depends(get_session),
+    store: Storage = Depends(get_storage),
+    run_sync=Depends(get_bootstrap_runner),
 ):
+    """Create a target, its configuration, and its revision 1.
+
+    Revision 1 comes from the templates and the renderer, so a new target has a
+    tree to hydrate and a history to show before its first run -- which is what
+    let the baseline-from-disk hook go.
+
+    A configuration the write path refuses is the operator's typo, not a server
+    fault, so it answers 422 with the reason rather than 500. The optional infra
+    sync is reported as an outcome rather than raised: the target exists either
+    way, and the form shows the failure next to the target it did create.
+    """
     try:
-        return repo.create_target(session, project_id=project_id, app=body.app, name=body.name)
+        target, revision = authoring.create_target(
+            session,
+            store,
+            project_id=project_id,
+            app=body.app,
+            name=body.name,
+            base_url=body.base_url,
+            target_repo=body.target_repo,
+            target_branch=body.target_branch,
+            locators=body.locators,
+            agent_notes=body.agent_notes,
+        )
     except repo.NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except target_config.ConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        # The one route where IntegrityError is not the revision race: a brand
+        # new target has no rev to lose, so this is unique(project_id, app).
+        session.rollback()
+        raise HTTPException(
+            status_code=409, detail=f"a target named {body.app!r} already exists"
+        ) from exc
+
+    return TargetCreatedOut(
+        target=target,
+        revision=_revision_out(revision, revisions.count_files(session, revision.id)),
+        bootstrap=run_sync(target.app) if body.sync_infra else None,
+    )
+
+
+@router.patch("/targets/{target_id}/config", response_model=WriteOut)
+def update_target_config(
+    target_id: int,
+    body: TargetConfigUpdate,
+    session: Session = Depends(get_session),
+    store: Storage = Depends(get_storage),
+):
+    """Edit a target's configuration. A changed base URL commits a revision.
+
+    `base_url` re-renders the generated Playwright config, which is a tree diff,
+    which is a revision -- a configuration change as reviewable as a code
+    change. `locators` and `agent_notes` reach the agent through its prompt, so
+    they change the row and commit nothing.
+    """
+    target = _target_or_404(session, target_id)
+    with _authoring_errors(session):
+        _target, revision = authoring.update_config(
+            session, store, target, **body.model_dump(exclude_none=True)
+        )
+    return _write_out(session, store, target, revision)
+
+
+# --- story authoring: the only way a story gets in -----------------------
+
+@contextmanager
+def _authoring_errors(session: Session) -> Iterator[None]:
+    """Translate an authoring failure into a status code.
+
+    Every operator write refuses for the same reasons, so the mapping lives
+    once: a story or configuration the write path rejects is 422, a story that
+    is not there is 404, a live run holding the target is 409, and losing the
+    race on `unique(target_id, rev)` is 409. One route having the OCC case and
+    the next one not is how that race turns into a 500.
+    """
+    try:
+        yield
+    except (authoring.InvalidStory, target_config.ConfigError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except authoring.NoSuchStory as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except repo.RunConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        # unique(target_id, rev): a concurrent writer got there first. Losing is
+        # the designed outcome -- there is no merge (DESIGN.md invariant 2).
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="another write committed a revision first; reload and try again",
+        ) from exc
+
+
+def _write_out(session: Session, store: Storage, target, revision) -> WriteOut:
+    return WriteOut(
+        revision=(
+            _revision_out(revision, revisions.count_files(session, revision.id))
+            if revision is not None
+            else None
+        ),
+        stories=authoring.list_stories(session, store, target),
+    )
+
+
+@router.get("/targets/{target_id}/stories", response_model=list[StoryOut])
+def list_stories(
+    target_id: int,
+    session: Session = Depends(get_session),
+    store: Storage = Depends(get_storage),
+):
+    """A target's stories, from the head revision's file_index."""
+    target = _target_or_404(session, target_id)
+    return authoring.list_stories(session, store, target)
+
+
+@router.get("/targets/{target_id}/stories/{story_id}", response_model=StoryContentOut)
+def read_story(
+    target_id: int,
+    story_id: str,
+    session: Session = Depends(get_session),
+    store: Storage = Depends(get_storage),
+):
+    target = _target_or_404(session, target_id)
+    with _authoring_errors(session):
+        return authoring.read_story(session, store, target, story_id)
+
+
+@router.put("/targets/{target_id}/stories/{story_id}", response_model=WriteOut)
+def write_story(
+    target_id: int,
+    story_id: str,
+    body: StoryBody,
+    session: Session = Depends(get_session),
+    store: Storage = Depends(get_storage),
+):
+    """Create or replace one story, committing one operator-authored revision."""
+    target = _target_or_404(session, target_id)
+    if body.story_id != story_id:
+        raise HTTPException(
+            status_code=422,
+            detail=f"story id in the path ({story_id}) and body ({body.story_id}) differ",
+        )
+    with _authoring_errors(session):
+        revision = authoring.write_story(
+            session,
+            store,
+            target,
+            story_id=body.story_id,
+            slug=body.slug,
+            content=body.content,
+        )
+    return _write_out(session, store, target, revision)
+
+
+@router.delete("/targets/{target_id}/stories/{story_id}", response_model=WriteOut)
+def delete_story(
+    target_id: int,
+    story_id: str,
+    session: Session = Depends(get_session),
+    store: Storage = Depends(get_storage),
+):
+    """Remove one story. Its plan and suite are left alone."""
+    target = _target_or_404(session, target_id)
+    with _authoring_errors(session):
+        revision = authoring.delete_story(session, store, target, story_id=story_id)
+    return _write_out(session, store, target, revision)
 
 
 @router.get("/targets", response_model=list[TargetOut])
@@ -146,19 +316,34 @@ def list_targets(project_id: int | None = None, session: Session = Depends(get_s
 
 # --- delivery: bootstrap-check / deliver / reset (P1) --------------------
 
-@router.get("/targets/{target_id}/bootstrapped", response_model=BootstrappedOut)
-def target_bootstrapped(
+@router.get("/targets/{target_id}/delivery", response_model=DeliveryStateOut)
+def target_delivery_state(
     target_id: int,
     session: Session = Depends(get_session),
-    tools: delivery.Tools = Depends(get_delivery_tools),
+    catalog: delivery.Catalog = Depends(get_catalog),
 ):
+    """Delivered, or N revisions ahead. One Postgres query, no network call.
+
+    It depends on the catalog rather than the whole delivery seam, because it
+    needs no credential: the answer is in the database, and requiring a PAT to
+    read it would be requiring the network by another name.
+    """
     target = _target_or_404(session, target_id)
     try:
-        ready, ref = delivery.is_bootstrapped(target.app, tools=tools)
+        ref = delivery.target_ref(catalog.config(target.app))
+        state = catalog.state(target.app)
     except delivery.DeliveryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return BootstrappedOut(
-        app=ref.app, repo=ref.repo, branch=ref.branch, bootstrapped=ready
+    return DeliveryStateOut(
+        app=ref.app,
+        repo=ref.repo,
+        branch=ref.branch,
+        bootstrapped=state.bootstrapped,
+        delivered=state.delivered,
+        rev=state.rev,
+        delivered_sha=state.delivered_sha,
+        revisions_ahead=state.revisions_ahead,
+        summary=state.describe(),
     )
 
 
@@ -185,8 +370,6 @@ def deliver_story(
             dry_run=body.dry_run,
             tools=tools,
         )
-    except delivery.NotBootstrapped as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except delivery.CredentialError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except delivery.DeliveryError as exc:
@@ -196,7 +379,11 @@ def deliver_story(
         message=result.message,
         pr_url=result.pr_url,
         pr_number=result.pr_number,
-        detail={"branch": result.branch, "committed": result.committed},
+        detail={
+            "branch": result.branch,
+            "committed": result.committed,
+            "delivered_sha": result.delivered_sha,
+        },
     )
 
 
@@ -240,12 +427,13 @@ def _target_or_404(session: Session, target_id: int):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-# --- revisions / file_index / parity (P2) --------------------------------
+# --- revisions / file_index ----------------------------------------------
 #
-# Read-only, except the snapshot action. Nothing here reads the revision tables
-# to make a decision -- `apps/` is still authoritative for the whole of P2, and
-# a route that started deciding from these rows would remove the safety net the
-# phase exists to keep (DESIGN.md §13).
+# Read-only: the revisions panel is the operator's window into a target's tree,
+# and the only writers of a revision are ingest (at a run's step boundaries) and
+# the operator writes above. There is no snapshot-the-disk action, because there
+# is no authoritative disk left to snapshot, and no parity route, because there
+# is no second copy of the truth to compare against.
 #
 # Every route resolves through a row and filters by the request's tenant, so a
 # blob is never served by key alone (DESIGN.md §9). The tenant is always 1
@@ -269,48 +457,6 @@ def _revision_out(rev, file_count: int) -> RevisionOut:
     )
 
 
-@router.post("/targets/{target_id}/revisions/snapshot", response_model=SnapshotOut)
-def snapshot_target_tree(
-    target_id: int,
-    response: Response,
-    session: Session = Depends(get_session),
-    store: Storage = Depends(get_storage),
-):
-    """Snapshot a target's tracked tree right now, outside any run.
-
-    **P2-only scaffolding.** It exists so an operator can give a never-run
-    target a head revision to compare parity against. In P3 the filesystem is
-    not authoritative and "snapshot the disk" stops meaning anything, so this
-    route goes away with the mount it reads.
-
-    An unchanged tree commits nothing and answers 200 with the existing head;
-    a new revision answers 201.
-    """
-    target = _target_or_404(session, target_id)
-    try:
-        committed = revisions.snapshot_target(session, target, store, author="operator")
-    except Exception as exc:  # the blob store is down, or the tree is unreadable
-        raise HTTPException(status_code=502, detail=f"snapshot failed: {exc}") from exc
-
-    if committed is None:
-        head = revisions.head_revision(session, target_id)
-        if head is None:  # an empty tracked tree hashes to a new revision, so
-            raise HTTPException(  # this is unreachable in practice
-                status_code=500, detail="snapshot committed nothing and there is no head"
-            )
-        response.status_code = 200
-        return SnapshotOut(
-            created=False,
-            revision=_revision_out(head, revisions.count_files(session, head.id)),
-        )
-
-    response.status_code = 201
-    return SnapshotOut(
-        created=True,
-        revision=_revision_out(committed, revisions.count_files(session, committed.id)),
-    )
-
-
 @router.get("/targets/{target_id}/revisions", response_model=list[RevisionOut])
 def list_target_revisions(target_id: int, session: Session = Depends(get_session)):
     _target_or_404(session, target_id)
@@ -318,27 +464,6 @@ def list_target_revisions(target_id: int, session: Session = Depends(get_session
         _revision_out(rev, count)
         for rev, count in revisions.list_revisions_with_file_counts(session, target_id)
     ]
-
-
-@router.get("/targets/{target_id}/parity", response_model=ParityOut)
-def target_parity(target_id: int, session: Session = Depends(get_session)):
-    """Whether the head revision agrees with the files on disk.
-
-    The phase's evidence, and strictly read-only: parity never repairs or
-    re-snapshots, because a self-healing check would hide the drift it exists
-    to surface.
-    """
-    target = _target_or_404(session, target_id)
-    parity = revisions.target_parity(session, target)
-    return ParityOut(
-        has_revision=parity.has_revision,
-        in_sync=parity.in_sync,
-        rev=parity.rev,
-        tree_hash=parity.tree_hash,
-        only_in_db=list(parity.diff.only_in_db),
-        only_on_disk=list(parity.diff.only_on_disk),
-        modified=list(parity.diff.modified),
-    )
 
 
 def _revision_or_404(session: Session, revision_id: int):

@@ -16,3 +16,19 @@ export function Field({ label, children }) {
     </label>
   );
 }
+
+// A refused write, when the reason is a live run.
+//
+// It is not a failure the operator caused and it has a specific remedy, so it
+// gets its own banner rather than the generic error area -- and both write
+// surfaces (stories, configuration) say the same thing, because the server
+// refuses them for the same reason.
+export function LiveRunBanner({ detail }) {
+  if (!detail) return null;
+  return (
+    <div className="banner banner-bad">
+      <strong>Not saved — this target has a live run.</strong>
+      <div>{detail}</div>
+    </div>
+  );
+}

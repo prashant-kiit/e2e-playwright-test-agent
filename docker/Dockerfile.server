@@ -1,5 +1,11 @@
-# FastAPI backend image. Built from the repo root; apps/ and prompts/ arrive via
-# the /workspace mount (QA_REPO_ROOT) until DESIGN.md P3 moves config into Postgres.
+# FastAPI backend image. Nothing is mounted into it: the prompts, the agent
+# runtime and the delivery templates all ship inside the server package (they
+# are under server/app/, which is copied below), and a target's configuration
+# and tree come from Postgres and blob storage.
+#
+# It does not ship the `claude` CLI or node, so QA_RUNNER=claude needs an image
+# that does -- P4's prebaked per-run sandbox image. The default fake runner needs
+# neither.
 FROM python:3.13-slim
 
 # git is a runtime dependency, not a build one: app/delivery clones, commits and

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Protocol
 
 from ..domain.steps import Step
+from ..target_config import TargetConfig
 
 # A sink for a single log line (already newline-free).
 Emit = Callable[[str], None]
@@ -21,13 +22,28 @@ Emit = Callable[[str], None]
 
 @dataclass(frozen=True)
 class StepContext:
+    """Everything a Runner needs for one step, and nothing it has to look up.
+
+    `worktree` arrived with P3: the tree hydrate built from the head revision,
+    which is the only place the agent works. It reaches a sandboxed runner the
+    same way it reaches the in-process one, which is the whole reason it travels
+    in the context rather than being read from config inside the runner.
+
+    `target` arrived with it, for the same reason and one more: `app.json` does
+    not exist, so `baseURL`, `locators` and `agentNotes` have to reach the
+    agent's prompt from the row, and a Runner must not need a database session
+    to read them.
+    """
+
     run_id: int
     run_key: str
-    app: str            # apps/<app> folder name
+    app: str            # the target's slug
     story_id: str       # e.g. SCRUM-201
     mode: str           # "changed" | "full"
     step: Step
     run_dir: Path       # per-run working dir (logs + Playwright output)
+    worktree: Path      # per-run hydrated tree: the agent's working directory
+    target: TargetConfig  # the row's config, rendered into the prompt
     prev_session_id: str | None  # Claude Code session to --resume, if any
 
 

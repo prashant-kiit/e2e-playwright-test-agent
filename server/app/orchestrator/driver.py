@@ -13,6 +13,7 @@ from collections.abc import Callable
 
 from .. import config, repo
 from ..domain.steps import STEP_ORDER, resume_step, step_index
+from ..target_config import config_of
 from .runner import Emit, Runner, StepContext
 
 SessionFactory = Callable[[], "object"]  # a callable returning a SQLAlchemy Session
@@ -26,11 +27,13 @@ def run_pipeline(
     collect: Callable[[int, object], None] | None = None,
 ) -> None:
     """`collect` is the driver's ONE step-boundary hook, fired after each
-    completed step. Artifact collection is composed into it by the launcher.
+    completed step. Artifact collection and ingest are composed into it by the
+    launcher, which decides which of them may fail a run.
 
     Keep it single (DESIGN.md §13). Work that needs to happen at a step boundary
-    -- P2's sync-out, uploading blobs and committing a revision -- is composed
-    into this callable by the caller, not added as a second parameter.
+    -- uploading blobs and committing revision N+1 -- is composed into this
+    callable by the caller, not added as a second parameter. Hydrate and
+    teardown run in the launcher *around* this function for the same reason.
     """
     emit = emit or (lambda line: None)
     collect = collect or (lambda run_id, step: None)
@@ -40,9 +43,16 @@ def run_pipeline(
         run = repo.get_run(s, run_id)
         run_key, app, story_id, mode = run.run_key, run.target.app, run.story_id, run.mode
         last_completed = run.last_completed_step
+        # Read once, here, where the run's other immutable facts are read: a
+        # Runner must not need a session, least of all a sandboxed one.
+        target_cfg = config_of(run.target)
 
     start = resume_step(last_completed)
     rd = config.run_dir(run_key)
+    # The worktree the launcher hydrated, named by the same function it used.
+    # Derived rather than passed in, so the driver keeps exactly one injected
+    # callable (DESIGN.md §13) and the two cannot disagree about the path.
+    worktree = config.worktree_dir(run_key)
 
     if start is None:  # every step already done; just finalize
         with session_factory() as s:
@@ -80,6 +90,8 @@ def run_pipeline(
             mode=mode,
             step=step,
             run_dir=rd,
+            worktree=worktree,
+            target=target_cfg,
             prev_session_id=prev_sid,
         )
 
@@ -105,13 +117,22 @@ def run_pipeline(
 
         with session_factory() as s:
             repo.complete_step(s, run_id, step)
-        try:  # the step-boundary hook is best-effort; never fail the run on it
+
+        # The step-boundary hook is NOT best-effort. Its ingest half is what
+        # records the step's work, so a hook that raises means the work was
+        # dropped -- and a run that reports success having dropped its work is
+        # the failure mode P3 exists to make impossible. It therefore fails the
+        # step and the run exactly as a crashed runner does, freeing the lock
+        # and recording the reason. (P2 swallowed this, correctly, while `apps/`
+        # was authoritative; that is the behaviour P3 inverts.)
+        try:
             collect(run_id, step)
         except Exception as exc:
-            # A backstop, not the usual path: the launcher's composed hook
-            # catches and reports each half itself, so reaching here means the
-            # composition raised rather than one of the halves.
-            emit(f"=== step {step.value}: step-boundary hook failed: {exc} ===")
+            with session_factory() as s:
+                repo.fail_step(s, run_id, step)
+                repo.fail_run(s, run_id, f"{step.value} step boundary failed: {exc}")
+            emit(f"=== step {step.value}: step boundary FAILED: {exc} ===")
+            return
         emit(f"=== step {step.value} done ===")
 
     with session_factory() as s:

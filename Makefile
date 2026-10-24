@@ -81,11 +81,12 @@ ci-test: ## `make test` as CI runs it: fails instead of skipping if Postgres is 
 
 # --- target-repo delivery (app/delivery; was scripts/*.sh) ---------------
 # APP and STORY are required where shown. GITHUB_PAT comes from the environment
-# or .env (the `gh auth token` fallback is gone with `gh`).
+# only -- neither `gh auth token` nor a `.env` beside the workspace is a
+# fallback (README.md §6.5).
 #
 # Each of these is also an API route (POST /targets/<id>/deliver, /reset,
-# GET /targets/<id>/bootstrapped), but only the bootstrap form is wired into the
-# portal UI so far -- delivery and reset are CLI- or API-only today.
+# GET /targets/<id>/delivery), but only the delivery state is wired into the
+# portal UI so far -- delivering and resetting are CLI- or API-only today.
 
 check: ## Is APP's target repo bootstrapped? (read-only) — make check APP=saucedemo
 	@test -n "$(APP)" || { echo "usage: make check APP=<app>"; exit 2; }

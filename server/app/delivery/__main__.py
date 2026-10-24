@@ -29,7 +29,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_check = sub.add_parser("check", help="is the app's target repo bootstrapped? (read-only)")
+    p_check = sub.add_parser(
+        "check", help="is this target delivered, or N revisions ahead? (read-only)"
+    )
     p_check.add_argument("app")
 
     p_boot = sub.add_parser("bootstrap", help="push this repo's infra files to the target repo")
@@ -65,19 +67,16 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "check":
             ready, target = is_bootstrapped(args.app, tools=tools)
+            state = tools.catalog.state(args.app)
+            print(f"Target: {target.repo} ({target.branch})")
+            print(f"State:  {state.describe()}")
+            if state.delivered_sha:
+                print(f"Commit: {state.delivered_sha}")
             if ready:
-                print(
-                    f"bootstrapped: {target.repo} ({target.branch}) is ready for "
-                    f"app '{target.app}'"
-                )
                 return EXIT_OK
             print(
-                f"NOT bootstrapped: {target.repo} ({target.branch}) is missing infra "
-                f"for app '{target.app}'.",
-                file=sys.stderr,
-            )
-            print(
-                f"Run:  python -m app.delivery bootstrap {target.app}",
+                f"NOT bootstrapped: nothing has been delivered to {target.repo} yet. "
+                f"The first approved delivery sets the repo up.",
                 file=sys.stderr,
             )
             return EXIT_NOT_BOOTSTRAPPED
@@ -105,6 +104,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"App:    {result.app} -> {result.repo}")
             print(f"Story:  {result.story_id}  branch {result.branch}")
+            if result.delivered_sha:
+                print(f"Commit: {result.delivered_sha} (recorded as delivered)")
             print(result.message)
             return EXIT_OK
 

@@ -40,14 +40,19 @@ export default function Settings() {
           </dd>
           <dt>Anthropic API key</dt>
           <dd>{settings.anthropic_api_key_set ? "configured" : "not set"}</dd>
-          <dt>Repo root</dt>
-          <dd className="mono">{settings.repo_root}</dd>
           <dt>Runs dir</dt>
           <dd className="mono">{settings.runs_dir}</dd>
+          <dt>Worktrees dir</dt>
+          <dd className="mono">{settings.worktrees_dir}</dd>
         </dl>
         <p className="muted">
           These come from the backend environment (QA_RUNNER, ANTHROPIC_MODEL, …). Editing from
           the UI is a later milestone.
+        </p>
+        <p className="muted">
+          There is no repo root. A target&rsquo;s configuration and its tree live in Postgres and
+          blob storage; the two directories above are per-run scratch — a worktree is built from
+          the head revision before a run and deleted after it.
         </p>
       </section>
 

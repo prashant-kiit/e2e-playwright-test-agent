@@ -6,9 +6,21 @@ single step and carries the Claude Code session across steps with --resume, so
 exploratory context (step 3) survives into generation (step 4). stdout is teed
 to the run dir's session.jsonl and relayed line-by-line to the log bus.
 
-Requires the claude CLI and the repo checkout (apps/, prompts/) to be present in
-the execution environment; DESIGN.md P4 moves that into a prebaked per-run
-sandbox image. Not exercised by the automated tests (that is the FakeRunner's job).
+Two things changed in P3 and both are about where things come from:
+
+- **The working directory is the hydrated worktree** (`ctx.worktree`), built from
+  the head revision before the pipeline started. The agent works there and
+  nowhere else. Run output -- `session.jsonl`, Playwright's results -- still goes
+  to the run directory through QA_RUN_DIR, which the generated config reads.
+- **The prompts and the agent runtime ship with this package**, so an API image
+  needs no mounted repo to run an agent, and nothing here resolves a path
+  relative to a checkout.
+
+The prompt is rendered from the target's row -- `baseURL`, `locators`,
+`agentNotes` -- because `app.json` does not exist. Not exercised by the
+automated tests end to end (that is the FakeRunner's job), but the two decisions
+made before anything is spawned, the prompt text and the invocation, are plain
+functions and are tested.
 """
 
 from __future__ import annotations
@@ -18,11 +30,11 @@ import os
 import subprocess
 from pathlib import Path
 
-from .. import config
+from ..delivery.render import StoryRef, resolve_story, tracked_tree
 from ..domain.steps import Step
 from .runner import Emit, StepContext, StepResult
 
-_STEP_FILE = {
+STEP_FILE = {
     Step.READ_STORY: "1-read_story.md",
     Step.PLAN: "2-plan.md",
     Step.EXPLORE: "3-explore.md",
@@ -30,30 +42,89 @@ _STEP_FILE = {
     Step.HEAL: "5-heal.md",
 }
 
+# server/app/orchestrator/claude.py -> parents: [orchestrator, app, ...]
+_PACKAGE_DIR = Path(__file__).resolve().parents[1]
 
-def _build_message(ctx: StepContext) -> str:
-    steps_dir = config.repo_root() / "prompts" / "steps"
-    header = (steps_dir / "_context.md").read_text()
-    body = (steps_dir / _STEP_FILE[ctx.step]).read_text()
+
+def prompts_dir() -> Path:
+    """The step prompts, shipped with the server package.
+
+    Package data, not a path under a checkout: the whole point of P3 is that an
+    API image can run an agent with nothing mounted. Prompts move into Postgres
+    with tenant overrides in P5 (DESIGN.md §12); code-shipped is this phase.
+    """
+    return _PACKAGE_DIR / "prompts"
+
+
+def runtime_dir() -> Path:
+    """The agent's shipped Claude Code config: settings, MCP servers, subagents.
+
+    Owned by the application, not the repo-root `.claude/`, which exists only
+    for developing this harness.
+    """
+    return _PACKAGE_DIR / "agent_runtime"
+
+
+def resolve_run_story(ctx: StepContext) -> StoryRef:
+    """The story's worktree-relative paths, from the tree the run works in.
+
+    The orchestrator already knows which story this is, so there is no globbing
+    and no guessing: `ctx.story_id` plus the tracked paths of the hydrated tree
+    give exactly one story file, or it is an error. The worktree holds exactly
+    one target, which is also what makes a project name or a test path unable to
+    reach another customer's tests.
+    """
+    paths = [path for path, _on_disk in tracked_tree(ctx.worktree)]
+    return resolve_story(ctx.worktree, ctx.story_id, paths=paths)
+
+
+def _agent_notes(notes: tuple[str, ...]) -> str:
+    if not notes:
+        return "(none recorded for this target)"
+    return "\n".join(f"- {note}" for note in notes)
+
+
+def build_message(ctx: StepContext) -> str:
+    """The prompt for one step: the shared context header, then the step body.
+
+    Every placeholder is substituted here. A prompt that reached the agent with
+    a literal `{PLACEHOLDER}` in it would be a prompt the agent has to guess at,
+    which in an unattended session means a wrong guess nobody sees.
+    """
+    steps = prompts_dir() / "steps"
+    header = (steps / "_context.md").read_text()
+    body = (steps / STEP_FILE[ctx.step]).read_text()
     text = f"{header}\n\n---\n\n{body}"
+
+    story = resolve_run_story(ctx)
+    cfg = ctx.target
     for token, value in {
         "{STORY_ID}": ctx.story_id,
+        "{STORY_TITLE}": story.title,
         "{APP}": ctx.app,
+        "{NAME}": cfg.name,
         "{MODE}": ctx.mode,
         "{RUN_KEY}": ctx.run_key,
+        "{SLUG}": story.slug,
+        "{STORY_FILE}": story.story_rel,
+        "{PLAN_FILE}": story.plan_rel,
+        "{TEST_DIR}": story.tests_rel,
+        "{SEED}": story.seed_rel,
+        "{BASE_URL}": cfg.base_url,
+        "{LOCATORS}": cfg.locators or "(no convention recorded; prefer roles and test ids)",
+        "{AGENT_NOTES}": _agent_notes(cfg.agent_notes),
+        "{CHROMIUM_PROJECT}": cfg.chromium_project,
+        "{TARGET_REPO}": cfg.target_repo,
+        "{TARGET_BRANCH}": cfg.target_branch,
+        "{BRANCH}": story.branch,
+        "{PR_TITLE}": story.pr_title,
     }.items():
         text = text.replace(token, value)
     return text
 
 
-def runtime_dir() -> Path:
-    """The app's shipped agent config, owned by the application (not the
-    repo-root .claude/, which exists only for development)."""
-    return config.repo_root() / "apps" / "agent" / "runtime"
-
-
 def _agents_json() -> str:
-    """Build the --agents payload from runtime/agents/*.md.
+    """Build the --agents payload from agent_runtime/agents/*.md.
 
     Passing subagents inline (rather than via a plugin) keeps their names bare
     (e.g. "playwright-test-planner"), matching how the step prompts invoke them;
@@ -78,9 +149,30 @@ def _agents_json() -> str:
     return json.dumps(agents)
 
 
-def _isolation_flags() -> list[str]:
-    """Load ONLY the app's shipped agent config (apps/agent/runtime) instead of
-    inheriting the repo-root .claude/ used for development.
+def _materialise_settings(ctx: StepContext) -> Path:
+    """Write the shipped settings with `{HOOKS_DIR}` resolved, into the run dir.
+
+    The template cannot carry the hook's path: `$CLAUDE_PROJECT_DIR` is the
+    worktree now, and the hook script ships with this package rather than with
+    the target's tree -- a tree the agent writes is the last place to look for
+    something we then execute.
+
+    It lands in the run dir rather than in the worktree for two reasons: the
+    worktree is what ingest turns into a revision, and an operator debugging a
+    run wants to see exactly the settings the agent ran with, which the artifact
+    sweep then gives them.
+    """
+    template = json.loads((runtime_dir() / "settings.json").read_text())
+    rendered = json.dumps(template).replace("{HOOKS_DIR}", str(runtime_dir() / "hooks"))
+    ctx.run_dir.mkdir(parents=True, exist_ok=True)
+    path = ctx.run_dir / "agent-settings.json"
+    path.write_text(rendered)
+    return path
+
+
+def _isolation_flags(ctx: StepContext) -> list[str]:
+    """Load ONLY the packaged agent config instead of inheriting the repo-root
+    `.claude/` used for development.
 
     --setting-sources "" drops ambient user/project/local .claude discovery; the
     app's permissions/hooks, MCP servers and subagents are then supplied
@@ -93,30 +185,49 @@ def _isolation_flags() -> list[str]:
     rt = runtime_dir()
     return [
         "--setting-sources", "",
-        "--settings", str(rt / "settings.json"),
+        "--settings", str(_materialise_settings(ctx)),
         "--mcp-config", str(rt / "mcp.json"),
         "--strict-mcp-config",
         "--agents", _agents_json(),
     ]
 
 
-def _summarise(line: str) -> str | None:
-    """Turn one stream-json line into a short human log line (or None to skip)."""
-    try:
-        obj = json.loads(line)
-    except json.JSONDecodeError:
-        return line.rstrip()
-    kind = obj.get("type")
+def step_invocation(
+    ctx: StepContext, *, workers: str = "2"
+) -> tuple[list[str], dict[str, str], Path]:
+    """The command, environment and working directory for one step.
+
+    A plain function so the two decisions that matter can be asserted without
+    spawning the CLI: the agent runs **in the hydrated worktree**, and its
+    output still goes to **the run directory**.
+    """
+    cmd = ["claude", "-p", build_message(ctx), "--output-format", "stream-json", "--verbose"]
+    cmd += _isolation_flags(ctx)
+    if ctx.prev_session_id:
+        cmd += ["--resume", ctx.prev_session_id]
+    # QA_RUN_DIR/QA_WORKERS reach the generated playwright.config.ts only here.
+    env = {**os.environ, "QA_RUN_DIR": str(ctx.run_dir), "QA_WORKERS": workers}
+    return cmd, env, ctx.worktree
+
+
+def _summarise(event: dict) -> str | None:
+    """Turn one stream-json event into a short human log line (or None to skip).
+
+    Takes the parsed event, not the line: the reader already needs the object
+    for the session id and the result, and parsing each line twice was how the
+    two could disagree about what it said.
+    """
+    kind = event.get("type")
     if kind == "assistant":
-        for block in obj.get("message", {}).get("content", []):
+        for block in event.get("message", {}).get("content", []):
             if block.get("type") == "text" and block.get("text", "").strip():
                 return block["text"].strip()
         return None
     if kind == "result":
-        cost = obj.get("total_cost_usd")
-        return f"[result] is_error={obj.get('is_error')} cost=${cost}"
+        cost = event.get("total_cost_usd")
+        return f"[result] is_error={event.get('is_error')} cost=${cost}"
     if kind == "system":
-        return f"[system] {obj.get('subtype', '')}".rstrip()
+        return f"[system] {event.get('subtype', '')}".rstrip()
     return None
 
 
@@ -126,14 +237,8 @@ class ClaudeRunner:
 
     def run_step(self, ctx: StepContext, emit: Emit) -> StepResult:
         ctx.run_dir.mkdir(parents=True, exist_ok=True)
-        message = _build_message(ctx)
+        cmd, env, cwd = step_invocation(ctx, workers=self.workers)
 
-        cmd = ["claude", "-p", message, "--output-format", "stream-json", "--verbose"]
-        cmd += _isolation_flags()
-        if ctx.prev_session_id:
-            cmd += ["--resume", ctx.prev_session_id]
-
-        env = {**os.environ, "QA_RUN_DIR": str(ctx.run_dir), "QA_WORKERS": self.workers}
         session_jsonl = ctx.run_dir / "session.jsonl"
         stderr_log = ctx.run_dir / "stderr.log"
 
@@ -142,8 +247,8 @@ class ClaudeRunner:
         with session_jsonl.open("a") as jf, stderr_log.open("a") as ef:
             proc = subprocess.Popen(
                 cmd,
-                cwd=str(config.repo_root()),
-                env=env,  # QA_RUN_DIR/QA_WORKERS reach playwright.config.ts only via this
+                cwd=str(cwd),  # the hydrated worktree: the agent works here only
+                env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=ef,
@@ -154,14 +259,18 @@ class ClaudeRunner:
             for line in proc.stdout:
                 jf.write(line)
                 try:
-                    obj = json.loads(line)
-                    if obj.get("session_id"):
-                        session_id = obj["session_id"]
-                    if obj.get("type") == "result":
-                        is_error = bool(obj.get("is_error", True))
+                    event = json.loads(line)
                 except json.JSONDecodeError:
-                    pass
-                summary = _summarise(line)
+                    # Not stream-json (a warning, a crash dump): pass it
+                    # through rather than lose it.
+                    if line.strip():
+                        emit(f"[{ctx.step.value}] {line.rstrip()}")
+                    continue
+                if event.get("session_id"):
+                    session_id = event["session_id"]
+                if event.get("type") == "result":
+                    is_error = bool(event.get("is_error", True))
+                summary = _summarise(event)
                 if summary:
                     emit(f"[{ctx.step.value}] {summary}")
             rc = proc.wait()

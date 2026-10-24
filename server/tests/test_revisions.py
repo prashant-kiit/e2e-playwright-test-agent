@@ -16,8 +16,9 @@ import pytest
 from app import repo, revisions
 from app.models import FileIndex, Revision
 from app.tenancy import current_tenant_id
-from tests.delivery_helpers import make_workspace
+from tests.delivery_helpers import make_worktree
 from tests.storage_helpers import FakeStorage
+from tests.target_helpers import create_target
 
 # sha256("alpha") and sha256("beta"), and the tree hash over the two-file tree
 # {"a.txt": "alpha", "b/c.txt": "beta"}. All three computed with `shasum -a 256`
@@ -57,23 +58,21 @@ def test_tree_hash_of_an_empty_tree_is_the_hash_of_nothing():
     assert len(revisions.tree_hash({})) == 64
 
 
-def test_a_one_byte_change_changes_the_tree_hash(tmp_path, monkeypatch):
-    workspace = make_workspace(tmp_path, app="demo")
-    monkeypatch.setenv("QA_REPO_ROOT", str(workspace))
+def test_a_one_byte_change_changes_the_tree_hash(tmp_path):
+    root = make_worktree(tmp_path / "wt")
 
-    before = revisions.scan_tracked_tree("demo")
-    (workspace / "apps" / "demo" / "tests" / "checkout" / "cart.spec.ts").write_text("// carts\n")
-    after = revisions.scan_tracked_tree("demo")
+    before = revisions.scan_tracked_tree(root)
+    (root / "tests" / "checkout" / "cart.spec.ts").write_text("// carts\n")
+    after = revisions.scan_tracked_tree(root)
 
     assert before.tree_hash != after.tree_hash
 
 
-def test_two_scans_of_an_unchanged_tree_agree(tmp_path, monkeypatch):
-    workspace = make_workspace(tmp_path, app="demo")
-    monkeypatch.setenv("QA_REPO_ROOT", str(workspace))
+def test_two_scans_of_an_unchanged_tree_agree(tmp_path):
+    root = make_worktree(tmp_path / "wt")
 
-    first = revisions.scan_tracked_tree("demo")
-    second = revisions.scan_tracked_tree("demo")
+    first = revisions.scan_tracked_tree(root)
+    second = revisions.scan_tracked_tree(root)
     assert first.tree_hash == second.tree_hash
     assert first.blobs == second.blobs
 
@@ -88,20 +87,19 @@ def test_the_blob_key_is_per_tenant_and_content_addressed():
 # --- snapshot and commit ------------------------------------------------
 
 @pytest.fixture()
-def target_env(session, tmp_path, monkeypatch):
-    """A real temp tree with one app, and a target row pointing at it."""
-    workspace = make_workspace(tmp_path, app="demo")
-    monkeypatch.setenv("QA_REPO_ROOT", str(workspace))
+def target_env(session, tmp_path):
+    """A hydrated-shaped worktree, and the target row whose tree it is."""
+    root = make_worktree(tmp_path / "wt")
     project = repo.create_project(session, name="demo")
-    target = repo.create_target(session, project_id=project.id, app="demo", name="Demo")
-    return target, workspace
+    target = create_target(session, project.id, app="demo", name="Demo")
+    return target, root
 
 
 def test_snapshotting_a_target_with_no_history_creates_revision_one(target_env, session):
-    target, workspace = target_env
+    target, root = target_env
     store = FakeStorage()
 
-    rev = revisions.snapshot_target(session, target, store, author="operator")
+    rev = revisions.commit_revision(session, target, store, root, author="operator")
 
     assert rev is not None
     assert rev.rev == 1
@@ -113,10 +111,10 @@ def test_snapshotting_a_target_with_no_history_creates_revision_one(target_env, 
 
 
 def test_the_file_index_lists_exactly_the_tracked_tree(target_env, session):
-    target, workspace = target_env
+    target, root = target_env
     store = FakeStorage()
 
-    rev = revisions.snapshot_target(session, target, store, author="operator")
+    rev = revisions.commit_revision(session, target, store, root, author="operator")
 
     rows = list(session.scalars(repo.select(FileIndex).where(FileIndex.revision_id == rev.id)))
     assert {r.path for r in rows} == {
@@ -134,20 +132,16 @@ def test_the_file_index_lists_exactly_the_tracked_tree(target_env, session):
     # Every row names a blob that is actually in the store, with the real size.
     for row in rows:
         assert row.blob_key in store.objects
-        on_disk = (workspace / "apps" / "demo" / row.path) if row.path != "package.json" else (
-            workspace / "package.json"
-        )
         assert row.tenant_id == current_tenant_id()
-        if on_disk.is_file():
-            assert row.size == on_disk.stat().st_size
+        assert row.size == (root / row.path).stat().st_size
 
 
 def test_a_snapshot_of_an_unchanged_tree_commits_nothing(target_env, session):
-    target, _ = target_env
+    target, root = target_env
     store = FakeStorage()
 
-    first = revisions.snapshot_target(session, target, store, author="operator")
-    second = revisions.snapshot_target(session, target, store, author="operator")
+    first = revisions.commit_revision(session, target, store, root, author="operator")
+    second = revisions.commit_revision(session, target, store, root, author="operator")
 
     assert first is not None
     assert second is None, "an unchanged tree must not advance rev"
@@ -156,12 +150,12 @@ def test_a_snapshot_of_an_unchanged_tree_commits_nothing(target_env, session):
 
 
 def test_a_snapshot_after_one_change_commits_rev_two_chained_to_one(target_env, session):
-    target, workspace = target_env
+    target, root = target_env
     store = FakeStorage()
 
-    revisions.snapshot_target(session, target, store, author="operator")
-    (workspace / "apps" / "demo" / "tests" / "checkout" / "cart.spec.ts").write_text("// v2\n")
-    second = revisions.snapshot_target(session, target, store, author="operator")
+    revisions.commit_revision(session, target, store, root, author="operator")
+    (root / "tests" / "checkout" / "cart.spec.ts").write_text("// v2\n")
+    second = revisions.commit_revision(session, target, store, root, author="operator")
 
     assert second.rev == 2
     assert second.parent_rev == 1
@@ -170,10 +164,10 @@ def test_a_snapshot_after_one_change_commits_rev_two_chained_to_one(target_env, 
 
 def test_only_the_changed_blob_is_uploaded_on_the_second_snapshot(target_env, session):
     """Dedup: an unchanged file is stored once however many revisions name it."""
-    target, workspace = target_env
+    target, root = target_env
     store = FakeStorage()
 
-    revisions.snapshot_target(session, target, store, author="operator")
+    revisions.commit_revision(session, target, store, root, author="operator")
     after_first = set(store.objects)
     store.put_calls = 0  # count only the second snapshot's uploads
 
@@ -184,26 +178,26 @@ def test_only_the_changed_blob_is_uploaded_on_the_second_snapshot(target_env, se
         return original_put(key, path, content_type)
 
     store.put_file = counting_put
-    (workspace / "apps" / "demo" / "tests" / "checkout" / "cart.spec.ts").write_text("// v2\n")
-    revisions.snapshot_target(session, target, store, author="operator")
+    (root / "tests" / "checkout" / "cart.spec.ts").write_text("// v2\n")
+    revisions.commit_revision(session, target, store, root, author="operator")
 
     assert store.put_calls == 1, "only the changed file's blob should be uploaded"
     assert set(store.objects) - after_first, "the new blob is in the store"
 
 
-def test_two_targets_with_identical_infra_share_one_blob(session, tmp_path, monkeypatch):
-    workspace = make_workspace(tmp_path, app="one")
-    (workspace / "apps" / "two" / "user-stories").mkdir(parents=True)
-    (workspace / "apps" / "two" / "seed.spec.ts").write_text("// seed\n")
-    monkeypatch.setenv("QA_REPO_ROOT", str(workspace))
+def test_two_targets_with_identical_infra_share_one_blob(session, tmp_path):
+    """Each target's revision carries its own copy of the infra set; content
+    addressing is what makes that duplication free."""
+    root_one = make_worktree(tmp_path / "one")
+    root_two = make_worktree(tmp_path / "two")
 
     project = repo.create_project(session, name="demo")
-    one = repo.create_target(session, project_id=project.id, app="one", name="One")
-    two = repo.create_target(session, project_id=project.id, app="two", name="Two")
+    one = create_target(session, project.id, app="one", name="One")
+    two = create_target(session, project.id, app="two", name="Two")
     store = FakeStorage()
 
-    rev_one = revisions.snapshot_target(session, one, store, author="operator")
-    rev_two = revisions.snapshot_target(session, two, store, author="operator")
+    rev_one = revisions.commit_revision(session, one, store, root_one, author="operator")
+    rev_two = revisions.commit_revision(session, two, store, root_two, author="operator")
 
     def key_for(rev, path):
         return session.get(FileIndex, {"revision_id": rev.id, "path": path}).blob_key
@@ -218,14 +212,16 @@ def test_two_targets_with_identical_infra_share_one_blob(session, tmp_path, monk
 def test_a_storage_whose_upload_raises_leaves_no_rows(target_env, session):
     """Blob before row (invariant 3): a crash may leave an unreferenced blob,
     never a revision pointing at bytes that are not there."""
-    target, _ = target_env
+    target, root = target_env
 
     class ExplodingStorage(FakeStorage):
         def put_file(self, key, path, content_type=None):
             raise RuntimeError("object store is down")
 
     with pytest.raises(RuntimeError, match="object store is down"):
-        revisions.snapshot_target(session, target, ExplodingStorage(), author="operator")
+        revisions.commit_revision(
+            session, target, ExplodingStorage(), root, author="operator"
+        )
 
     session.rollback()
     assert list(session.scalars(repo.select(Revision))) == []
@@ -234,7 +230,7 @@ def test_a_storage_whose_upload_raises_leaves_no_rows(target_env, session):
 
 def test_an_existing_blob_is_not_re_uploaded(target_env, session):
     """`exists` is the one method the seam gained; this is what it is for."""
-    target, _ = target_env
+    target, root = target_env
 
     class CountingStorage(FakeStorage):
         def __init__(self):
@@ -251,44 +247,42 @@ def test_an_existing_blob_is_not_re_uploaded(target_env, session):
             super().put_file(key, path, content_type)
 
     store = CountingStorage()
-    revisions.snapshot_target(session, target, store, author="operator")
+    revisions.commit_revision(session, target, store, root, author="operator")
     first_puts = store.put_calls
     assert first_puts > 0
     assert store.exists_calls >= first_puts
 
-    # A second target over the same infra re-walks the same bytes.
-    project_id = target.project_id
-    other = repo.create_target(session, project_id=project_id, app="demo2", name="Demo2")
+    # A second target over a byte-identical worktree re-walks the same bytes.
+    other = create_target(session, target.project_id, app="demo2", name="Demo2")
     store.put_calls = 0
-    revisions.snapshot_target(session, other, store, author="operator")
+    revisions.commit_revision(session, other, store, root, author="operator")
 
-    # demo2 has no app folder of its own, so every file it tracks is infra that
-    # is already stored: nothing to upload.
+    # Every blob the second target names is already stored: nothing to upload.
     assert store.put_calls == 0
 
 
 def test_head_revision_is_none_for_a_target_with_no_revisions(target_env, session):
-    target, _ = target_env
+    target, root = target_env
     assert revisions.head_revision(session, target.id) is None
 
 
 def test_head_revision_is_the_greatest_rev_not_the_newest_row(target_env, session):
     """The head is derived, so nothing can disagree with it."""
-    target, workspace = target_env
+    target, root = target_env
     store = FakeStorage()
-    revisions.snapshot_target(session, target, store, author="operator")
-    (workspace / "apps" / "demo" / "tests" / "checkout" / "cart.spec.ts").write_text("// v2\n")
-    revisions.snapshot_target(session, target, store, author="operator")
+    revisions.commit_revision(session, target, store, root, author="operator")
+    (root / "tests" / "checkout" / "cart.spec.ts").write_text("// v2\n")
+    revisions.commit_revision(session, target, store, root, author="operator")
 
     assert revisions.head_revision(session, target.id).rev == 2
 
 
 def test_a_revision_records_the_run_that_produced_it(target_env, session):
-    target, _ = target_env
+    target, root = target_env
     run = repo.start_run(session, target_id=target.id, story_id="SCRUM-1", mode="full")
 
-    rev = revisions.snapshot_target(
-        session, target, FakeStorage(), author="run", produced_by_run_id=run.id
+    rev = revisions.commit_revision(
+        session, target, FakeStorage(), root, author="run", produced_by_run_id=run.id
     )
 
     assert rev.produced_by_run_id == run.id

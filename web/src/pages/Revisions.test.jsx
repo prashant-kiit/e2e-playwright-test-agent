@@ -4,11 +4,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api.js";
 import Revisions from "./Revisions.jsx";
 
+// The parity banner's tests and the snapshot action's tests are deleted, not
+// adapted. Parity compared the database against an authoritative filesystem,
+// and there is no longer a second copy of the truth for it to compare against;
+// "snapshot the disk" stopped meaning anything for the same reason. A check
+// with nothing to check does not belong in the suite.
 vi.mock("../api.js", () => ({
   api: {
     listRevisions: vi.fn(),
-    snapshotTarget: vi.fn(),
-    targetParity: vi.fn(),
     revisionFiles: vi.fn(),
     revisionFile: vi.fn(),
   },
@@ -32,24 +35,13 @@ const REV_1 = {
   parent_rev: null,
   tree_hash: "a".repeat(64),
   produced_by_run_id: null,
-  author: "baseline",
+  author: "operator",
   created_at: "2026-10-23T11:00:00Z",
   file_count: 10,
 };
 
-const IN_SYNC = {
-  has_revision: true,
-  in_sync: true,
-  rev: 2,
-  tree_hash: "b".repeat(64),
-  only_in_db: [],
-  only_on_disk: [],
-  modified: [],
-};
-
-function arrange({ revisions = [REV_2, REV_1], parity = IN_SYNC, files = [], contents = "" } = {}) {
+function arrange({ revisions = [REV_2, REV_1], files = [], contents = "" } = {}) {
   api.listRevisions.mockResolvedValue(revisions);
-  api.targetParity.mockResolvedValue(parity);
   api.revisionFiles.mockResolvedValue(files);
   api.revisionFile.mockResolvedValue(contents);
 }
@@ -79,100 +71,41 @@ describe("Revisions panel", () => {
     await screen.findByRole("button", { name: /^rev 2$/i });
     const rows = screen.getAllByRole("row").slice(1); // drop the header row
     expect(rows[0]).toHaveTextContent("2");
-    expect(rows[1]).toHaveTextContent("baseline");
+    expect(rows[1]).toHaveTextContent("operator");
     expect(rows[0]).toHaveTextContent("11");
     expect(rows[1]).toHaveTextContent("10");
   });
 
-  it("explains the baseline-plus-changes pair on a first run", async () => {
+  it("explains why a five-step run leaves fewer than five revisions", async () => {
     arrange();
     render(<Revisions target={TARGET} />);
 
-    // Two revisions for what feels like one piece of work reads like an
-    // off-by-one unless the portal says otherwise.
-    const hint = await screen.findByText(/first run leaves/i);
-    expect(hint).toHaveTextContent(/two revisions/i);
-    expect(hint).toHaveTextContent(/inherited/i);
-    expect(hint).toHaveTextContent(/not an off-by-one/i);
+    // A run committing three revisions for five steps reads like a bug unless
+    // the panel says that `rev` counts changes rather than steps.
+    const hint = await screen.findByText(/only at the step boundaries/i);
+    expect(hint).toHaveTextContent(/changed/i);
+    expect(hint).toHaveTextContent(/operator/i);
   });
 
-  it("renders a green banner when the head revision matches disk", async () => {
-    arrange();
-    const { container } = render(<Revisions target={TARGET} />);
-
-    expect(await screen.findByText(/in sync/i)).toBeInTheDocument();
-    expect(container.querySelector(".banner")).toHaveClass("success");
-  });
-
-  it("names the offending paths when parity is out of sync", async () => {
-    arrange({
-      parity: {
-        has_revision: true,
-        in_sync: false,
-        rev: 2,
-        tree_hash: "b".repeat(64),
-        only_in_db: ["tests/checkout/gone.spec.ts"],
-        only_on_disk: ["tests/checkout/new.spec.ts"],
-        modified: ["tests/checkout/cart.spec.ts"],
-      },
-    });
-    const { container } = render(<Revisions target={TARGET} />);
-
-    expect(await screen.findByText(/not in sync/i)).toBeInTheDocument();
-    expect(container.querySelector(".banner")).not.toHaveClass("success");
-    // A mismatch must read as a bug report, so every path is named.
-    expect(screen.getByText("tests/checkout/gone.spec.ts")).toBeInTheDocument();
-    expect(screen.getByText("tests/checkout/new.spec.ts")).toBeInTheDocument();
-    expect(screen.getByText("tests/checkout/cart.spec.ts")).toBeInTheDocument();
-    expect(screen.getByText(/only in the database/i)).toBeInTheDocument();
-    expect(screen.getByText(/only on disk/i)).toBeInTheDocument();
-    expect(screen.getByText(/different contents/i)).toBeInTheDocument();
-  });
-
-  it("reports a never-snapshotted target as its own state, not as in sync", async () => {
-    arrange({
-      revisions: [],
-      parity: {
-        has_revision: false,
-        in_sync: false,
-        rev: null,
-        tree_hash: null,
-        only_in_db: [],
-        only_on_disk: [],
-        modified: [],
-      },
-    });
-    const { container } = render(<Revisions target={TARGET} />);
-
-    expect(await screen.findByText(/No revisions yet\. Take a snapshot/i)).toBeInTheDocument();
-    expect(container.querySelector(".banner")).toHaveTextContent(/nothing to compare/i);
-    expect(screen.queryByText(/in sync/i)).not.toBeInTheDocument();
-    expect(container.querySelector(".banner")).not.toHaveClass("success");
-  });
-
-  it("takes a snapshot on demand and reloads", async () => {
-    arrange({ revisions: [], parity: { has_revision: false, in_sync: false, rev: null, tree_hash: null, only_in_db: [], only_on_disk: [], modified: [] } });
-    api.snapshotTarget.mockResolvedValue({ created: true, revision: REV_1 });
+  it("says a target with no revisions cannot be run", async () => {
+    arrange({ revisions: [] });
     render(<Revisions target={TARGET} />);
 
-    await screen.findByText(/No revisions yet\. Take a snapshot/i);
-    arrange({ revisions: [REV_1], parity: { ...IN_SYNC, rev: 1 } });
-    await userEvent.click(screen.getByRole("button", { name: /snapshot now/i }));
-
-    await waitFor(() => expect(api.snapshotTarget).toHaveBeenCalledWith(TARGET.id));
-    expect(await screen.findByText(/Snapshotted: revision 1/i)).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: /^rev 1$/i })).toBeInTheDocument();
+    // A target created in the portal has revision 1 from the moment it exists,
+    // so an empty history is a broken target rather than a new one.
+    expect(await screen.findByText(/No revisions yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/cannot be run/i)).toBeInTheDocument();
   });
 
-  it("says so when a snapshot finds nothing to commit", async () => {
+  it("offers no way to write a revision from this panel", async () => {
     arrange();
-    api.snapshotTarget.mockResolvedValue({ created: false, revision: REV_2 });
     render(<Revisions target={TARGET} />);
-
     await screen.findByRole("button", { name: /^rev 2$/i });
-    await userEvent.click(screen.getByRole("button", { name: /snapshot now/i }));
 
-    expect(await screen.findByText(/No change .* nothing was committed/i)).toBeInTheDocument();
+    // Revisions are written by a run's ingest and by the story and config
+    // editors. Displaying a tree must not be able to change one.
+    expect(screen.queryByRole("button", { name: /snapshot/i })).not.toBeInTheDocument();
+    expect(api.listRevisions).toHaveBeenCalledWith(TARGET.id);
   });
 
   it("lists the selected revision's files with their sizes", async () => {

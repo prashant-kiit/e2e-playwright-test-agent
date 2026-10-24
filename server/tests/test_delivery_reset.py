@@ -17,7 +17,7 @@ from tests.delivery_helpers import (
     FakeGitHub,
     make_bare_remote,
     make_tools,
-    make_workspace,
+    make_worktree,
     remote_branches,
     remote_files,
     remote_log,
@@ -25,28 +25,27 @@ from tests.delivery_helpers import (
 
 
 @pytest.fixture()
-def env(tmp_path, monkeypatch):
-    workspace = make_workspace(tmp_path / "ws")
+def env(tmp_path):
+    source = make_worktree(tmp_path / "source")
     remote = make_bare_remote(tmp_path)
-    monkeypatch.setenv("QA_REPO_ROOT", str(workspace))
-    return workspace, remote
+    return source, remote
 
 
 @pytest.fixture()
 def populated(env):
     """A remote with infra on master and one delivered story branch."""
-    workspace, remote = env
-    bootstrap("demo", tools=make_tools(workspace, remote, FakeGitHub(has_commits=False)))
+    source, remote = env
+    bootstrap("demo", tools=make_tools(source, remote, FakeGitHub(has_commits=False)))
     push_artifacts(
         "demo",
         "SCRUM-1",
-        tools=make_tools(workspace, remote, FakeGitHub(has_commits=True, bootstrapped=True)),
+        tools=make_tools(source, remote, FakeGitHub(has_commits=True)),
     )
-    return workspace, remote
+    return source, remote
 
 
 def test_a_wrong_confirmation_aborts_and_changes_nothing(populated):
-    workspace, remote = populated
+    source, remote = populated
     before_branches = remote_branches(remote)
     before_log = remote_log(remote)
 
@@ -54,7 +53,7 @@ def test_a_wrong_confirmation_aborts_and_changes_nothing(populated):
         reset_target(
             "demo",
             confirm_repo="o/wrong",
-            tools=make_tools(workspace, remote, FakeGitHub(has_commits=True)),
+            tools=make_tools(source, remote, FakeGitHub(has_commits=True)),
         )
 
     assert remote_branches(remote) == before_branches
@@ -62,24 +61,24 @@ def test_a_wrong_confirmation_aborts_and_changes_nothing(populated):
 
 
 def test_an_empty_confirmation_aborts(populated):
-    workspace, remote = populated
+    source, remote = populated
     with pytest.raises(errors.ConfirmationMismatch):
         reset_target(
             "demo",
             confirm_repo="",
-            tools=make_tools(workspace, remote, FakeGitHub(has_commits=True)),
+            tools=make_tools(source, remote, FakeGitHub(has_commits=True)),
         )
 
 
 def test_dry_run_reports_the_branches_it_would_delete_and_changes_nothing(populated):
-    workspace, remote = populated
+    source, remote = populated
     before = remote_branches(remote)
 
     result = reset_target(
         "demo",
         confirm_repo="o/r",
         dry_run=True,
-        tools=make_tools(workspace, remote, FakeGitHub(has_commits=True)),
+        tools=make_tools(source, remote, FakeGitHub(has_commits=True)),
     )
 
     assert result.reset_branch is False
@@ -89,23 +88,23 @@ def test_dry_run_reports_the_branches_it_would_delete_and_changes_nothing(popula
 
 
 def test_dry_run_does_not_need_a_confirmation(populated):
-    workspace, remote = populated
+    source, remote = populated
     result = reset_target(
         "demo",
         confirm_repo="",
         dry_run=True,
-        tools=make_tools(workspace, remote, FakeGitHub(has_commits=True)),
+        tools=make_tools(source, remote, FakeGitHub(has_commits=True)),
     )
     assert result.reset_branch is False
 
 
 def test_reset_empties_the_target_branch_and_deletes_the_others(populated):
-    workspace, remote = populated
+    source, remote = populated
 
     result = reset_target(
         "demo",
         confirm_repo="o/r",
-        tools=make_tools(workspace, remote, FakeGitHub(has_commits=True)),
+        tools=make_tools(source, remote, FakeGitHub(has_commits=True)),
     )
 
     assert result.reset_branch is True
@@ -118,11 +117,11 @@ def test_reset_empties_the_target_branch_and_deletes_the_others(populated):
 
 
 def test_an_already_empty_repo_is_a_no_op(env):
-    workspace, remote = env
+    source, remote = env
     result = reset_target(
         "demo",
         confirm_repo="o/r",
-        tools=make_tools(workspace, remote, FakeGitHub(has_commits=False)),
+        tools=make_tools(source, remote, FakeGitHub(has_commits=False)),
     )
 
     assert result.already_empty is True
@@ -131,10 +130,10 @@ def test_an_already_empty_repo_is_a_no_op(env):
 
 
 def test_plan_reset_is_read_only(populated):
-    workspace, remote = populated
+    source, remote = populated
     before = remote_branches(remote)
 
-    plan = plan_reset("demo", tools=make_tools(workspace, remote, FakeGitHub(has_commits=True)))
+    plan = plan_reset("demo", tools=make_tools(source, remote, FakeGitHub(has_commits=True)))
 
     assert plan.already_empty is False
     assert remote_branches(remote) == before
@@ -142,14 +141,14 @@ def test_plan_reset_is_read_only(populated):
 
 def test_bootstrap_works_again_after_a_reset(populated):
     """The documented follow-up: reset, then bootstrap starts clean."""
-    workspace, remote = populated
+    source, remote = populated
     reset_target(
         "demo",
         confirm_repo="o/r",
-        tools=make_tools(workspace, remote, FakeGitHub(has_commits=True)),
+        tools=make_tools(source, remote, FakeGitHub(has_commits=True)),
     )
 
-    result = bootstrap("demo", tools=make_tools(workspace, remote, FakeGitHub(has_commits=True)))
+    result = bootstrap("demo", tools=make_tools(source, remote, FakeGitHub(has_commits=True)))
 
     assert result.pushed is True
     assert "playwright.config.ts" in remote_files(remote)

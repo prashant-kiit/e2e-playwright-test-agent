@@ -15,6 +15,7 @@ from app import repo
 from app.db import Base
 from app.models import Revision, Tenant
 from app.tenancy import DEFAULT_TENANT_ID, current_tenant_id
+from tests.target_helpers import create_target
 
 
 def test_every_table_has_a_non_null_tenant_id():
@@ -60,7 +61,7 @@ def test_the_migration_seeds_exactly_one_tenant(session):
 def test_insert_paths_set_tenant_id_explicitly(session):
     """Not by relying on a database default -- there is none to rely on."""
     project = repo.create_project(session, name="demo")
-    target = repo.create_target(session, project_id=project.id, app="a", name="A")
+    target = create_target(session, project.id, app="a", name="A")
     run = repo.start_run(session, target_id=target.id, story_id="SCRUM-1", mode="full")
     step = repo.start_step(session, run.id, repo.Step.READ_STORY)
     lock = session.get(app.models.AppLock, target.id)
@@ -74,7 +75,7 @@ def test_a_revision_cannot_be_inserted_twice_for_the_same_target_and_rev(session
     a concurrent committer of rev N+1 loses here rather than on a version
     column."""
     project = repo.create_project(session, name="demo")
-    target = repo.create_target(session, project_id=project.id, app="a", name="A")
+    target = create_target(session, project.id, app="a", name="A")
 
     session.add(
         Revision(
@@ -109,7 +110,7 @@ def test_delivered_sha_exists_and_is_never_written_in_p2(session):
     assert "delivered_sha" in Revision.__table__.columns
 
     project = repo.create_project(session, name="demo")
-    target = repo.create_target(session, project_id=project.id, app="a", name="A")
+    target = create_target(session, project.id, app="a", name="A")
     rev = Revision(
         tenant_id=current_tenant_id(),
         target_id=target.id,

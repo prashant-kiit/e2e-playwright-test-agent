@@ -30,16 +30,11 @@ class DeliveryError(Exception):
     """Base: anything that stops a delivery tool."""
 
 
-class NotBootstrapped(DeliveryError):
-    """The target repo/branch is missing the infra an app needs."""
-
-    def __init__(self, repo: str, branch: str, app: str) -> None:
-        super().__init__(
-            f"target not bootstrapped: {repo} ({branch}) is missing infra for app '{app}'"
-        )
-        self.repo = repo
-        self.branch = branch
-        self.app = app
+# `NotBootstrapped` was deleted with the remote bootstrap check (P3-07). Nothing
+# can usefully *require* bootstrap before the first delivery any more, because
+# "bootstrapped" means "a revision carries a delivered_sha" and the first
+# delivery is what writes one. `ensure_bootstrapped` folds the setup into that
+# first approved push instead (DESIGN.md decision 16).
 
 
 class CredentialError(DeliveryError):

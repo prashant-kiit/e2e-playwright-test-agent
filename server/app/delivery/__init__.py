@@ -11,32 +11,33 @@ from .bootstrap import (
     BootstrapResult,
     ensure_bootstrapped,
     is_bootstrapped,
-    require_bootstrapped,
 )
 from .bootstrap import bootstrap as bootstrap_target
+from .catalog import Catalog, DbCatalog, DeliveryState
 from .errors import (
     ConfirmationMismatch,
     CredentialError,
     DeliveryError,
     GitError,
-    NotBootstrapped,
 )
 from .git import Git
 from .github import GitHubClient, PullRequest, TokenInfo
 from .push import PushResult, push_artifacts
-from .render import StoryRef, TargetRef, infra_files, resolve_story, resolve_target
+from .render import StoryRef, TargetRef, infra_files, resolve_story, target_ref
 from .reset import ResetResult, plan_reset, reset_target
 from .tools import Tools, default_tools
 
 __all__ = [
     "BootstrapResult",
+    "Catalog",
     "ConfirmationMismatch",
     "CredentialError",
+    "DbCatalog",
     "DeliveryError",
+    "DeliveryState",
     "Git",
     "GitError",
     "GitHubClient",
-    "NotBootstrapped",
     "PullRequest",
     "PushResult",
     "ResetResult",
@@ -51,8 +52,7 @@ __all__ = [
     "is_bootstrapped",
     "plan_reset",
     "push_artifacts",
-    "require_bootstrapped",
     "reset_target",
     "resolve_story",
-    "resolve_target",
+    "target_ref",
 ]

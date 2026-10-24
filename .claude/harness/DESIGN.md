@@ -104,9 +104,18 @@ a target. There is no mutable `targets.head_revision_id`, because revisions are
 append-only and a second place recording "which is current" is a second thing that can
 be wrong.
 
-`delivered_sha` is added by P2 and **left null for the whole phase** — delivery still
-works off the filesystem there, so invariant 5 ("'in sync?' is a Postgres query") is
-satisfied in P3, not P2.
+`delivered_sha` was added by P2 and left null for that whole phase, because delivery
+still worked off the filesystem there. **P3-07 writes it**, and it is the only writer:
+after a successful push, the commit the push produced is recorded on the revision it
+delivered. When the branch already held those bytes and no commit was created, the
+existing sha is recorded anyway — "delivered" is about the bytes, not about whether we
+happened to create a commit.
+
+That satisfies invariant 5. "In sync?" is now one query: the head is *delivered* if it
+carries a `delivered_sha`, otherwise it is *N revisions ahead* of the newest revision
+that does. **Bootstrap state is derived from the same column** — a target is bootstrapped
+if any of its revisions carries a sha — so the `ls-remote` and the worktree diff are both
+gone, and the answer is the same for everyone whether or not GitHub is reachable.
 
 ---
 
@@ -120,7 +129,7 @@ What is versioned, bundled and delivered — versus what is a run artifact:
 | `specs/` (plans) | `test-results/` |
 | `seed.spec.ts` | `playwright-report/` |
 | `tests/` | traces, videos, screenshots |
-| `playwright.config.ts` *(generated from P3)* | `session.jsonl` |
+| `playwright.config.ts` *(generated — P3)* | `session.jsonl` |
 | `package.json` + lockfile | |
 | `.gitignore` | |
 | `.github/workflows/playwright.yml` | |
@@ -128,32 +137,43 @@ What is versioned, bundled and delivered — versus what is a run artifact:
 `session.jsonl` is deliberately an **artifact keyed by run**, not tree content: Q2's
 resume needs it, but it must never reach a customer repo.
 
-**`playwright.config.ts` is generated from P3 onward, not before.** P2 tracks it as the
-hand-maintained file it still is, and snapshots its bytes like any other tracked file.
-It becomes generated with hydrate in P3, which makes it the one tracked file whose
-content *shape* changes; nothing in P2 anticipates that.
+**`playwright.config.ts` is generated — P3-02 implemented it.** P1 and P2 tracked it as
+the hand-maintained file it then was, and snapshotted its bytes like any other tracked
+file. It is now rendered from the target row by `render_playwright_config` in
+[render.py](../../server/app/delivery/render.py), re-rendered on every hydrate and
+re-rendered again before every ingest scan, so it has exactly one author. The
+hand-maintained copy at the repo root is deleted. It is single-target, which is what makes
+the project names bare — `chromium`, not `<app>-chromium` — and what stops a project name
+or a test path from reaching another customer's tests.
 
-**A tracked-tree file's source location is not its delivered location — P3 separates
-them.** Infra is delivered by identical path today: `INFRA_COMMON` in
-[render.py](../../server/app/delivery/render.py) lists a relative path and delivery reads
-that same path out of the workspace, so a template's source *is* its destination. For
-`.github/workflows/playwright.yml` that puts harness **output** at a path GitHub Actions
-treats as a live workflow of the harness repo, and a push to `master` makes this repo
-install browsers and run the suite discovered from `apps/*` against live external sites —
-a flaky red X for tests that are not the harness's. The authoritative run belongs in the
-customer's repo, where the PR is (§7); the harness repo is the one place it must never
-execute.
+**A tracked-tree file's source location is not its delivered location — P3-02 separated
+them.** Infra was delivered by identical path through P2: the list named a relative path
+and delivery read that same path out of the workspace, so a template's source *was* its
+destination. For `.github/workflows/playwright.yml` that put harness **output** at a path
+GitHub Actions treats as a live workflow of the harness repo, and a push to `master` made
+this repo install browsers and run the suite discovered from `apps/*` against live
+external sites — a flaky red X for tests that are not the harness's. The authoritative run
+belongs in the customer's repo, where the PR is (§7); the harness repo is the one place it
+must never execute.
 
-So from P3 an infra entry carries `(source, destination)`, and the workflow template moves
-under `server/app/delivery/templates/`. Delivered bytes are unchanged. Two things not to
-do: do not neuter the `on:` triggers in the harness copy instead — the delivered copy
-inherits the dead trigger and then never runs in the customer's repo either, which is the
-failure this is meant to prevent; and do not treat it as separate from the generated
-config above, because once an entry is `(source, destination)` the generated
-`playwright.config.ts` is just an entry whose source is a renderer rather than a file.
+An infra entry therefore carries `(source, destination)` — `InfraEntry` in
+[render.py](../../server/app/delivery/render.py) — and the templates live under
+`server/app/delivery/templates/`, inside the server package so an API image needs no
+mounted repo to deliver one. The workflow's source is `workflows/playwright.yml`, which is
+not a path GitHub Actions reads; its destination is unchanged, and so are its bytes and
+its `on:` triggers. The generated config is simply the entry whose source is a renderer
+rather than a file.
+
+Two things not to do: do not neuter the `on:` triggers in the harness copy instead — the
+delivered copy inherits the dead trigger and then never runs in the customer's repo
+either, which is the failure the move exists to prevent; and do not reintroduce a
+hand-maintained `playwright.config.ts` anywhere, because a second author for a generated
+file is a drift surface with nothing to gain.
 
 **Config is not a tree file.** `app.json` no longer exists and is never delivered — it
-is SaaS-internal. At hydrate, config is *rendered* out of Postgres:
+is SaaS-internal, held in columns on `targets` and validated on the write path by
+[target_config.py](../../server/app/target_config.py). At hydrate, config is *rendered*
+out of Postgres:
 
 - `baseURL` is inlined into a generated `playwright.config.ts`
 - `locators` and `agentNotes` are injected into the agent's **prompt context**
@@ -409,13 +429,25 @@ not a P1 fix: see the queue note in §5.
 ## 12. What changes from today
 
 - `apps/<app>/*` files → config in `targets`; stories, plans, seed and tests become
-  SeaweedFS blobs indexed by `revision`.
+  SeaweedFS blobs indexed by `revision`. **Done (P3.)** `apps/` and `app.json` are deleted.
 - Prompts → code-shipped defaults seeded into Postgres, tenant-overridable, versioned.
-- The long-lived mounted repo (`QA_REPO_ROOT`) disappears; the API becomes stateless and
-  horizontally scalable.
+  **Half done (P3):** they are code-shipped package data under `server/app/prompts/`, read
+  from the installed package. The `prompts` table, tenant overrides and versioning are P5.
+- The long-lived mounted repo (`QA_REPO_ROOT`) disappears. **Done (P3)**, and the sentence
+  that followed it here was too strong, so it is corrected rather than deleted: removing the
+  mount removed the *shared authoritative* disk — no replica needs another replica's disk to
+  answer a question or start a run — but it did **not** make the API horizontally scalable on
+  its own. The worktree and the run directory are local scratch and the SSE log bus is
+  in-process, so a live run is still pinned to the replica that started it. That is P4's job,
+  and `tests/test_no_repo_mount.py` is what keeps the mount from coming back in the meantime.
 - The runner moves out of a thread in the API process ([launcher.py](../../server/app/launcher.py))
-  into a container-per-run sandbox.
+  into a container-per-run sandbox. **P4.** It inherits hydrate, ingest and teardown as three
+  plain functions the launcher composes around the pipeline, a worktree path travelling
+  through `StepContext`, and dependency install already isolated as the single step a
+  prebaked image replaces.
 - Delivery stops being a shell script a human runs and becomes an approved portal action.
+  **Done (P1 for the mechanism, P3 for the reads):** it works through one injected `Tools`
+  value, pushes a materialized head revision, and records `delivered_sha`.
 
 ---
 

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { api } from "./api.js";
-import Bootstrap from "./pages/Bootstrap.jsx";
+import NewTarget from "./pages/NewTarget.jsx";
 import Login from "./pages/Login.jsx";
 import Projects from "./pages/Projects.jsx";
 import RunDetail from "./pages/RunDetail.jsx";
@@ -28,7 +28,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Navigate to="/projects" replace />} />
           <Route path="/projects" element={<Projects />} />
-          <Route path="/bootstrap" element={<Bootstrap />} />
+          <Route path="/targets/new" element={<NewTarget />} />
           <Route path="/runs" element={<Runs />} />
           <Route path="/runs/:id" element={<RunDetail />} />
           <Route path="/settings" element={<Settings />} />
@@ -51,7 +51,7 @@ function Sidebar({ onLogout }) {
       <div className="brand">QA&nbsp;Portal</div>
       <nav>
         <NavLink to="/projects">Projects &amp; Targets</NavLink>
-        <NavLink to="/bootstrap">Bootstrap Target</NavLink>
+        <NavLink to="/targets/new">New Target</NavLink>
         <NavLink to="/runs">Run History</NavLink>
         <NavLink to="/settings">Settings</NavLink>
       </nav>

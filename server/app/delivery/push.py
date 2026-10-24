@@ -1,13 +1,24 @@
-"""Deliver one story's artifacts to its app's target repo as a PR.
+"""Deliver a story's suite to its target repo as a PR, from the head revision.
 
-SYNC mode: the story, test plan and test suite are copied from this repo onto
-branch qa/<STORY_ID>-<slug>, then a PR is opened or updated into <targetBranch>.
-The story's tests folder is replaced wholesale so deletions propagate.
+The approved push materializes the target's **head revision** into a temporary
+tree, writes it onto branch `qa/<STORY_ID>-<slug>`, squashes it into one commit,
+opens or updates a PR into the target branch, and records `delivered_sha` on the
+revision it delivered. "What exactly did we push, and from what?" is a row.
 
-Two properties are deliberate and must not be "simplified" away:
-  - the branch is appended to, never force-pushed (DESIGN.md decision 10) --
+Three properties are deliberate and must not be "simplified" away:
+
+  - **the branch is appended to, never force-pushed** (DESIGN.md decision 10) --
     force-pushing a customer's branch destroys PR review threads;
-  - infra is not pushed here (that is bootstrap.py).
+  - **the story's tests folder is replaced wholesale**, so a test deleted in the
+    harness disappears from the branch. Everything else is written, not
+    replaced: wiping paths the revision does not name would delete whatever a
+    customer added, and customer drift is a non-event (DESIGN.md §7), not
+    something a delivery should silently clean up;
+  - **infra is not pushed here** (that is bootstrap.py), though the materialized
+    tree carries it, so the bytes agree either way.
+
+What we push is provably the revision we record, because the tree is built from
+that revision rather than read off a mount that may have moved since.
 """
 
 from __future__ import annotations
@@ -17,9 +28,15 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .bootstrap import require_bootstrapped
 from .errors import DeliveryError
-from .render import StoryRef, commit_message, pr_body, resolve_story
+from .render import (
+    StoryRef,
+    commit_message,
+    pr_body,
+    resolve_story,
+    target_ref,
+    tracked_tree,
+)
 from .tools import Tools, default_tools
 
 
@@ -30,6 +47,7 @@ class PushResult:
     repo: str
     branch: str
     committed: bool
+    delivered_sha: str
     pr_url: str
     pr_number: int | None
     pr_created: bool
@@ -47,56 +65,66 @@ def push_artifacts(
     tools: Tools | None = None,
 ) -> PushResult:
     tools = tools or default_tools()
-    story = resolve_story(app, story_id)
+    cfg = tools.catalog.config(app)
+    target = target_ref(cfg)
 
-    tests_src = tools.workspace / story.tests_rel
-    if not tests_src.is_dir():
-        raise DeliveryError(
-            f"no test suite at {story.tests_rel} - run the QA flow (steps 4-5) first"
-        )
+    with tools.catalog.materialize(app) as source:
+        paths = [path for path, _on_disk in tracked_tree(source)]
+        story = resolve_story(source, story_id, paths=paths, app=app)
 
-    target = require_bootstrapped(app, tools=tools)
+        if not (source / story.tests_rel).is_dir():
+            raise DeliveryError(
+                f"no test suite at {story.tests_rel} in the head revision - run the "
+                f"QA flow (steps 4-5) first"
+            )
 
-    if dry_run:
-        return PushResult(
-            app=app,
-            story_id=story_id,
-            repo=target.repo,
-            branch=story.branch,
-            committed=False,
-            pr_url="",
-            pr_number=None,
-            pr_created=False,
-            message=(
-                f"(dry-run) would push {story.story_rel}, {story.plan_rel} and "
-                f"{story.tests_rel}/ onto {story.branch} and open/update a PR into "
-                f'{target.branch} titled "{story.pr_title}"'
-            ),
-        )
+        if dry_run:
+            return PushResult(
+                app=app,
+                story_id=story_id,
+                repo=target.repo,
+                branch=story.branch,
+                committed=False,
+                delivered_sha="",
+                pr_url="",
+                pr_number=None,
+                pr_created=False,
+                message=(
+                    f"(dry-run) would push revision {tools.catalog.state(app).rev} onto "
+                    f"{story.branch} and open/update a PR into {target.branch} "
+                    f'titled "{story.pr_title}"'
+                ),
+            )
 
-    tmp = Path(tempfile.mkdtemp(prefix="qa-push-"))
-    try:
-        url = tools.clone_url(target.repo)
-        work = tmp / "repo"
-        repo_git = tools.git.clone(url, work, branch=target.branch, depth=1)
+        tmp = Path(tempfile.mkdtemp(prefix="qa-push-"))
+        try:
+            url = tools.clone_url(target.repo)
+            work = tmp / "repo"
+            repo_git = tools.git.clone(url, work, branch=target.branch, depth=1)
 
-        # Start the story branch from its remote state if it exists, else from
-        # the target branch. This is what makes re-delivery an append.
-        if repo_git.remote_branch_exists("origin", story.branch):
-            repo_git.fetch_branch("origin", story.branch, depth=1)
-            repo_git.checkout_new(story.branch, "FETCH_HEAD")
-        else:
-            repo_git.checkout_new(story.branch)
+            # Start the story branch from its remote state if it exists, else
+            # from the target branch. This is what makes re-delivery an append.
+            if repo_git.remote_branch_exists("origin", story.branch):
+                repo_git.fetch_branch("origin", story.branch, depth=1)
+                repo_git.checkout_new(story.branch, "FETCH_HEAD")
+            else:
+                repo_git.checkout_new(story.branch)
 
-        _sync_story_files(tools.workspace, work, story)
+            _write_revision(source, work, paths, story)
 
-        repo_git.add_all()
-        committed = repo_git.has_staged_changes()
-        if committed:
-            repo_git.commit(commit_message(story, run_id))
-            repo_git.push("origin", story.branch, set_upstream=True)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+            repo_git.add_all()
+            committed = repo_git.has_staged_changes()
+            if committed:
+                repo_git.commit(commit_message(story, run_id))
+                repo_git.push("origin", story.branch, set_upstream=True)
+            # The sha of the delivered bytes, whether or not we made a commit:
+            # "delivered" is about the bytes, not about whether the branch
+            # happened to already hold them.
+            delivered_sha = repo_git.head_sha()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    tools.catalog.record_delivered(app, delivered_sha)
 
     text = _resolve_body(story, body, body_file, run_id)
     existing = tools.gh.find_pr(target.repo, story.branch)
@@ -121,33 +149,35 @@ def push_artifacts(
         repo=target.repo,
         branch=story.branch,
         committed=committed,
+        delivered_sha=delivered_sha,
         pr_url=pr.url,
         pr_number=pr.number,
         pr_created=created,
         message=(
             f"PR: {pr.url}"
             if committed
-            else f"branch already matches the agent repo - no new commit. PR: {pr.url}"
+            else f"branch already matches the head revision - no new commit. PR: {pr.url}"
         ),
     )
 
 
-def _sync_story_files(workspace: Path, work: Path, story: StoryRef) -> None:
-    """Replace the story's files wholesale, so anything removed in the agent
-    repo is removed on the branch too."""
+def _write_revision(
+    source: Path, work: Path, paths: list[str], story: StoryRef
+) -> None:
+    """Write every file of the materialized revision into the clone.
+
+    The story's tests directory is removed first so a deleted test disappears
+    from the branch -- the one wholesale replacement, and the one the harness
+    actually authors. Nothing else is deleted: a path the revision does not name
+    is either infra bootstrap put there or something the customer added, and
+    neither is a delivery's to remove.
+    """
     shutil.rmtree(work / story.tests_rel, ignore_errors=True)
-    (work / story.plan_rel).unlink(missing_ok=True)
 
-    for rel in (story.story_rel, story.plan_rel):
-        (work / rel).parent.mkdir(parents=True, exist_ok=True)
-
-    shutil.copyfile(workspace / story.story_rel, work / story.story_rel)
-
-    plan_src = workspace / story.plan_rel
-    if plan_src.is_file():
-        shutil.copyfile(plan_src, work / story.plan_rel)
-
-    shutil.copytree(workspace / story.tests_rel, work / story.tests_rel)
+    for rel in paths:
+        dest = work / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / rel, dest)
 
 
 def _resolve_body(

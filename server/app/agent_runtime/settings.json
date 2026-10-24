@@ -1,0 +1,39 @@
+{
+  "env": {
+    "MCP_TOOL_TIMEOUT": "120000"
+  },
+  "permissions": {
+    "allow": [
+      "mcp__playwright-test",
+      "Bash(npx playwright test:*)",
+      "Bash(npx playwright show-report:*)",
+      "Edit(specs/**)",
+      "Edit(tests/**)",
+      "Edit(reports/**)"
+    ]
+  },
+  "hooks": {
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"{HOOKS_DIR}/close-test-browsers.sh\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"{HOOKS_DIR}/close-test-browsers.sh\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

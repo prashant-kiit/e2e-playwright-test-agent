@@ -1,13 +1,13 @@
 """SQLAlchemy ORM models: the portal's authoritative state (replaces .qa-state.json).
 
-One owner per concern (see the plan): Postgres owns run *status* and history,
-the target git repo owns the test *code*, SeaweedFS owns artifact *blobs*
-(indexed by the Artifact rows here), and files under apps/ own *config*.
+One owner per concern: Postgres owns run *status* and history, a target's
+*configuration* and -- via `Revision` + `FileIndex` -- the index of its tracked
+tree; SeaweedFS owns the *blobs* those rows name, both tree content and run
+artifacts; the customer's git repo holds the *delivered* copy of the tests.
 
-P2 adds a second, deliberately powerless owner: `Revision` + `FileIndex` index
-content-addressed blobs holding a snapshot of each target's tracked tree. It is
-**dual-written and never read to make a decision** -- apps/ stays authoritative
-for the whole phase. P3 is where truth moves.
+P3 moved truth here. `Revision` + `FileIndex` are no longer dual-written
+scaffolding: the head revision plus the target's config row are what hydrate
+builds a worktree from, what ingest commits to, and what delivery pushes.
 
 `tenant_id` is on every table from P2 (DESIGN.md §13), always written from
 `tenancy.current_tenant_id()`, so P5 is a backfill rather than a migration
@@ -20,6 +20,7 @@ from datetime import datetime
 from enum import Enum as _Enum
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     DateTime,
@@ -92,7 +93,17 @@ class Project(Base):
 
 
 class Target(Base):
-    """A test-target application, i.e. one apps/<app>/ folder under test."""
+    """A test-target application under test, and its configuration.
+
+    P3 moved the configuration here from apps/<app>/app.json (DESIGN.md §4):
+    `base_url`, `locators`, `agent_notes`, `target_repo` and `target_branch` are
+    columns, SaaS-internal, and never delivered to a customer repo. What a valid
+    value is lives in app/target_config.py, which validates on the write path.
+
+    The columns are non-null with no server default, like `tenant_id`: the
+    backfill default exists in the migration and is dropped there, so a target
+    cannot be created with a configuration the database guessed.
+    """
 
     __tablename__ = "targets"
     __table_args__ = (UniqueConstraint("app", name="uq_targets_app"),)
@@ -102,8 +113,15 @@ class Target(Base):
     project_id: Mapped[int] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
     )
-    app: Mapped[str] = mapped_column(String(100), nullable=False)  # apps/<app> folder name
+    app: Mapped[str] = mapped_column(String(100), nullable=False)  # the target's slug
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    base_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    locators: Mapped[str] = mapped_column(Text, nullable=False)
+    # A JSON array: it is a list in app.json today and is injected into the
+    # agent's prompt context as a list.
+    agent_notes: Mapped[list] = mapped_column(JSON, nullable=False)
+    target_repo: Mapped[str] = mapped_column(String(200), nullable=False)
+    target_branch: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
