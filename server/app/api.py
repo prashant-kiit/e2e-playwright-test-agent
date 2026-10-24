@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 
 from . import apphub, authoring, delivery, repo, revisions, storage, target_config
 from .auth import AuthDep
-from .db import get_session
+from .db import SessionLocal, get_session
 from .domain.status import is_terminal
 from .launcher import launch_run
 from .models import Artifact
@@ -74,6 +74,18 @@ def get_bootstrap_runner() -> Callable[[str], apphub.BootstrapOutcome]:
     """The optional "sync infra to the target repo" step. Overridden in tests
     (no git, no network)."""
     return apphub.run_bootstrap
+
+
+def get_catalog(store: Storage = Depends(get_storage)) -> delivery.Catalog:
+    """Just the database half of the delivery seam: no git, no GitHub, no PAT.
+
+    "Is this delivered?" is a Postgres question (invariant 5), so answering it
+    must not need a credential. Hanging it off `get_delivery_tools` meant an
+    operator with no `GITHUB_PAT` configured got a 503 for an answer that never
+    leaves the database -- found in a real browser, where the portal could not
+    show the badge at all.
+    """
+    return delivery.DbCatalog(SessionLocal, store)
 
 
 def get_delivery_tools() -> delivery.Tools:
@@ -299,13 +311,18 @@ def list_targets(project_id: int | None = None, session: Session = Depends(get_s
 def target_delivery_state(
     target_id: int,
     session: Session = Depends(get_session),
-    tools: delivery.Tools = Depends(get_delivery_tools),
+    catalog: delivery.Catalog = Depends(get_catalog),
 ):
-    """Delivered, or N revisions ahead. One Postgres query, no network call."""
+    """Delivered, or N revisions ahead. One Postgres query, no network call.
+
+    It depends on the catalog rather than the whole delivery seam, because it
+    needs no credential: the answer is in the database, and requiring a PAT to
+    read it would be requiring the network by another name.
+    """
     target = _target_or_404(session, target_id)
     try:
-        ref = delivery.target_ref(tools.catalog.config(target.app))
-        state = tools.state(target.app)
+        ref = delivery.target_ref(catalog.config(target.app))
+        state = catalog.state(target.app)
     except delivery.DeliveryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return DeliveryStateOut(

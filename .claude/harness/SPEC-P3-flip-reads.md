@@ -67,5 +67,5 @@ has kept the drift surface; one that deletes the mount but leaves a read path re
 repo root has not flipped anything. P3 also **inverts P2's central safety property** — a failed
 revision write must now fail the run — and that inversion is the phase, not a regression.
 
-Closed out in `VERIFICATION-P3.md`, alongside [P1's](VERIFICATION-P1.md) and
-[P2's](VERIFICATION-P2.md).
+Closed out in [VERIFICATION-P3.md](VERIFICATION-P3.md), alongside
+[P1's](VERIFICATION-P1.md) and [P2's](VERIFICATION-P2.md).

@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import delivery
-from app.api import get_delivery_tools, get_launcher
+from app.api import get_catalog, get_delivery_tools, get_launcher
 from app.auth import require_auth
 from app.db import get_session
 from app.main import app
@@ -74,6 +74,7 @@ def client(session):
     app.dependency_overrides[get_launcher] = lambda: (lambda run_id: None)
     app.dependency_overrides[require_auth] = lambda: None
     app.dependency_overrides[get_delivery_tools] = lambda: _StubDelivery()
+    app.dependency_overrides[get_catalog] = lambda: _StubCatalog()
     # Creating a target commits its revision 1.
     app.dependency_overrides[get_storage] = lambda: FakeStorage()
     yield TestClient(app)
@@ -119,9 +120,7 @@ def test_delivery_state_reports_n_revisions_ahead(client):
         revisions_ahead=2,
         ever_delivered=True,
     )
-    app.dependency_overrides[get_delivery_tools] = lambda: _StubDelivery(
-        _StubCatalog(state=ahead)
-    )
+    app.dependency_overrides[get_catalog] = lambda: _StubCatalog(state=ahead)
 
     body = client.get(f"/targets/{tid}/delivery").json()
 
@@ -129,6 +128,42 @@ def test_delivery_state_reports_n_revisions_ahead(client):
     assert body["revisions_ahead"] == 2
     assert body["bootstrapped"] is True
     assert "2 revision(s) ahead" in body["summary"]
+
+
+def test_delivery_state_needs_no_credential(session):
+    """It is a Postgres question, so it must not need a GitHub client or a PAT.
+
+    Found in a real browser: the route hung off the full delivery seam, whose
+    construction reads GITHUB_PAT, so an operator with no PAT configured got a
+    503 and the portal could not show the badge at all -- for an answer that
+    never leaves the database.
+    """
+    from app.api import get_catalog, get_storage
+    from tests.storage_helpers import FakeStorage
+
+    app.dependency_overrides[get_session] = lambda: session
+    app.dependency_overrides[get_launcher] = lambda: (lambda run_id: None)
+    app.dependency_overrides[require_auth] = lambda: None
+    app.dependency_overrides[get_storage] = lambda: FakeStorage()
+    app.dependency_overrides[get_catalog] = lambda: _StubCatalog()
+    # Deliberately NOT overriding get_delivery_tools, and making it fail the way
+    # a missing PAT does.
+    app.dependency_overrides.pop(get_delivery_tools, None)
+
+    def no_pat():
+        raise delivery.CredentialError("no GitHub token: set GITHUB_PAT in the environment")
+
+    try:
+        monkey = delivery.default_tools
+        delivery.default_tools = no_pat
+        c = TestClient(app)
+        tid = _make_target(c)
+        resp = c.get(f"/targets/{tid}/delivery")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["delivered"] is True
+    finally:
+        delivery.default_tools = monkey
+        app.dependency_overrides.clear()
 
 
 def test_delivery_state_404s_for_an_unknown_target(client):
@@ -141,7 +176,7 @@ def test_delivery_state_400s_on_a_config_problem(client):
             raise delivery.DeliveryError("no such target: 'ghost'")
 
     tid = _make_target(client)
-    app.dependency_overrides[get_delivery_tools] = lambda: _StubDelivery(Broken())
+    app.dependency_overrides[get_catalog] = lambda: Broken()
 
     resp = client.get(f"/targets/{tid}/delivery")
     assert resp.status_code == 400
@@ -305,6 +340,7 @@ def test_reset_reports_the_branches_it_removed(client, monkeypatch):
 def test_a_missing_git_or_pat_is_a_503_not_a_bare_500(session, monkeypatch):
     """Dependencies resolve before the handler, so this path bypasses the
     routes' own try/except. It was a 500 until get_delivery_tools caught it."""
+
     from app.api import get_delivery_tools
 
     def boom():
@@ -319,7 +355,9 @@ def test_a_missing_git_or_pat_is_a_503_not_a_bare_500(session, monkeypatch):
     try:
         c = TestClient(app)
         tid = _make_target(c)
-        resp = c.get(f"/targets/{tid}/delivery")
+        # A route that genuinely needs git and the PAT. The state query
+        # deliberately does not -- see test_delivery_state_needs_no_credential.
+        resp = c.post(f"/targets/{tid}/deliver", json={"story_id": "SCRUM-201"})
         assert resp.status_code == 503
         assert "missing dependency: git" in resp.json()["detail"]
     finally:
