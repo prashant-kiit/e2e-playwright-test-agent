@@ -125,7 +125,6 @@ const outputPath = (name: string) => (RUN_DIR ? `${{RUN_DIR}}/${{name}}` : name)
  * only inside a sandbox, so outside one -- in the customer's repo, on a laptop --
  * this is absent and nothing changes. */
 const PROXY_URL = process.env.QA_PROXY_URL;
-const proxy = PROXY_URL ? {{ server: PROXY_URL }} : undefined;
 
 export default defineConfig({{
   /* One target per worktree: the whole tree is this target's, seed included. */
@@ -150,7 +149,7 @@ export default defineConfig({{
     actionTimeout: 10_000,
     navigationTimeout: 15_000,
     trace: 'on-first-retry',
-    ...(proxy ? {{ proxy }} : {{}}),
+    ...(PROXY_URL ? {{ proxy: {{ server: PROXY_URL }} }} : {{}}),
   }},
   projects: [
     {{ name: 'chromium', use: {{ ...devices['Desktop Chrome'], baseURL }} }},

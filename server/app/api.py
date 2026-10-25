@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from . import apphub, authoring, delivery, repo, revisions, storage, target_config
 from .auth import AuthDep
 from .db import SessionLocal, get_session
-from .domain.status import is_live, is_terminal
+from .domain.status import RunStatus, is_live, is_terminal
 from .models import Artifact
 from .orchestrator.bus import LogBus, bus_from_env
 from .sandbox import dispatch, egress
@@ -73,13 +73,16 @@ def get_launcher() -> Callable[[int], None]:
     return dispatch.make_launcher()
 
 
-def get_scheduler() -> dispatch.Scheduler:
+def get_scheduler() -> dispatch.Scheduler | None:
     """The same dispatch seam, for the paths that *end* a run's work.
 
     Not a second seam: one `Scheduler` protocol and one factory, exposed here as
     well because pause and stop have to be able to reap a sandbox and a route
     needs something a test can substitute. `get_launcher` remains the only
     injection point for starting a run.
+
+    `None` on the thread path, where there is no sandbox to schedule -- the
+    paths that reap one ask without having to catch anything.
     """
     return dispatch.make_scheduler()
 
@@ -600,11 +603,41 @@ def get_run(run_id: int, session: Session = Depends(get_session)):
 
 
 @router.post("/runs/{run_id}/pause", response_model=RunOut)
-def pause_run(run_id: int, session: Session = Depends(get_session)):
+def pause_run(
+    run_id: int,
+    session: Session = Depends(get_session),
+    scheduler: dispatch.Scheduler | None = Depends(get_scheduler),
+):
+    """Pause a run, and destroy the sandbox at once.
+
+    Pause exists to stop costing money, so it cannot wait for a step boundary
+    that an agent holding a browser may be minutes of billing away from. The
+    container is killed here and the row is moved to `paused` here, because the
+    process that would otherwise have done it is the one just killed.
+
+    What a paused run must not lose is the agent session, and that is why the
+    session is archived at **every step boundary** rather than on the way out
+    (app/launcher.py): a sandbox that dies without warning cannot archive
+    anything, so the boundary is the last moment the session is known good. A
+    pause therefore costs the exploration of the step it interrupted and no
+    more.
+
+    The driver's flag-at-a-boundary path stays for the thread path and for a run
+    with no sandbox.
+    """
     try:
-        return repo.request_pause(session, run_id)
+        run = repo.request_pause(session, run_id)
     except repo.NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if run.sandbox_handle and run.status is RunStatus.RUNNING:
+        dispatch.destroy_handle(run.sandbox_handle, scheduler)
+        run = repo.pause_run(session, run_id)
+        # So "a paused run has no sandbox" is true of the row as well: the
+        # reaper's sweep for idle sandboxes is the net under this, not the way
+        # it normally happens.
+        repo.set_sandbox_handle(session, run_id, None)
+        session.refresh(run)
+    return run
 
 
 @router.post("/runs/{run_id}/stop", response_model=RunOut)
@@ -698,7 +731,7 @@ def artifact_content(
 def run_events(
     run_id: int,
     session: Session = Depends(get_session),
-    log: LogBus = Depends(get_log_bus),
+    bus: LogBus = Depends(get_log_bus),
 ):
     """Server-sent events of the run's live log, read forward from a cursor.
 
@@ -726,7 +759,7 @@ def run_events(
         cursor = 0
         silent_for = 0.0
         while True:
-            lines, cursor = log.read_from(run_id, cursor)
+            lines, cursor = bus.read_from(run_id, cursor)
             for line in lines:
                 yield _event(line)
             if terminal:
@@ -737,7 +770,7 @@ def run_events(
             if lines:
                 silent_for = 0.0
                 continue
-            if log.is_closed(run_id):
+            if bus.is_closed(run_id):
                 # One more pass has already run above, so everything the writer
                 # appended before it finished has been sent.
                 yield 'event: end\ndata: ""\n\n'

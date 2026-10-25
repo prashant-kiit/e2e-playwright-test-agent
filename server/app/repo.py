@@ -20,6 +20,7 @@ from .domain import lease
 from .domain.status import LIVE, RunStatus, assert_transition, is_live
 from .domain.steps import Step
 from .models import AppLock, Project, Run, RunStep, Target
+from .sandbox.egress import Resolver
 from .tenancy import current_tenant_id
 
 VALID_MODES = ("changed", "full")
@@ -82,7 +83,7 @@ def create_target(
     target_branch: str | None = None,
     locators: str = "",
     agent_notes: list[str] | None = None,
-    resolve=None,
+    resolve: Resolver | None = None,
 ) -> Target:
     """Create a target with its configuration, validated before the insert.
 
@@ -128,7 +129,7 @@ def create_target(
 
 
 def update_target_config(
-    session: Session, target_id: int, *, resolve=None, **fields
+    session: Session, target_id: int, *, resolve: Resolver | None = None, **fields
 ) -> Target:
     """Change a target's editable fields, validated the same way as a create.
 
@@ -485,11 +486,12 @@ def set_session_id(session: Session, run_id: int, session_id: str) -> None:
 def idle_sandbox_runs(session: Session) -> list[int]:
     """Paused runs that still name a sandbox (P4).
 
-    A paused run's container exits at the step boundary that paused it -- pause
-    reaps immediately, with no grace window (DESIGN.md §5) -- so a handle still
-    on a paused row is either a container in the act of exiting or one that
-    never did. The reaper destroys it and clears the column, which makes "a
-    paused run has no sandbox" true rather than merely intended.
+    Pause reaps immediately, with no grace window (DESIGN.md §5): the route that
+    pauses a run destroys the container and clears this column itself. A handle
+    still on a paused row therefore means that did not finish -- an API that
+    died mid-pause, or a pause that raced a dispatch. The reaper destroys it and
+    clears the column, which makes "a paused run has no sandbox" true rather
+    than merely intended.
     """
     runs = session.scalars(
         select(Run).where(

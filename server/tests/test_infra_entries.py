@@ -199,11 +199,12 @@ def test_the_generated_config_carries_the_proxy_stanza():
 
 def test_the_proxy_stanza_is_absent_outside_a_sandbox():
     """The same bytes in the customer's repo and on a laptop: `QA_PROXY_URL` is
-    set only inside a sandbox, so there is no second variant of this file."""
+    set only inside a sandbox, so there is no second variant of this file --
+    one condition, spread into `use` or spreading nothing."""
     config = render.render_playwright_config(_config())
 
-    assert "const proxy = PROXY_URL ?" in config
-    assert "...(proxy ? { proxy } : {})" in config
+    assert "const PROXY_URL = process.env.QA_PROXY_URL;" in config
+    assert "...(PROXY_URL ? { proxy: { server: PROXY_URL } } : {})" in config
 
 
 def test_there_is_still_exactly_one_author_of_the_generated_config():

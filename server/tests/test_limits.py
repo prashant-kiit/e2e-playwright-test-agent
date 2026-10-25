@@ -75,15 +75,15 @@ def run_env(session_factory, tmp_path, monkeypatch):
 
 
 def _drive(session_factory, run_id, store, runner):
-    log = InMemoryLogBus()
+    bus = InMemoryLogBus()
     launcher.drive_run(
         run_id,
         runner=runner,
-        log=log,
+        bus=bus,
         session_factory=session_factory,
         store=store,
     )
-    return log.read_from(run_id, 0)[0]
+    return bus.read_from(run_id, 0)[0]
 
 
 def _head(session_factory, target_id) -> int:

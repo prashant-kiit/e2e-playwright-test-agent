@@ -67,8 +67,7 @@ def allowlist_from_env() -> tuple[str, ...]:
     a default: an empty allowlist is a proxy that refuses everything, which is
     the right failure for a misconfigured dispatch.
     """
-    raw = os.environ.get("QA_EGRESS_ALLOWLIST", "")
-    return tuple(host for host in (part.strip() for part in raw.split(",")) if host)
+    return egress.host_list(os.environ.get("QA_EGRESS_ALLOWLIST", ""))
 
 
 def port_from_env() -> int:

@@ -74,7 +74,7 @@ def _out_of_process(session_factory, run_id, store, **kwargs) -> int:
         [str(run_id)],
         session_factory=session_factory,
         store=store,
-        log=InMemoryLogBus(),
+        bus=InMemoryLogBus(),
         **kwargs,
     )
 
@@ -117,15 +117,15 @@ def test_the_log_of_an_out_of_process_run_is_readable_by_cursor(
 ):
     """The whole reason the log became a table: the API did not run this."""
     run_id, run_key, _target_id, store = run_env
-    log = InMemoryLogBus()
+    bus = InMemoryLogBus()
 
     entrypoint.main(
-        [str(run_id)], session_factory=session_factory, store=store, log=log
+        [str(run_id)], session_factory=session_factory, store=store, bus=bus
     )
 
-    lines, _cursor = log.read_from(run_id, 0)
+    lines, _cursor = bus.read_from(run_id, 0)
     assert any(f"run {run_key} completed" in line for line in lines)
-    assert log.is_closed(run_id), "the stream is closed when the run ends"
+    assert bus.is_closed(run_id), "the stream is closed when the run ends"
 
 
 def test_a_hydrate_failure_out_of_process_fails_before_any_step(

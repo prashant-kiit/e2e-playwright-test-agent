@@ -1,9 +1,11 @@
 """What a run is allowed to reach, and what no run may reach.
 
-Two functions, and the reason there are only two is the point. §6 asks for
-default-deny egress with a per-run allowlist; a reviewer asking "what can this
-run reach?" should be able to answer it by reading one function, and an operator
-asking "why was this refused?" should find one predicate.
+**Two decisions, each in one place.** §6 asks for default-deny egress with a
+per-run allowlist; a reviewer asking "what can this run reach?" should be able
+to answer it by reading one function, and an operator asking "why was this
+refused?" should find one predicate. The rest of the module -- `host_of`,
+`allows`, `is_public_address`, `system_resolver` -- is what those two are built
+from, and is here so that neither has a second implementation anywhere.
 
     build_allowlist(cfg)        the target's registered host, the Anthropic API,
                                 the npm registry. Nothing else.
@@ -57,6 +59,18 @@ class ResolutionError(EgressError):
 
 class PrivateAddress(EgressError):
     """The name resolves somewhere a run must not reach."""
+
+
+def host_list(raw: str) -> tuple[str, ...]:
+    """A comma-separated list of hosts, as the environment carries one.
+
+    Both ends of the egress wiring parse one: the scheduler reads the extra
+    hosts a dev stack needs (app/sandbox/docker.py) and the proxy reads the
+    allowlist it was handed. The same rule either side -- strip, drop empties --
+    so a trailing comma or a space after one cannot mean something different to
+    the process that writes the list and the process that enforces it.
+    """
+    return tuple(host for host in (part.strip() for part in raw.split(",")) if host)
 
 
 def host_of(base_url: str) -> str:

@@ -136,16 +136,21 @@ def make_step_boundary_hook(
     collect: BoundaryHalf | None = None,
     ingest: BoundaryHalf | None = None,
 ) -> BoundaryHalf:
-    """The driver's ONE step-boundary callable, with both halves composed in.
+    """The driver's ONE step-boundary callable, with every half composed in.
 
-    Order is deliberate: **artifacts first, then ingest.** Evidence collection
-    runs first and is never delayed by the work that matters more.
+    Order is deliberate: **artifacts, then the session, then ingest.** What is
+    cheapest to lose goes first and never delays the work that matters more.
 
-    The two halves are treated differently, and the asymmetry is the phase:
+    The halves are treated differently, and the asymmetry is the phase:
 
     - **Artifact collection stays best-effort.** Its failure is reported to the
       run's log and swallowed. Evidence is not the work; losing a trace is not a
       reason to fail a run that produced a healed suite.
+    - **The session archive stays best-effort too**, and it is here rather than
+      only at the end of a run because pause destroys the container at once
+      (app/api.py): a sandbox killed without warning archives nothing, so the
+      boundary is the last moment the session is known good. A pause costs the
+      exploration of the step it interrupted and no more.
     - **A failed ingest fails the run.** It is reported to the log and then
       re-raised. P2's code said so in a comment, because while `apps/` was
       authoritative a swallowed failure cost nothing -- and once truth has moved
@@ -176,6 +181,9 @@ def make_step_boundary_hook(
             collect_half(run_id, step)
         except Exception as exc:
             emit(f"=== step {step.value}: artifact collection failed: {exc} ===")
+
+        # Already swallows its own failures, and already a no-op off a sandbox.
+        _persist_session(run_id, emit, session_factory=session_factory, store=store)
 
         try:
             ingest_half(run_id, step)
@@ -260,7 +268,7 @@ def drive_run(
     run_id: int,
     *,
     runner: Runner | None = None,
-    log: LogBus | None = None,
+    bus: LogBus | None = None,
     session_factory: SessionFactory = SessionLocal,
     store: Storage | None = None,
 ) -> None:
@@ -278,8 +286,8 @@ def drive_run(
     wraps hydrate too: the lease is otherwise refreshed only at step boundaries,
     and `npm ci` on a cold cache outlasts the TTL easily.
     """
-    log = log or bus_from_env()
-    emit = log.emitter(run_id)
+    bus = bus or bus_from_env()
+    emit = bus.emitter(run_id)
     runner = runner or make_runner()
     started = time.monotonic()
     try:
@@ -296,11 +304,12 @@ def drive_run(
             )
     finally:
         # Both in a `finally`, so every way out of a run records what it cost
-        # and leaves the agent's session where a resume can find it -- including
-        # a pause, whose container exits here like any other ending.
+        # and leaves the agent's session where a resume can find it. A pause
+        # does not come through here at all -- its container is killed outright
+        # -- which is why the session is archived at each step boundary too.
         _persist_session(run_id, emit, session_factory=session_factory, store=store)
         _record_cost(run_id, runner, started, session_factory=session_factory)
-        log.close(run_id)
+        bus.close(run_id)
 
 
 def _restore_session(

@@ -23,8 +23,16 @@ store, and which rest on fakes.
 >    of 228 GiB, with Docker's own data directory at 64 GiB. The daemon stopped answering
 >    `docker ps` shortly afterwards, which also ended the live-stack checks (§"Not yet
 >    verified" below has the commands to finish both).
+> 3. **The changes the code review caused have not been test-executed.** They were made
+>    after the daemon went down, and the suite's schema is built by running the Alembic
+>    migrations against a real Postgres — which on this machine only ever existed as a
+>    compose service. Ruff and the DB-free tests pass; the DB-backed tests covering the new
+>    pause path and the per-boundary session archive have been written and never run. They
+>    are listed in §"The code review, and what it changed" with the one command that runs
+>    them.
 >
-> Everything else below was executed and is recorded as observed. The container path, the
+> Everything else below was executed and is recorded as observed **for the code as it stood
+> at `7cdceb4`**. The container path, the
 > egress control and the credential rule are proven **against real containers, real Docker
 > networks and a real object store**, not against fakes — that happened before the disk
 > filled. What is missing is the real *agent* inside the sandbox, and the portal-level
@@ -44,12 +52,12 @@ a change of **where** three functions run and not of **what** they do.
 |---|---|---|
 | 1 | A run dispatched by the API executes in its own container, hydrating from the head revision, committing revisions at step boundaries, collecting artifacts and tearing down — with the same rows a thread run produces | **Proven** against a real container |
 | 2 | No sandbox environment, image or compose service carries a GitHub or portal credential, and a structural test fails if one returns | **Proven** |
-| 3 | From inside the sandbox, the target's host, the Anthropic API and the npm registry are reachable; any other host, `169.254.169.254`, and any name resolving to a private address are not | **Proven** against a real internal network and a real proxy |
+| 3 | From inside the sandbox, the target's host, the Anthropic API and the npm registry are reachable; any other host, `169.254.169.254`, and any name resolving to a private address are not | **Proven** for the refusals and for an allowlisted host, against a real internal network and a real proxy. That the *three specific* hosts are the allowlist is proven as policy, not observed from inside a sandbox — see §Egress |
 | 4 | A base URL that does not resolve publicly is refused at save time, and re-resolved when the run starts | **Proven** |
 | 5 | The portal streams a live run and replays a finished one after an API restart | **Partly**: proven at the API and bus level; the browser walk-through is outstanding |
 | 6 | A run exceeding the step timeout, the run timeout or the spend budget ends `failed` with that reason, the lock freed and the last revision intact | **Proven** |
 | 7 | A container killed outright leaves a run the reaper reconciles to `failed`, with the app free | **Proven** at the lease level; see the note in §"What is covered only by fakes" |
-| 8 | Pausing destroys the container; resuming re-hydrates, restores the agent session and continues at the next step | **Proven** with the fake runner |
+| 8 | Pausing destroys the container; resuming re-hydrates, restores the agent session and continues at the next step | **Partly**: resume and the session archive proven with the fake runner at `7cdceb4`. Pause destroying the container *at once* was a review fix, and its tests have not been run |
 | 9 | The driver still takes exactly one step-boundary callable; hydrate, ingest and teardown are still plain composed functions | **Proven**, structurally |
 | 10 | `QA_RUNNER=fake` with `QA_SANDBOX=thread` keeps the full suite green, and the Docker-backed tests run in CI without skipping | **Proven** locally; the CI job is wired and not yet observed green |
 | 11 | A real agent run (`QA_RUNNER=claude`) completes in the sandbox image against a live target | **Not performed** — see the box above |
@@ -190,6 +198,35 @@ And the allowlist is per run: `registry.npmjs.org` is on every real run's allowl
 refused here because it was not on *this* proxy's. One run's proxy cannot be used to reach
 another target's host.
 
+**What this does not show**, stated plainly because criterion 3 names three hosts: the probe
+proves that *an allowlisted host* is reachable through the real proxy on the real topology,
+with `example.com` standing in for the target's. That the allowlist of a real run is exactly
+`<target host>, api.anthropic.com, registry.npmjs.org` is proven as policy — `build_allowlist`
+and `allows` in `test_egress.py`, `decide` in `test_proxy.py` — and the composition of the
+two has not been observed. One probe closes it, against a proxy carrying a real allowlist:
+
+```bash
+docker network create --internal qa-sandbox-probe
+docker network create qa-egress-probe
+docker run -d --name qa-proxy-probe --network qa-egress-probe \
+  -e QA_EGRESS_ALLOWLIST=www.saucedemo.com,api.anthropic.com,registry.npmjs.org \
+  -e QA_PROXY_PORT=3128 qa-egress-proxy:dev
+docker network connect qa-sandbox-probe qa-proxy-probe
+# 200 for each of the three, 403 for anything else, and the proxy did the resolving
+for h in www.saucedemo.com api.anthropic.com registry.npmjs.org bank.example.com; do
+  docker run --rm --network qa-sandbox-probe --entrypoint python qa-sandbox-runtime:dev -c "
+import socket
+s = socket.create_connection(('qa-proxy-probe', 3128), timeout=10)
+s.sendall(b'CONNECT $h:443 HTTP/1.1\r\nHost: $h:443\r\n\r\n')
+print('$h', s.recv(64).decode('latin-1').splitlines()[0])"
+done
+docker rm -f qa-proxy-probe; docker network rm qa-sandbox-probe qa-egress-probe
+```
+
+It is a manual step rather than a fourth Docker-backed test on purpose: it depends on the
+npm registry and the Anthropic API being up, and a CI suite that fails when somebody else's
+service blips is a suite people learn to ignore.
+
 ---
 
 ## The pieces verified without a container
@@ -256,6 +293,14 @@ the same reserved name rather than a second artifact, and a resume whose archive
 deleted from the store completes the run, logs `continuing without session continuity`, and
 clears the recorded session id so the CLI is not told to `--resume` what is gone.
 
+**Amended by the code review, and not yet executed.** As recorded at `7cdceb4`, pause set a
+flag and the container exited at the step boundary that noticed it — which is the grace
+window #27 and #18 forbid, by another name, and the §5 amendment had been written to match
+the code rather than the ticket. The route now destroys the container itself and moves the
+row to `paused`, and the session is archived at **every step boundary** so that a sandbox
+killed without warning still leaves one. The three new tests in `test_dispatch.py` and the
+one in `test_sandbox_session.py` are DB-backed and have not run here.
+
 Nothing is archived when `CLAUDE_CONFIG_DIR` is unset — which is the thread path on a
 developer's laptop, where the only session store is the developer's own `~/.claude`.
 
@@ -288,9 +333,10 @@ impression.
   (`test_reaper.py`, unchanged) and the heartbeat is proven to come from inside the process
   doing the work. The two have not been composed by killing a real container and watching
   the reaper fail that run.
-- **Pause and stop against a real container.** Proven through the seam (the recording
-  scheduler sees the `destroy`) and through the composition (the container exits at the
-  boundary). Not observed as a container disappearing.
+- **Pause and stop against a real container.** Proven through the seam: the recording
+  scheduler sees the `destroy` that the route now issues. Not observed as a container
+  disappearing, and since the review's pause change the seam-level proof is itself
+  unexecuted.
 - **The CI job.** The workflow is wired — a SeaweedFS started with `docker run` because a
   service container cannot be given command arguments, `QA_REQUIRE_DOCKER=1`, and the
   existing zero-skip check — and has not been observed green on a runner.
@@ -349,16 +395,47 @@ print('direct dns ', socket.gethostbyname('example.com'))
 ## Acceptance criteria, line by line
 
 Every criterion of the nine implementation tickets (#19–#27) is met and has a named test,
-with these exceptions, all of them in #22, #23 and #28 and all of them the same two
-environment facts:
+with these exceptions:
 
 | Ticket | Criterion | State |
 |---|---|---|
+| #25 | "From inside the sandbox, the target's host, the Anthropic API and the npm registry are reachable" | Proven as policy and for one allowlisted host through the real proxy; the three together are a manual probe, in §Egress |
+| #27 | "Pausing a run destroys its container at once" | Met by the review's fix, whose tests have not been executed here |
 | #22 | "Running the sandbox entrypoint by hand inside that image completes a run against the dev stack with the real runner available" | The entrypoint is proven in a container built from the same Dockerfile's python stage; running it inside the **full** image needs the image |
 | #22 | "No browser download happens at run time" | Structural only: the image installs the browsers at build time, at the version the revision's lockfile pins (asserted). Observing a run not downloading one needs the image |
 | #23 | "A run started from the portal with `QA_SANDBOX=docker` executes in its own container and reaches `succeeded`" | Proven through the launcher the portal calls, not through the portal |
 | #23 | "`make up` gives container-per-run on a laptop with no extra steps" | The compose file and Makefile are wired for it; not observed |
 | #28 | All of it | See the box at the top |
+
+---
+
+## The code review, and what it changed
+
+The `code-review` skill ran both axes against `7bba686...HEAD`. Six findings were acted on;
+the rest were either recorded deferrals or the reviewer reading the code rather than the
+ticket. Kept here because three of the six change what the rest of this record claims.
+
+| Finding | Axis | What it caused |
+|---|---|---|
+| `NO_PROXY` named `localhost` while the stores are `postgres` and `seaweedfs`. boto3 honours `HTTP_PROXY`, so in any stack with a proxy a sandbox's S3 traffic was tunnelled to the allowlisting proxy, which correctly 403s a host that is deliberately not on the allowlist — hydrate and ingest would both have failed | Standards, then Spec | A real bug, and the one the unperformed live run would have hit first. `env.internal_hosts()` now derives the bypass from the endpoints the sandbox is actually handed, so "which hosts?" has one answer; four tests in `test_sandbox_credentials.py`, two of which were red |
+| Pause did not destroy the container; it set a flag and the sandbox exited at the next step boundary — and the §5 amendment had been written to describe that rather than what #27 asked for | Spec | The route destroys the container and moves the row to `paused` itself; the session is archived at every step boundary so a sandbox killed without warning still leaves one; §5 now records the ticket's rule and the reason the boundary is where the session is saved |
+| `PLAYWRIGHT_VERSION` in the Dockerfile was a second hand-maintained copy of the `@playwright/test` pin, kept honest by a test | Spec | The image reads the version out of the template lockfile at build time. The test is now structural: it asserts there is nothing left to keep in sync |
+| `store_environment()`'s docstring claimed "the narrowest set hydrate and ingest need" while forwarding the control plane's own credentials | Spec | The docstring says what is true and points at the deferral it belongs to. The exposure itself was already recorded in DESIGN.md §6 and is P5's |
+| Criterion 3 names three reachable hosts; the Docker probe proves one | Spec | §Egress now says so, with the one manual probe that closes it |
+| The per-run wall clock has no scheduler-side deadline | Spec | No code change: the reaper's overdue sweep already both fails the row **and** destroys the sandbox (`reaped + overdue + idle`), which bounds the overrun by one reap interval rather than one step timeout, and `test_limits.py::test_the_reaper_destroys_the_sandbox_of_a_run_it_reaps` is that case. `limits.py` now says where the deadline bites |
+
+Deliberately not acted on: the `app/delivery/__init__.py` lazy re-export (it is how #22's
+import-graph test is satisfied, and `env.py` omitting the PAT is the control either way);
+narrowing the store credentials (P5, recorded); the npm cache decision (recorded above, with
+the supply-chain reason); and `test_hydrate.py` gaining `resolve=public_resolver` (the DNS
+guard the egress ticket added, not a change to what it asserts).
+
+**The one command that executes the four new tests**, once a Postgres is reachable:
+
+```bash
+cd server && QA_REQUIRE_DB=1 uv run pytest \
+  tests/test_dispatch.py tests/test_sandbox_session.py tests/test_sandbox_credentials.py -q
+```
 
 ---
 

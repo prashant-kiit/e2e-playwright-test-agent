@@ -92,14 +92,14 @@ class DockerSettings:
 
     @classmethod
     def from_env(cls) -> DockerSettings:
-        hosts = os.environ.get("QA_SANDBOX_EXTRA_HOSTS", "").strip()
+        hosts = os.environ.get("QA_SANDBOX_EXTRA_HOSTS", "")
         return cls(
             socket=os.environ.get("QA_DOCKER_SOCKET", DEFAULT_SOCKET),
             image=os.environ.get("QA_SANDBOX_IMAGE", DEFAULT_IMAGE),
             network=os.environ.get("QA_SANDBOX_NETWORK", DEFAULT_NETWORK),
             proxy_image=os.environ.get("QA_PROXY_IMAGE", DEFAULT_PROXY_IMAGE),
             egress_network=os.environ.get("QA_EGRESS_NETWORK", DEFAULT_EGRESS_NETWORK),
-            extra_hosts=tuple(h for h in (x.strip() for x in hosts.split(",")) if h),
+            extra_hosts=egress.host_list(hosts),
             with_proxy=os.environ.get("QA_SANDBOX_PROXY", "1") != "0",
         )
 

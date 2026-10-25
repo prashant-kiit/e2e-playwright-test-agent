@@ -45,7 +45,7 @@ def main(
     argv: list[str] | None = None,
     *,
     runner: Runner | None = None,
-    log: LogBus | None = None,
+    bus: LogBus | None = None,
     session_factory: SessionFactory = SessionLocal,
     store: Storage | None = None,
 ) -> int:
@@ -66,7 +66,7 @@ def main(
     drive_run(
         run_id,
         runner=runner,
-        log=log,
+        bus=bus,
         session_factory=session_factory,
         store=store,
     )

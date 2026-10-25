@@ -38,6 +38,7 @@ genuinely needs (app/sandbox/egress.py).
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
 
 from .. import config
 from ..target_config import TargetConfig
@@ -60,9 +61,11 @@ WORKTREES_DIR = "/data/worktrees"
 # it is in the image and written to only in the container's own layer.
 NPM_CACHE = "/npm-cache"
 
-# Hosts the sandbox reaches without the proxy, because they are on its own
-# internal network: the stores it hydrates from and ingests to.
-NO_PROXY_HOSTS = ("localhost", "127.0.0.1")
+# Hosts a sandbox always reaches without the proxy: its own loopback. The
+# *stores* are added to this per run by `internal_hosts`, derived from the
+# endpoints the sandbox is actually given rather than listed here, so a stack
+# whose Postgres is somewhere else does not need this file edited.
+LOOPBACK_HOSTS = ("localhost", "127.0.0.1")
 
 
 def _from_control_plane(name: str, default: str = "") -> str:
@@ -75,7 +78,14 @@ def _from_control_plane(name: str, default: str = "") -> str:
 
 
 def store_environment() -> dict[str, str]:
-    """The narrowest set hydrate and ingest need: the database and the blobs."""
+    """The stores hydrate and ingest need: the database and the blobs.
+
+    The narrowest *set* of variables, and deliberately not narrowed
+    *credentials*: these are the control plane's own, forwarded. A run-scoped
+    role is the right answer and it belongs with P5's tenant-scoped reads --
+    see this module's docstring and DESIGN.md §6, where it is recorded as
+    accepted exposure rather than left to be discovered.
+    """
     return {
         "DATABASE_URL": _from_control_plane(
             "DATABASE_URL", "postgresql+psycopg://qa:qa@postgres:5432/qa"
@@ -85,6 +95,30 @@ def store_environment() -> dict[str, str]:
         "S3_SECRET_KEY": _from_control_plane("S3_SECRET_KEY", "qa-secret"),
         "S3_BUCKET": _from_control_plane("S3_BUCKET", "qa-artifacts"),
     }
+
+
+def internal_hosts(stores: dict[str, str]) -> tuple[str, ...]:
+    """The hosts the sandbox reaches **directly**, on its own internal network.
+
+    This exists because of a trap: `HTTP_PROXY` is honoured by more clients than
+    the ones it is set for. boto3 reads it, so with a proxy configured and
+    nothing in `NO_PROXY` the S3 client tunnels `http://seaweedfs:8333` to the
+    allowlisting proxy -- which refuses it, correctly, because the object store
+    is deliberately **not** on the egress allowlist (a proxy that could reach
+    the control plane's stores would be a proxy worth attacking). Hydrate and
+    ingest would then both fail, and only in a stack that has a proxy.
+
+    So the stores bypass the proxy instead of being allowlisted through it:
+    they are on the sandbox's own network, reachable by name, with no route out
+    involved. Derived from the endpoints the sandbox was handed, so "which
+    hosts?" has one answer and it is the true one.
+    """
+    hosts: list[str] = []
+    for value in (stores.get("DATABASE_URL", ""), stores.get("S3_ENDPOINT", "")):
+        host = urlparse(value).hostname if value else None
+        if host and host not in hosts:
+            hosts.append(host)
+    return tuple(hosts)
 
 
 def telemetry_off() -> dict[str, str]:
@@ -102,7 +136,7 @@ def telemetry_off() -> dict[str, str]:
     }
 
 
-def proxy_environment(proxy_url: str, *, no_proxy: tuple[str, ...] = ()) -> dict[str, str]:
+def proxy_environment(proxy_url: str, *, direct: tuple[str, ...] = ()) -> dict[str, str]:
     """Point npm, the CLI and Playwright at the allowlisting proxy.
 
     The proxy is not how egress is *enforced* -- the sandbox network has no
@@ -114,8 +148,12 @@ def proxy_environment(proxy_url: str, *, no_proxy: tuple[str, ...] = ()) -> dict
     rendered from the target's row and has exactly one author -- the natural
     place for a proxy stanza, and one more reason not to reintroduce a
     hand-maintained copy of that file.
+
+    `direct` is what must **not** go through it: the stores on the sandbox's own
+    network (see `internal_hosts`). Both spellings of every variable, because
+    the clients that read them disagree about case.
     """
-    hosts = ",".join(NO_PROXY_HOSTS + no_proxy)
+    hosts = ",".join(LOOPBACK_HOSTS + direct)
     return {
         "HTTP_PROXY": proxy_url,
         "HTTPS_PROXY": proxy_url,
@@ -132,7 +170,6 @@ def sandbox_environment(
     cfg: TargetConfig,
     *,
     proxy_url: str | None = None,
-    no_proxy: tuple[str, ...] = (),
 ) -> dict[str, str]:
     """Everything one sandbox is given, and nothing else.
 
@@ -140,8 +177,9 @@ def sandbox_environment(
     holds exactly one target's tree, and because the proxy's allowlist is built
     from the same row (app/sandbox/egress.py).
     """
+    stores = store_environment()
     env: dict[str, str] = {
-        **store_environment(),
+        **stores,
         "ANTHROPIC_API_KEY": _from_control_plane("ANTHROPIC_API_KEY"),
         # The run's own identity, for the log lines the runtime emits. The run
         # id the entrypoint works on is an argument, not an environment
@@ -165,5 +203,5 @@ def sandbox_environment(
         **telemetry_off(),
     }
     if proxy_url:
-        env.update(proxy_environment(proxy_url, no_proxy=no_proxy))
+        env.update(proxy_environment(proxy_url, direct=internal_hosts(stores)))
     return {name: str(value) for name, value in env.items() if value != ""}

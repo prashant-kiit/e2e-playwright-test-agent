@@ -44,6 +44,26 @@ def _resolver(mapping: dict[str, list[str]]):
     return resolve
 
 
+# --- one rule for reading a host list out of the environment --------------
+
+def test_a_host_list_is_stripped_and_has_no_empties():
+    """Both ends of the egress wiring read one: the scheduler reads the extra
+    hosts a dev stack needs and the proxy reads the allowlist it was handed. A
+    trailing comma must not mean something different to the process that writes
+    the list and the process that enforces it."""
+    assert egress.host_list(" a.example.com , b.example.com, ") == (
+        "a.example.com",
+        "b.example.com",
+    )
+
+
+def test_an_empty_host_list_is_empty_rather_than_one_empty_host():
+    """An empty allowlist refuses everything; a list holding "" would allow a
+    request with no host at all."""
+    assert egress.host_list("") == ()
+    assert egress.host_list(" , ") == ()
+
+
 # --- the allowlist: the target's host, Anthropic, npm, and nothing else ----
 
 def test_the_allowlist_is_the_targets_host_the_api_and_the_registry():

@@ -10,6 +10,14 @@ wall-clock timeout the most expensive failure mode in the system.
                           nobody is driving any more (app/reaper.py)
     per-run spend         here, from the `result` events the runner already parses
 
+**Where the run's deadline really bites is the reaper**, and that is deliberate.
+The check here is cheap and early -- it refuses to start another step -- but a
+run wedged *inside* a step would otherwise outlive its deadline by the whole
+step timeout. So the reaper's overdue sweep both fails the row and destroys the
+sandbox (`reap_sandbox` over `reaped + overdue + idle`), which bounds the
+overrun by one reap interval rather than by one step, and bounds it in the place
+that costs money rather than in the one that keeps the status tidy.
+
 **A wrapper around a Runner, not a change to the driver.** The driver keeps
 exactly one injected step-boundary callable (DESIGN.md §13) and knows nothing
 about limits: a breach is an ordinary failed step, so the driver fails the step

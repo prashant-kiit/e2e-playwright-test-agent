@@ -46,6 +46,7 @@ from .delivery.render import (
 )
 from .models import Revision, Target
 from .sandbox import hydrate as hyd
+from .sandbox.egress import Resolver
 from .storage import Storage
 from .target_config import config_of
 
@@ -160,7 +161,7 @@ def create_target(
     target_branch: str | None = None,
     locators: str = "",
     agent_notes: list[str] | None = None,
-    resolve=None,
+    resolve: Resolver | None = None,
 ) -> tuple[Target, Revision]:
     """Create a target and commit its revision 1.
 
@@ -315,7 +316,7 @@ def delete_story(
 # --- configuration --------------------------------------------------------
 
 def update_config(
-    session: Session, store: Storage, target: Target, *, resolve=None, **fields
+    session: Session, store: Storage, target: Target, *, resolve: Resolver | None = None, **fields
 ) -> tuple[Target, Revision | None]:
     """Change a target's configuration, and record the tree diff it causes.
 

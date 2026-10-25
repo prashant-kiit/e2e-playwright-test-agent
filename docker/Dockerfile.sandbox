@@ -100,17 +100,22 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 #
 # **Chromium only, on purpose.** The generated config declares four projects,
 # but the agent generates and heals on `chromium` alone (app/prompts: a full
-# four-project run is the customer's CI, not a token-burning step here). The
-# PLAYWRIGHT_VERSION must track the `@playwright/test` pin in
-# app/delivery/templates/package.json, or `npm ci` will fetch a browser build
-# this image does not hold -- which is the one failure that silently undoes the
-# "no download at run time" promise.
-ARG PLAYWRIGHT_VERSION=1.63.0
+# four-project run is the customer's CI, not a token-burning step here).
+#
+# **The version is read out of the template lockfile, not written here.** A
+# browser build that does not match the `@playwright/test` the revision installs
+# is the one failure that silently undoes the "no download at run time" promise,
+# and a second hand-maintained copy of a pin is how that happens six months from
+# now. The lockfile is already the source of truth for the dependency; this
+# makes it the source of truth for the browser too.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
+COPY server/app/delivery/templates/package-lock.json /tmp/pin/package-lock.json
+RUN PLAYWRIGHT_VERSION="$(node -e "process.stdout.write(require('/tmp/pin/package-lock.json').packages['node_modules/@playwright/test'].version)")" \
+    && echo "playwright ${PLAYWRIGHT_VERSION} (from the template lockfile)" \
+    && npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
     && playwright install --with-deps chromium \
     && npm uninstall -g playwright \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /tmp/pin /var/lib/apt/lists/*
 
 # A warm npm cache, baked rather than shared.
 #

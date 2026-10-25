@@ -226,23 +226,30 @@ queued → hydrating → running → paused(live) → reaped → resuming → ru
   and re-seeds the Claude session from the persisted `session.jsonl` rather than a live
   process. A SaaS cannot pay for idle sandboxes.
 
-  > **Amended by P4: pause reaps immediately, with no grace window.** The sandbox is
-  > destroyed at the step boundary that pauses the run — its container exits there, and
-  > the reaper clears any handle left naming one, so "a paused run has no sandbox" is
-  > enforced rather than intended. The reason is P3: resume already re-hydrates from the
-  > head revision and that path is tested, so an idle sandbox's only advantage — a warm
-  > worktree — is one the harness no longer needs. "A SaaS cannot pay for idle sandboxes"
-  > is the same sentence it always was; the grace window was only ever buying the
-  > worktree.
+  > **Amended by P4: pause reaps immediately, with no grace window.** The route that
+  > pauses a run destroys its container there and then (`app/api.py`) and moves the row
+  > to `paused` itself, because the process that would otherwise have done it is the one
+  > just killed; the handle is cleared with it, and the reaper's sweep for idle sandboxes
+  > is the net under that rather than the way it normally happens. Waiting for the next
+  > step boundary would be a grace window by another name — an agent holding a browser
+  > is minutes of billing away from one. The reason it costs nothing is P3: resume
+  > already re-hydrates from the head revision and that path is tested, so an idle
+  > sandbox's only advantage — a warm worktree — is one the harness no longer needs. "A
+  > SaaS cannot pay for idle sandboxes" is the same sentence it always was; the grace
+  > window was only ever buying the worktree.
   >
   > What a paused run must not lose is the **agent session**, and that is now explicit
   > rather than incidental: `--resume` worked only because the CLI's session store
   > happened to sit on the host that started the run. The session directory is archived
-  > as a run artifact under a reserved name (`<run_key>/agent-session.tar.gz`) at the end
-  > of every run, pauses included, and restored into the next container before the CLI is
-  > invoked. **A failed restore does not fail the run**: it continues without session
-  > continuity and says so in the log, because the tree is the carrier of the work and
-  > the exploration is only context. Not a git bundle: see §3 on `bundle_key`.
+  > as a run artifact under a reserved name (`<run_key>/agent-session.tar.gz`) **at every
+  > step boundary** and at the end of every run, and restored into the next container
+  > before the CLI is invoked. At the boundary and not only on the way out, because a
+  > sandbox killed outright archives nothing: the boundary is the last moment the session
+  > is known good, so a pause — like a crash — costs the exploration of the step it
+  > interrupted and no more. **A failed restore does not fail the run**: it continues
+  > without session continuity and says so in the log, because the tree is the carrier of
+  > the work and the exploration is only context. Not a git bundle: see §3 on
+  > `bundle_key`.
 - **Crash** commits nothing (invariant 4). The run goes `failed` with the last committed
   revision intact and resumes **from the last completed step boundary**, never mid-step —
   that is what keeps "retries converge" true.
@@ -609,7 +616,7 @@ one hook by the caller. Recorded here because the natural way to write P2 is to 
 | 24 | `get_launcher` stays the one dispatch seam; one `Scheduler` protocol behind it, Docker the only implementation (P4) |
 | 25 | Egress enforced at the network layer: an internal network plus a per-run allowlisting proxy that resolves (P4) |
 | 26 | The live log is a Postgres table read by cursor; `session.jsonl` is still the durable record (P4) |
-| 27 | Pause reaps immediately; the **agent session** is a run artifact, and a failed restore loses context rather than the run (P4) |
+| 27 | Pause reaps immediately — the route that pauses destroys the container, not the next step boundary; the **agent session** is a run artifact archived at every boundary, and a failed restore loses context rather than the run (P4) |
 
 ---
 

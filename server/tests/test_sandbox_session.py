@@ -64,16 +64,16 @@ def run_env(session_factory, tmp_path, monkeypatch):
         return run.id, run.run_key, target.id, store
 
 
-def _drive(session_factory, run_id, store, runner=None, log=None):
-    log = log or InMemoryLogBus()
+def _drive(session_factory, run_id, store, runner=None, bus=None):
+    bus = bus or InMemoryLogBus()
     launcher.drive_run(
         run_id,
         runner=runner or FakeRunner(),
-        log=log,
+        bus=bus,
         session_factory=session_factory,
         store=store,
     )
-    return log.read_from(run_id, 0)[0]
+    return bus.read_from(run_id, 0)[0]
 
 
 def _session_artifacts(session_factory, run_id):
@@ -99,6 +99,36 @@ def test_the_agent_session_is_archived_at_run_end(
     assert artifacts[0].s3_key == f"{run_key}/{agent_session.ARCHIVE_NAME}"
     assert artifacts[0].kind == "session"
     assert store.objects[artifacts[0].s3_key][0], "the archive has bytes"
+
+
+def test_the_session_is_archived_at_every_step_boundary(
+    run_env, session_factory, config_dir, tmp_path
+):
+    """Pause destroys the container at once (DESIGN.md §5), so the way out of a
+    run cannot be the only place the session is saved: a sandbox killed without
+    warning archives nothing.
+
+    Asserted from *inside* a later step, which is the instant a pause lands: by
+    then the previous boundary's archive is already in the store, so what a
+    pause costs is the exploration of the step it interrupted and no more.
+    """
+    run_id, run_key, _target_id, store = run_env
+    key = f"{run_key}/{agent_session.ARCHIVE_NAME}"
+    seen: list[tuple[Step, bool]] = []
+
+    class ExploresAndLooks(FakeRunner):
+        def run_step(self, ctx, emit):
+            seen.append((ctx.step, key in store.objects))
+            # As the CLI does while it works, so each boundary has something new
+            # to archive and the versions are not a formality.
+            (config_dir / "projects" / "qa" / f"{ctx.step.value}.json").write_text("{}")
+            return super().run_step(ctx, emit)
+
+    _drive(session_factory, run_id, store, ExploresAndLooks())
+
+    assert len(seen) > 1, "the pipeline ran more than one step"
+    assert seen[0][1] is False, "nothing to restore before the first boundary"
+    assert all(archived for _step, archived in seen[1:]), seen
 
 
 def test_the_archive_holds_what_the_cli_keeps(run_env, session_factory, config_dir, tmp_path):

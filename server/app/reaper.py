@@ -25,9 +25,12 @@ lock from being freed:
     to check its own deadline, and `app/orchestrator/limits.py` is the half that
     stops a run still being driven from starting another step;
   - a **paused** run that still names a sandbox has it destroyed and the column
-    cleared. Pause reaps immediately, with no grace window (§5), so a paused
-    run's container exits at the boundary that paused it -- this is what makes
-    "no sandbox is left running for a paused run" true rather than intended.
+    cleared. Pause reaps immediately, with no grace window (§5): the route that
+    pauses a run kills the container itself, so a handle still on a paused row
+    means that did not happen -- an API that died mid-pause, or a pause that
+    raced a dispatch. This is the net under it, not the way it normally works,
+    and it is what makes "no sandbox is left running for a paused run" true
+    rather than intended.
 
 `reap_sandbox` is how a reaped run's container stops costing money. It is a
 callback rather than an import because the dispatch seam imports the launcher
@@ -173,7 +176,13 @@ def _idle_sandboxes(session_factory=SessionLocal) -> list[int]:
         return repo.idle_sandbox_runs(session)
 
 
-def _forget_sandbox(session_factory=SessionLocal, run_id: int = 0) -> None:
+def _forget_sandbox(session_factory, run_id: int) -> None:
+    """A paused run has no sandbox once its container is gone; the row says so.
+
+    Both arguments required: a default `run_id` here would be a sentinel that
+    silently cleared nothing, and the other helpers' `session_factory` default
+    exists only because the loop may be called without one.
+    """
     with session_factory() as session:
         repo.set_sandbox_handle(session, run_id, None)
 

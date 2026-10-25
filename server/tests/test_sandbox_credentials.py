@@ -239,22 +239,28 @@ def test_the_sandbox_image_carries_the_cli_node_and_the_browsers():
 def test_the_sandbox_image_installs_the_browsers_at_build_time():
     """A run starts without downloading one: time-to-first-step in seconds."""
     dockerfile = _dockerfile()
-    assert "RUN npm install -g \"playwright@${PLAYWRIGHT_VERSION}\"" in dockerfile
+    assert 'npm install -g "playwright@${PLAYWRIGHT_VERSION}"' in dockerfile
     assert "PLAYWRIGHT_BROWSERS_PATH" in dockerfile
 
 
-def test_the_prebaked_browser_version_matches_the_revisions_lockfile():
-    """The one failure that silently undoes "no download at run time": `npm ci`
-    from the lockfile fetching a browser build the image does not hold."""
-    import json
-    import re
+def test_the_prebaked_browser_version_is_read_from_the_revisions_lockfile():
+    """The one failure that silently undoes "no download at run time" is `npm
+    ci` from the lockfile fetching a browser build the image does not hold.
 
-    lock = json.loads(
-        (SERVER_DIR / "app" / "delivery" / "templates" / "package-lock.json").read_text()
-    )
-    pinned = lock["packages"]["node_modules/@playwright/test"]["version"]
-    baked = re.search(r"ARG PLAYWRIGHT_VERSION=([\d.]+)", _dockerfile()).group(1)
-    assert baked == pinned
+    Structural rather than compared: a second copy of the pin that a test keeps
+    honest is still a second copy, and the lockfile every revision carries is
+    already the source of truth for the dependency. So the image reads the
+    version out of it at build time, and this asserts there is nothing left to
+    keep in sync.
+    """
+    dockerfile = _dockerfile()
+    lockfile = "server/app/delivery/templates/package-lock.json"
+
+    assert f"COPY {lockfile}" in dockerfile
+    assert "node_modules/@playwright/test" in dockerfile, "read from the lockfile"
+    assert "PLAYWRIGHT_VERSION=" not in code_lines(dockerfile).replace(
+        'PLAYWRIGHT_VERSION="$(node', ""
+    ), "no hand-maintained copy of the pin"
 
 
 def test_the_sandbox_image_declares_no_repo_mount():
@@ -338,3 +344,55 @@ def test_install_dependencies_is_still_one_named_function():
 
     assert inspect.isfunction(hydrate.install_dependencies)
     assert "npm" in inspect.getsource(hydrate.install_dependencies)
+
+
+# --- the stores are reached directly, not through the proxy --------------
+
+def test_the_internal_stores_are_not_sent_through_the_proxy(cfg):
+    """The bug this test exists for: boto3 honours `HTTPS_PROXY`.
+
+    Postgres and the object store sit on the sandbox's own internal network and
+    are reached by name. They are deliberately **not** on the egress allowlist --
+    a proxy that could reach the control plane's stores would be a proxy worth
+    attacking -- so if their hosts are not in `NO_PROXY`, the S3 client tunnels
+    `http://seaweedfs:8333` to the proxy, the proxy refuses it, and hydrate and
+    ingest both fail. The Docker-backed integration test cannot catch this: it
+    runs with no proxy at all.
+    """
+    env = sandbox_env.sandbox_environment(
+        7, cfg, proxy_url="http://qa-proxy-run:3128"
+    )
+
+    for name in ("NO_PROXY", "no_proxy"):
+        hosts = env[name].split(",")
+        assert "seaweedfs" in hosts, env[name]
+        assert "postgres" in hosts, env[name]
+    assert env["HTTPS_PROXY"] == "http://qa-proxy-run:3128"
+
+
+def test_the_stores_in_no_proxy_are_the_stores_the_sandbox_was_given(cfg, monkeypatch):
+    """Derived from the endpoints, never hand-listed: a stack whose stores are
+    somewhere else must not need this file edited to keep working."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://qa:qa@db.internal:5432/qa")
+    monkeypatch.setenv("S3_ENDPOINT", "http://blobs.internal:9000")
+
+    env = sandbox_env.sandbox_environment(7, cfg, proxy_url="http://p:3128")
+
+    hosts = env["NO_PROXY"].split(",")
+    assert "db.internal" in hosts
+    assert "blobs.internal" in hosts
+
+
+def test_the_target_is_not_in_no_proxy(cfg):
+    """It must go *through* the proxy: that is where the allowlist and the
+    public-address rule are enforced."""
+    env = sandbox_env.sandbox_environment(7, cfg, proxy_url="http://p:3128")
+
+    assert "shop.example.com" not in env["NO_PROXY"].split(",")
+
+
+def test_without_a_proxy_there_is_no_proxy_environment_at_all(cfg):
+    env = sandbox_env.sandbox_environment(7, cfg)
+
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "QA_PROXY_URL"):
+        assert name not in env

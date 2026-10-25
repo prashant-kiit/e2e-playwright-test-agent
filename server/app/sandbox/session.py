@@ -6,9 +6,12 @@ started the run; the moment a run executes in a container destroyed on pause,
 that store is gone and step 4 generates tests from an exploration it cannot
 remember.
 
-So the session directory is archived under a **reserved artifact name** at the
-end of every run -- which includes every pause, because a paused run's container
-exits -- and restored into the next container before the CLI is invoked.
+So the session directory is archived under a **reserved artifact name** at every
+step boundary and at the end of every run, and restored into the next container
+before the CLI is invoked. At the boundary and not only at the end, because a
+pause destroys the container at once (app/api.py) and a killed sandbox archives
+nothing: the boundary is the last moment the session is known good, so a pause
+costs the exploration of the step it interrupted and no more.
 
     <run_key>/agent-session.tar.gz        kind "session", versioned per run
 
@@ -48,7 +51,8 @@ from ..tenancy import current_tenant_id
 
 log = logging.getLogger(__name__)
 
-# The reserved name. One per run, rewritten (as a new version) on each pause.
+# The reserved name. One per run, rewritten (as a new version) whenever the
+# session's contents have changed since the last boundary.
 ARCHIVE_NAME = "agent-session.tar.gz"
 ARCHIVE_KIND = "session"
 

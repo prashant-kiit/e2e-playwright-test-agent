@@ -278,10 +278,10 @@ def test_there_is_nothing_to_destroy_on_the_thread_path(monkeypatch):
 def test_a_paused_run_that_still_names_a_sandbox_is_the_reapers_business(
     client, session, scheduler
 ):
-    """Pause reaps immediately -- the container exits at the boundary that
-    paused it -- so a handle left on a paused row is what the reaper clears,
-    which is what makes "a paused run has no sandbox" true and not just
-    intended."""
+    """The pause route kills the container itself, so a handle left on a paused
+    row means that did not finish -- an API that died mid-pause, or a pause that
+    raced a dispatch. The reaper is the net under it, and what makes "a paused
+    run has no sandbox" true and not just intended."""
     target_id = _target(client)
     run = _start(client, target_id)
     repo.begin_run(session, run["id"])
@@ -292,3 +292,52 @@ def test_a_paused_run_that_still_names_a_sandbox_is_the_reapers_business(
     repo.set_sandbox_handle(session, run["id"], None)
     assert repo.idle_sandbox_runs(session) == []
     assert repo.get_run(session, run["id"]).status is RunStatus.PAUSED, "still paused"
+
+
+def test_pausing_a_run_destroys_its_sandbox_at_once(client, session, scheduler):
+    """Pause exists to stop costing money, so it cannot wait for a boundary an
+    agent holding a browser is minutes of billing away from. The row is moved to
+    `paused` here because the process that would have done it is the one just
+    killed."""
+    target_id = _target(client)
+    run = _start(client, target_id)
+    repo.begin_run(session, run["id"])
+
+    r = client.post(f"/runs/{run['id']}/pause")
+
+    assert r.status_code == 200
+    assert r.json()["status"] == RunStatus.PAUSED.value
+    assert scheduler.destroyed == scheduler.handles
+    assert r.json()["sandbox_handle"] is None, "a paused run names no sandbox"
+    assert session.get(AppLock, target_id) is not None, "the run still owns the app"
+
+
+def test_a_paused_run_is_not_waiting_for_a_boundary_to_notice(
+    client, session, scheduler
+):
+    """`pause_requested` is cleared by the transition, so nothing is left for a
+    step boundary that will never come."""
+    target_id = _target(client)
+    run = _start(client, target_id)
+    repo.begin_run(session, run["id"])
+
+    client.post(f"/runs/{run['id']}/pause")
+
+    row = repo.get_run(session, run["id"])
+    assert row.pause_requested is False
+    assert row.lease_expires_at is None, "a pause holds the lock with no lease"
+
+
+def test_pausing_a_run_without_a_sandbox_still_asks_the_boundary(client, session):
+    """The thread path keeps the flag-at-a-boundary behaviour: there is no
+    container to kill, and the thread doing the work notices at its next step."""
+    app.dependency_overrides[get_launcher] = lambda: (lambda _id: None)
+    target_id = _target(client)
+    run = _start(client, target_id)
+    repo.begin_run(session, run["id"])
+
+    r = client.post(f"/runs/{run['id']}/pause")
+
+    assert r.status_code == 200
+    assert r.json()["status"] == RunStatus.RUNNING.value
+    assert r.json()["pause_requested"] is True
