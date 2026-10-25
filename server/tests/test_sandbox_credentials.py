@@ -22,6 +22,7 @@ the test below pins the *shape* of the exposure so it cannot quietly grow.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -224,8 +225,15 @@ def test_the_sandbox_image_builds_from_the_same_server_package_as_the_api():
 def test_the_sandbox_image_carries_the_cli_node_and_the_browsers():
     dockerfile = _dockerfile()
     assert "@anthropic-ai/claude-code" in dockerfile
-    assert "nodejs" in dockerfile
     assert "playwright install" in dockerfile
+    # Node 22 or newer, grafted from the official image: the CLI requires it and
+    # this base's apt ships 20, so `apt-get install nodejs` would build an image
+    # whose agent runtime refuses to start.
+    assert "/usr/local/bin/node" in dockerfile
+    major = int(
+        re.search(r"node:(\d+)-", dockerfile).group(1)
+    )
+    assert major >= 22
 
 
 def test_the_sandbox_image_installs_the_browsers_at_build_time():
@@ -307,3 +315,26 @@ def test_the_sandbox_image_is_built_but_never_started_by_the_stack():
     sandbox = _compose()["services"]["sandbox"]
     assert sandbox["profiles"] == ["never-started"]
     assert sandbox["build"]["dockerfile"] == "docker/Dockerfile.sandbox"
+
+
+def test_the_npm_cache_is_baked_into_the_image_rather_than_shared():
+    """Story 23 wants `npm ci` warm. A cache *volume* mounted into every
+    sandbox would be a writable directory shared between containers running
+    different customers' agents -- a supply-chain path between them, which is
+    what container-per-run exists to close. So it is in the image."""
+    dockerfile = _dockerfile()
+    assert "npm ci --cache /npm-cache" in dockerfile
+    assert "package-lock.json" in dockerfile
+    assert sandbox_env.NPM_CACHE == "/npm-cache"
+    assert "volumes" not in _compose()["services"]["sandbox"]
+
+
+def test_install_dependencies_is_still_one_named_function():
+    """The image makes that install fast; it does not replace it, because the
+    lockfile in the revision stays the source of truth for dependencies."""
+    import inspect
+
+    from app.sandbox import hydrate
+
+    assert inspect.isfunction(hydrate.install_dependencies)
+    assert "npm" in inspect.getsource(hydrate.install_dependencies)

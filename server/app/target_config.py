@@ -126,14 +126,11 @@ def assert_public_base_url(
     portal already knows how to show.
     """
     try:
-        egress.resolve_public(host_of(base_url), resolve=resolve)
+        # `egress.host_of` rather than a second parse: the host the proxy will
+        # enforce on and the host the write path checks must be the same string.
+        egress.resolve_public(egress.host_of(base_url), resolve=resolve)
     except egress.EgressError as exc:
         raise ConfigError(f"base URL {base_url!r} is not usable: {exc}") from exc
-
-
-def host_of(base_url: str) -> str:
-    """The host a base URL names. Shape has already been checked by this point."""
-    return urlparse(base_url).hostname or ""
 
 
 def clean_fields(

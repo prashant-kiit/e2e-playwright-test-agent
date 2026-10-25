@@ -266,11 +266,11 @@ def drive_run(
 ) -> None:
     """Work the run: heartbeat, runner, the composition, close the stream.
 
-    The one function both call sites use. Its keyword arguments are the three
-    things a container gets from its environment -- a bus, a database and an
-    object store -- passed in rather than read from `env` so that the entrypoint
-    is testable without a container, exactly as `run_with_worktree` already
-    allows.
+    The one function both call sites use. Its keyword arguments are the things
+    a container otherwise takes from its environment -- the runner, the log bus,
+    the database and the object store -- passed in rather than read from `env`
+    so the entrypoint is testable without a container, exactly as
+    `run_with_worktree` already allows.
 
     The heartbeat is taken **here**, inside whichever process does the work, so
     the reaper's crash detection measures the thing that is actually working
@@ -282,8 +282,10 @@ def drive_run(
     emit = log.emitter(run_id)
     runner = runner or make_runner()
     started = time.monotonic()
-    _restore_session(run_id, emit, session_factory=session_factory, store=store)
     try:
+        # Inside the `try`, so a failure here still closes the stream a reader
+        # is waiting on rather than leaving it open on a run nothing is driving.
+        _restore_session(run_id, emit, session_factory=session_factory, store=store)
         with heartbeat_during(run_id, session_factory=session_factory):
             run_with_worktree(
                 run_id,

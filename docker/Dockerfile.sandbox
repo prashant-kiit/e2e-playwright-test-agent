@@ -67,9 +67,20 @@ FROM sandbox-runtime AS sandbox
 
 # Node for the `claude` CLI, for `npm ci` in the hydrated worktree, and for the
 # Playwright MCP server the agent drives the browser through.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+#
+# Grafted from the official image rather than installed from apt: the CLI
+# requires Node >= 22 and this base's distribution ships 20, so apt's `nodejs`
+# would produce an image whose agent runtime refuses to start -- the kind of
+# breakage that shows up only in a real run.
+ARG NODE_IMAGE=node:22-bookworm-slim
+COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version && npm --version
 
 # The agent runtime, pinned. app/orchestrator/claude.py's isolation flags are
 # verified against the 2.1.x CLI, so the image says which 2.1.x it is rather
@@ -100,3 +111,24 @@ RUN npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
     && playwright install --with-deps chromium \
     && npm uninstall -g playwright \
     && rm -rf /var/lib/apt/lists/*
+
+# A warm npm cache, baked rather than shared.
+#
+# Story 23 asks for `npm ci` from the revision's lockfile "against a shared
+# cache", and the obvious reading -- a cache volume mounted into every sandbox --
+# is one this phase cannot have: a writable directory shared between containers
+# running different customers' agents is a supply-chain path between them, which
+# is precisely what container-per-run exists to close. So the cache is **in the
+# image**: populated at build time from the template lockfile that every
+# target's revision 1 carries, identical for every run, and written to only in
+# the container's own layer, which is destroyed with it.
+#
+# `install_dependencies` is unchanged and still one named function: the lockfile
+# in the revision remains the source of truth for dependencies, and this only
+# decides whether that install is a download or a copy.
+COPY server/app/delivery/templates/package.json server/app/delivery/templates/package-lock.json /tmp/warm/
+RUN cd /tmp/warm \
+    && npm ci --cache /npm-cache --no-audit --no-fund \
+    && rm -rf /tmp/warm \
+    && chmod -R a+rX /npm-cache
+ENV QA_NPM_CACHE=/npm-cache

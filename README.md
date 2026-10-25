@@ -25,18 +25,22 @@ The harness is driven from a **single-operator web portal**. It orchestrates the
 
 **Revisions are the truth (P3).** A target's configuration is a row on `targets`; its **tracked tree** — stories, plans, seed, test suite and the infra files — lives in content-addressed blobs indexed by an immutable `revision`. Creating a target commits revision 1 from the templates. Before a run's first step the orchestrator **hydrates** that head revision into a per-run worktree (blobs streamed from SeaweedFS and verified as they are written, generated files rendered from the row, dependencies installed); the agent works there and nowhere else; at each completed step boundary **ingest** commits revision N+1; when the run ends the worktree is deleted. A step that changed no tracked file commits nothing, so `rev` counts real changes rather than steps. Each target gets a **Stories** editor, a **Configuration** form and a read-only **Revisions** panel — the portal is the only way a story gets in, and every write commits one operator-authored revision. **A failed ingest fails the run:** once truth has moved, a swallowed failure would mean a run reporting success having dropped its work ([DESIGN.md §13](.claude/harness/DESIGN.md), [VERIFICATION-P3.md](.claude/harness/VERIFICATION-P3.md)).
 
+**Runs execute in their own container (P4).** The API takes the app lock and writes the run row as it always has, and then **dispatches a sandbox**: a container from a prebaked image that hydrates the head revision, drives the five steps, commits revisions at each boundary, collects artifacts and is destroyed with the run. The agent that writes and runs TypeScript no longer shares a process tree, a filesystem or an environment with the thing holding the control plane's credentials. Around it: **default-deny egress at the network layer** — the sandbox sits on an internal Docker network with *no default route*, and its only way out is a per-run allowlisting `CONNECT` proxy built from that target's row, which resolves on the sandbox's behalf and refuses any name that resolves to a private, link-local or loopback address; **no GitHub credential**, structurally (the image has no `git`, the environment is built from an explicit list, and no module the sandbox imports can even read `GITHUB_PAT`); a **live log in Postgres**, read by cursor, so any replica can stream any run and the history survives a restart; and **per-step, per-run and per-spend limits**, each ending a run `failed` with a reason and the last revision intact. `QA_SANDBOX=thread` keeps today's in-process path for CI and development. P4 is implemented; its closeout is pending a real agent run ([VERIFICATION-P4.md](.claude/harness/VERIFICATION-P4.md)).
+
 **Quick start:**
 
 ```bash
-make up                               # postgres + seaweedfs + api (migrates on boot) + web
+make up                               # postgres + seaweedfs + api (migrates on boot) + web + the sandbox image
 open http://localhost:8080            # log in — password is QA_ADMIN_PASSWORD (default: admin)
 ```
 
 - `make help` lists every target. The API container runs `alembic upgrade head` on boot (schema lives in `server/alembic/`), then uvicorn.
-- `QA_RUNNER` selects the agent: **`fake`** (default — synthetic steps, no tokens, for demos/CI) or `claude` (the real per-step runner; needs the `claude` CLI in the execution environment). `QA_FAKE_DELAY` slows the fake runner so you can exercise pause/stop.
-- **Nothing is mounted into the API.** A target's configuration is a row, its tree is a revision in blob storage, and the prompts, the agent runtime and the delivery templates ship inside the server package. The API's only local state is per-run scratch on a volume: `QA_WORKTREES_DIR` (the hydrated worktree), `QA_RUNS_DIR` (run output) and `QA_NPM_CACHE`. `git` is installed in the image because delivery pushes from the control plane.
+- `QA_RUNNER` selects the agent: **`fake`** (default — synthetic steps, no tokens, for demos/CI) or `claude` (the real per-step runner; the sandbox image ships the CLI, Node and the browsers it needs). `QA_FAKE_DELAY` slows the fake runner so you can exercise pause/stop.
+- `QA_SANDBOX` selects **where a run executes**: `docker` (the compose stack's default — a container per run) or `thread` (a daemon thread in the API process, the default for tests, CI and a bare `uvicorn`). It is read by one factory behind `get_launcher`, the way `QA_RUNNER` is read by `make_runner`; `make up` builds the sandbox and proxy images for you.
+- **Nothing is mounted into the API, and less still into a sandbox.** A target's configuration is a row, its tree is a revision in blob storage, and the prompts, the agent runtime and the delivery templates ship inside the server package. `git` is installed in the API image because delivery pushes from the control plane — and deliberately *not* in the sandbox image, because §6's rule is that no GitHub credential ever enters a sandbox and there should be nothing there to push with.
+- **Limits, each with a sane default and an env override:** `QA_STEP_TIMEOUT_S` (30 min), `QA_RUN_TIMEOUT_S` (2 h), `QA_SPEND_BUDGET_USD` (20). A breach ends the run `failed` with the reason in its log and on the row, the lock freed and the last committed revision intact. `QA_LOG_RETENTION_DAYS` (7) bounds how long the live log's rows are kept — `session.jsonl` is still the durable record.
 
-**What P3's statelessness is, and what it is not.** P3 removed the *shared authoritative* mount: no replica needs another replica's disk to answer a question or to start a run, which is the dependency that made two API replicas impossible and that P4's container-per-run stands on. It does **not** make the API horizontally scalable on its own — the worktree and the run directory are local scratch and the SSE log bus is in-process, so **a live run is still pinned to the replica that started it.** Moving the runner out of the API process is P4's job.
+**What P3's statelessness was, and what P4 added to it.** P3 removed the *shared authoritative* mount: no replica needs another replica's disk to answer a question or to start a run, which is the dependency that made two API replicas impossible and that container-per-run stands on. It did **not** make the API horizontally scalable on its own — the worktree and the run directory were local scratch and the SSE log bus was in-process, so a live run was pinned to the replica that started it. **P4 removed both causes**: the worktree lives in the sandbox, and the log is a Postgres table read by cursor, so any replica can stream any run and a finished run replays after a deploy. Proving multi-replica operation is still its own exercise — what is gone is the reason it was impossible.
 
 **Run modes:** *Full app* (test the whole app) or *Changed only* (focus on the acceptance criteria that changed in the user story since the last tested version — a story diff, since we have the live URL and story, not the app's source).
 
@@ -164,7 +168,7 @@ Steps 1–6 are the agent's work; it stops at step 6. Delivery is a separate hum
 ├── .github/workflows/
 │   └── ci.yml                          # THIS repo's CI, and the ONLY workflow here: ruff + pytest + vitest
 ├── Makefile                            # the entry point: make help, up, test, check/bootstrap/deliver/reset
-├── docker-compose.yml                  # postgres + seaweedfs + api + web
+├── docker-compose.yml                  # postgres + seaweedfs + api + web, plus the sandbox/proxy images and the two networks
 ├── server/                             # FastAPI backend, orchestrator and delivery tools
 │   ├── app/
 │   │   ├── api.py, auth.py, auth_api.py, main.py  # routes, single-operator auth, app wiring
@@ -172,10 +176,18 @@ Steps 1–6 are the agent's work; it stops at step 6. Delivery is a separate hum
 │   │   ├── target_config.py              # a target's config, and what a valid value is (write-path)
 │   │   ├── authoring.py                  # operator writes: a target, its stories, its config
 │   │   ├── revisions.py                  # the tree hash, commit-a-revision, and the reads
-│   │   ├── launcher.py                   # composes hydrate → pipeline → teardown around a run
-│   │   ├── sandbox/hydrate.py            # materialize + render + install, and teardown (P4 moves these)
+│   │   ├── launcher.py                   # drive_run: the ONE composition (hydrate → pipeline → teardown), two call sites
+│   │   ├── sandbox/                      # everything that happens around and outside a run
+│   │   │   ├── hydrate.py                # materialize + render + install, and teardown
+│   │   │   ├── run.py                    # the container's entrypoint: python -m app.sandbox.run <run_id>
+│   │   │   ├── dispatch.py               # the Scheduler protocol, the launcher factory, the recording fake
+│   │   │   ├── docker.py                 # the one real scheduler: a container per run, over the Docker API
+│   │   │   ├── env.py                    # the ONE builder of a sandbox's environment (an explicit list)
+│   │   │   ├── egress.py                 # the ONE allowlist builder, and the public-address rule
+│   │   │   ├── proxy.py                  # the allowlisting CONNECT proxy: a sandbox's only way out
+│   │   │   └── session.py                # the agent session as a run artifact, so a resume remembers
 │   │   ├── domain/                       # pure logic: steps, statuses, lease rules (no DB, no IO)
-│   │   ├── orchestrator/                 # driver (steps + checkpoints), runners (claude/fake), log bus
+│   │   ├── orchestrator/                 # driver (steps + checkpoints), runners (claude/fake), limits, log bus
 │   │   ├── delivery/                     # target-repo work; catalog.py is its database seam (§5.6)
 │   │   │   └── templates/                # PACKAGE DATA: the infra files and the seed, delivered as-is
 │   │   │       └── workflows/playwright.yml  # harness OUTPUT; not a workflow of this repo
@@ -189,7 +201,7 @@ Steps 1–6 are the agent's work; it stops at step 6. Delivery is a separate hum
 │   │   ├── apphub.py                     # prompts + settings + the optional infra sync
 │   │   ├── package_data.py               # where the three package-data directories are (no mount)
 │   │   ├── artifacts.py, storage.py      # classify + store artifact blobs (SeaweedFS/S3)
-│   │   └── reaper.py                     # frees targets whose run died holding the lock
+│   │   └── reaper.py                     # frees targets whose run died, fails overdue runs, prunes the log table
 │   ├── alembic/                        # migrations; the test schema is built by running these from zero
 │   └── tests/                          # pytest; delivery_helpers.py = real git + fake GitHub REST + fake catalog
 ├── web/                                # React + Vite portal (Vitest)
@@ -304,7 +316,7 @@ Note: in permission rules, `Edit(path)` covers every file-writing tool. `Write(p
 1. `npm ci`
 2. `npx playwright install --with-deps`
 3. `npx playwright test --reporter=list,html,json` (all the app's projects, including the seed test)
-4. **Write the results report to the run's Job Summary** — a per-project pass/fail/flaky/skipped table built from `results.json` with `jq` (no third-party actions, no extra permissions)
+8. **Write the results report to the run's Job Summary** — a per-project pass/fail/flaky/skipped table built from `results.json` with `jq` (no third-party actions, no extra permissions)
 5. Upload `playwright-report/` as an artifact (30 days)
 6. Fail the job if any test failed (step 3 runs with `continue-on-error` so the summary and artifact are always produced first)
 
@@ -465,7 +477,7 @@ Delivery is a **human-initiated step** after reviewing the agent's generated tes
 0. Deliver to the target's own repo, from its configuration row. Never mix targets in one repo.
 1. **Bootstrap is folded into the first approved delivery** ([DESIGN.md decision 16](.claude/harness/DESIGN.md#14-decision-log)), so one approval means "set the repo up and deliver this story". `bootstrap <app>` still exists to push the infra entries (`package.json`, `package-lock.json`, the generated `playwright.config.ts`, `.gitignore`, `.github/workflows/playwright.yml`) on their own — run it after an infra or workflow change so existing repos pick it up. `app.json` is never delivered: configuration is SaaS-internal.
 2. **"Is this delivered?" is one Postgres query.** The head revision either carries a `delivered_sha` or it is N revisions ahead of the newest one that does; a target is *bootstrapped* if any of its revisions carries one. `check <app>` prints that, the portal shows it as a badge, and neither touches the network — so the answer is the same for everyone and does not depend on GitHub being reachable.
-3. **Delivery is a human step** run after review: `push <app> <STORY_ID>` materializes the head revision, writes it onto `qa/<STORY_ID>-<slug>`, squashes it into one commit, opens or updates the PR into `targetBranch`, and **records `delivered_sha` on the revision it delivered**. The story's tests folder is replaced wholesale so deletions propagate; nothing else is deleted, because customer drift is not a delivery's to clean up. If the branch already held those bytes, the existing sha is recorded anyway — "delivered" is about the bytes, not about whether we made a commit. No report or evidence is pushed (CI generates the report). The agent does not run this.
+4. **Delivery is a human step** run after review: `push <app> <STORY_ID>` materializes the head revision, writes it onto `qa/<STORY_ID>-<slug>`, squashes it into one commit, opens or updates the PR into `targetBranch`, and **records `delivered_sha` on the revision it delivered**. The story's tests folder is replaced wholesale so deletions propagate; nothing else is deleted, because customer drift is not a delivery's to clean up. If the branch already held those bytes, the existing sha is recorded anyway — "delivered" is about the bytes, not about whether we made a commit. No report or evidence is pushed (CI generates the report). The agent does not run this.
 
 App-specific delivery facts live in that app's `agentNotes`. Currently: the SauceDemo repo has history (bootstrap done, PR #1 merged, branch `qa/SCRUM-101-checkout` exists) and still has the pre-refactor paths (`user-stories/scrum-latest.md`, `specs/saucedemo-checkout-test-plan.md`, `tests/seed.spec.ts`, `tests/saucedemo-checkout/`, `reports/SCRUM-101-checkout-test-report.md`), which the next SauceDemo delivery should delete. The Practice Target repo is kept empty as the throwaway for verifying delivery end to end.
 
@@ -487,7 +499,14 @@ App-specific delivery facts live in that app's `agentNotes`. Currently: the Sauc
 | Relying on the default MCP project | Always pass `project: chromium` and `seedFile: seed.spec.ts` to `*_setup_page` |
 | Looking for `playwright.config.ts`, `apps/` or `prompts/` in this repo | All deleted in P3. The config is generated from the target's row; a target's tree is a revision; the prompts, the agent runtime and the delivery templates are **package data** under `server/app/` |
 | Adding a module that resolves "the templates" or "the prompts" relative to the checkout | That is the mount, by another name. `tests/test_no_repo_mount.py` fails on any reference to a repo-root helper or `QA_REPO_ROOT`, which is what keeps a shared disk from being quietly reacquired |
-| Expecting the API to scale horizontally because "the mount is gone" | It removed the *shared authoritative* disk, not the local scratch. The worktree and run dir are local and the SSE bus is in-process, so a live run is pinned to the replica that started it until P4 |
+| Expecting the API to scale horizontally because "the mount is gone" | P3 removed the *shared authoritative* disk; P4 removed the other two pinning causes (the worktree moved into the sandbox, the log bus became a Postgres table). Multi-replica operation is now un-blocked rather than proven — nobody has stood two replicas up |
+| Mounting the Docker socket into the API in anything but the dev stack | It is **root-equivalent on that host**: anything that can talk to it can start a privileged container. That is why it sits behind the `Scheduler` seam with the caveat written at the point of the mount — in production the scheduler calls a job API and holds no socket (DESIGN.md §6) |
+| Giving the sandbox a shared npm cache volume "to keep installs warm" | A writable directory shared between containers running different customers' agents is a supply-chain path between them — the thing container-per-run exists to close. The cache is **baked into the image** from the template lockfile instead: warm, identical for every run, and written to only in the container's own layer |
+| Unsetting `HTTP_PROXY` in a sandbox to "get egress back" | It closes the only door rather than opening the internet. The sandbox network is `internal: true` — no default route, and no resolver either — so an allowlist the agent could unset was never the control (DESIGN.md §6) |
+| Adding a host to the allowlist by hand | There is exactly one builder, `app/sandbox/egress.build_allowlist`, and it takes the target's row: its host, the Anthropic API, the npm registry. "What can this run reach?" has to stay answerable by reading one function. The agent runtime's telemetry is *disabled by environment*, not allowlisted |
+| Putting a GitHub credential anywhere a sandbox can see | Refused by construction and by test: `app/sandbox/env.py` builds the environment from an explicit list, the image has no `git`, and a structural test walks the entrypoint's real import graph and fails if any module in it so much as mentions `GITHUB_PAT` |
+| Expecting a run's live log to come from the API's memory | It is `run_log`, read forward from a cursor. One writer per run — the sandbox — and the API never publishes on behalf of a run it does not execute. `session.jsonl` is still the durable per-run record |
+| Adding a second step-boundary parameter "for the container" | Still exactly one injected callable, and P4 is the phase that most tempted a second. The container runs the *same* composition: `drive_run`, one function, two call sites, with a structural test that fails if the entrypoint grows a pipeline of its own |
 | Agent opens the burger menu via `browser_evaluate` (JS click) and then clicks a menu item | The menu stays `aria-hidden`, so the item is never visible. Open it with a real `browser_click` on `[data-test="open-menu"]` (or the "Open Menu" button) |
 | Assuming SauceDemo rejects whitespace or special characters in checkout fields | It accepts them and moves to step two. Tests document this as an observation, not a defect, so code that re-fills the form afterwards will fail |
 | Cart page "total price" (AC1) | SauceDemo shows no total on the cart page. Totals appear on the overview page (AC3). This is documented in the report |
@@ -506,16 +525,17 @@ App-specific delivery facts live in that app's `agentNotes`. Currently: the Sauc
 
 ## 10. Debugging a stuck or failed run
 
-1. **The portal first:** the run view streams each step's log; `runs/` holds the per-run working dir (transcript, Playwright output), and artifacts are browsable per run.
-2. **Playwright MCP server log** (fastest for a stuck tool call):
+1. **The portal first:** the run view streams each step's log — from `run_log` in Postgres, so it is there after a deploy and whichever replica you land on — and artifacts are browsable per run. A containerised run's working dir lives and dies with its container, so the transcript reaches you as an artifact rather than as a file on the API's disk.
+2. **The containers, while the run is live:** `docker ps --filter name=qa-run-` (the run's `sandbox_handle` is that container's name) and `docker logs qa-proxy-<run_key>`, which lists every host the agent tried to reach and whether it was allowed. A refused host is the first thing to check when a step fails for no visible reason.
+3. **Playwright MCP server log** (fastest for a stuck tool call):
    `~/Library/Caches/claude-cli-nodejs/-Users-prashant-Desktop-Project-e2e-playwright-test-agent/mcp-logs-playwright-test/*.jsonl`
    A repeating `Tool '<name>' still running (Ns elapsed)` means that call is stuck. The preceding `Calling MCP tool` line names it.
-3. **Session and sub-agent transcripts:**
-   `~/.claude/projects/-Users-prashant-Desktop-Project-e2e-playwright-test-agent/<session-id>.jsonl` and `.../<session-id>/subagents/agent-*.jsonl`. These hold the exact tool arguments, e.g. the selector or code that hung.
-4. **Browser console and page snapshots:** `.playwright-mcp/console-*.log`, `.playwright-mcp/page-*.yml`.
-5. **Browser cleanup log:** `.playwright-mcp/close-test-browsers.log`.
-6. **API/orchestrator logs:** `make logs` (all services) or `docker compose logs api`.
-7. **While a run is live:** watch the headed browser. An idle page while Claude Code waits on a tool call means a stuck action; press Esc to cancel that call without killing the flow.
+4. **Session and sub-agent transcripts:**
+   `~/.claude/projects/-Users-prashant-Desktop-Project-e2e-playwright-test-agent/<session-id>.jsonl` and `.../<session-id>/subagents/agent-*.jsonl`. These hold the exact tool arguments, e.g. the selector or code that hung. **Inside a sandbox** the CLI writes them under `CLAUDE_CONFIG_DIR` (`/data/claude-config`), which is archived as the run's `agent-session.tar.gz` artifact — so a paused run's transcript is downloadable from the portal rather than gone with the container.
+5. **Browser console and page snapshots:** `.playwright-mcp/console-*.log`, `.playwright-mcp/page-*.yml`.
+6. **Browser cleanup log:** `.playwright-mcp/close-test-browsers.log`.
+7. **API/orchestrator logs:** `make logs` (all services) or `docker compose logs api`. A dispatch that never produced a container leaves its reason on the run row (`error`), because the API never writes to a run's log — one writer per run, and it is the sandbox.
+8. **While a run is live:** watch the headed browser. An idle page while Claude Code waits on a tool call means a stuck action; press Esc to cancel that call without killing the flow.
 
 (Cache and transcript paths are derived from the project's absolute path and differ on another machine.)
 
@@ -528,13 +548,14 @@ The target architecture and the five-phase migration plan live in [.claude/harne
 - **P1 (shell → Python, no architecture change) is done** — [VERIFICATION-P1.md](.claude/harness/VERIFICATION-P1.md) records what was tested live and what is only covered by fakes.
 - **P2 (revisions + `file_index` + content-addressed blobs, dual-written from `apps/`) is done** — specced in [SPEC-P2-revisions.md](.claude/harness/SPEC-P2-revisions.md), closed out in [VERIFICATION-P2.md](.claude/harness/VERIFICATION-P2.md). It was dual-write only: `apps/` stayed authoritative and nothing read the new tables to make a decision, which is what let P3 flip them with evidence rather than hope.
 - **P3 (flip reads to the database and blobs, delete the repo mount) is done** — specced in [SPEC-P3-flip-reads.md](.claude/harness/SPEC-P3-flip-reads.md), closed out in [VERIFICATION-P3.md](.claude/harness/VERIFICATION-P3.md). Configuration is a row, the tree is a revision, a run hydrates its own worktree and throws it away, delivery pushes a materialized head revision and records `delivered_sha`, and "is this in sync?" is one query. `apps/`, `app.json`, the `/workspace` mount, `config.repo_root()` and parity are deleted; a structural test keeps the mount from coming back. The round-trip property — materialize a revision, re-scan it, same tree hash — replaced parity's comparison.
-- **P4 (extract the runner into a container per run, with §6's isolation and egress) is next.** It inherits exactly what P3 left for it: hydrate, ingest and teardown as three plain functions around the pipeline, a worktree path travelling through `StepContext`, and dependency install already isolated as the one step a prebaked image replaces. It is also what makes a live run stop being pinned to one replica.
+- **P4 (extract the runner into a container per run, with §6's isolation and egress) is implemented, and its closeout is pending** — specced in [SPEC-P4-sandbox.md](.claude/harness/SPEC-P4-sandbox.md), recorded so far in [VERIFICATION-P4.md](.claude/harness/VERIFICATION-P4.md). A run executes in its own container with no default route, no GitHub credential and an allowlisting proxy for a way out; the live log is a Postgres table; pause reaps the sandbox and carries the agent session forward as a run artifact; and step, run and spend limits bound a wedged agent. The container path and the egress control are proven against real containers and a real internal network. What is outstanding is the one thing fakes cannot prove: a **real agent run** (`QA_RUNNER=claude`) inside the sandbox image, which needs an `ANTHROPIC_API_KEY` and disk for the image. Until that is recorded, P4 is implemented and not closed.
+- **P5 (multi-tenancy: quotas, per-tenant PATs, tenant-scoped reads) is next.** It inherits the dispatch seam (so tenant-aware placement and quotas are enforced at dispatch), one allowlist builder (so a tenant's allowlist is a change of input), a log table already carrying `run_id` and `tenant_id`, and the store-credential decision written down with its successor — a run-scoped internal API — rather than discovered (DESIGN.md §6, §15).
 
 Open themes, beyond the phased plan:
 
 - **Batch runs.** Dropped with `run-stories.sh` and not replaced (§2). Reinstating them means a queue above the per-app lock, with its own design.
 - **Portal coverage.** Delivery and reset are API routes with no UI yet (§0). Prompt/config write-back from the UI is also open.
-- **Real-runner wiring.** `QA_RUNNER=fake` is the default. The real runner is wired end to end and verified ([VERIFICATION-P3.md](.claude/harness/VERIFICATION-P3.md)), but the API image ships neither the `claude` CLI nor node, so running it there needs P4's prebaked sandbox image.
+- **Real-runner wiring.** `QA_RUNNER=fake` is still the default, so the stack is token-free out of the box. The real runner is wired end to end and verified on a developer machine ([VERIFICATION-P3.md](.claude/harness/VERIFICATION-P3.md)), and P4's sandbox image is what ships the `claude` CLI, Node and the browsers it needs — the API image deliberately ships none of them. A real agent run *inside* that image is the outstanding item of P4's closeout.
 - **Human in the loop.** Questions the agent would ask should surface in the portal, with answers flowing back. Today runs are unattended, with safe defaults recorded in the session summary.
 - **Scope control.** Generate tests only for what changed; split agents into bounded scenarios; commit in batches rather than one bulk commit.
 - **Artifact hygiene.** A feature to clean up artifacts, and keeping only one version of each.

@@ -99,6 +99,16 @@ met code:**
   keeps `test_migrations_match_the_models` a meaningful signal rather than a column
   inventory.
 
+  > **P4 built the sandbox and left this deferred, now with its own reason rather than a
+  > forward reference.** Nothing in P4 reads a bundle. Revisions reconstruct from deduped
+  > content blobs; a crash commits nothing by design (invariant 4), so there is no mid-step
+  > history worth recovering; and what a resumed run actually needs is the **agent
+  > session**, which P4 persists as a run artifact (§5) — a tar of the CLI's session store,
+  > not a git history. The worktree is still a plain directory with no git in it, so a
+  > bundle would mean introducing a second history for the sake of a column nobody reads,
+  > which is the thing this design rejects. P2's rule — add only columns something writes —
+  > is the one being kept.
+
 **The head revision is derived, not stored**: it is the row with the greatest `rev` for
 a target. There is no mutable `targets.head_revision_id`, because revisions are
 append-only and a second place recording "which is current" is a second thing that can
@@ -513,10 +523,20 @@ not a P1 fix: see the queue note in §5.
   in-process, so a live run is still pinned to the replica that started it. That is P4's job,
   and `tests/test_no_repo_mount.py` is what keeps the mount from coming back in the meantime.
 - The runner moves out of a thread in the API process ([launcher.py](../../server/app/launcher.py))
-  into a container-per-run sandbox. **P4.** It inherits hydrate, ingest and teardown as three
-  plain functions the launcher composes around the pipeline, a worktree path travelling
-  through `StepContext`, and dependency install already isolated as the single step a
-  prebaked image replaces.
+  into a container-per-run sandbox. **Done (P4.)** It inherited exactly what P3 left it:
+  hydrate, ingest and teardown as three plain functions the launcher composes around the
+  pipeline, a worktree path travelling through `StepContext`, and dependency install
+  isolated as the single step a prebaked image makes fast. The composition was not
+  rewritten — `drive_run` is one function with two call sites, a daemon thread
+  (`QA_SANDBOX=thread`, for CI and development) and a container
+  (`QA_SANDBOX=docker`, `python -m app.sandbox.run <run_id>`), and a structural test fails
+  if a second pipeline appears. The egress and isolation half of §6 came with it: an
+  internal network, a per-run allowlisting proxy, no GitHub credential, and per-step,
+  per-run and per-spend limits.
+
+  The thread path is kept on purpose. It is the same composition invoked without a
+  container, it keeps CI fast and token-free, and it is what lets the existing suite prove
+  the behaviour did not move when the work did.
 - Delivery stops being a shell script a human runs and becomes an approved portal action.
   **Done (P1 for the mechanism, P3 for the reads):** it works through one injected `Tools`
   value, pushes a materialized head revision, and records `delivered_sha`.
@@ -586,3 +606,33 @@ one hook by the caller. Recorded here because the natural way to write P2 is to 
 | 21 | Immutable `audit_log` for every control-plane mutation |
 | 22 | Five-phase migration; `tenant_id` carried from P2 |
 | 23 | Infra entries carry `(source, destination)` from P3; a delivered workflow is never a live workflow of the harness repo |
+| 24 | `get_launcher` stays the one dispatch seam; one `Scheduler` protocol behind it, Docker the only implementation (P4) |
+| 25 | Egress enforced at the network layer: an internal network plus a per-run allowlisting proxy that resolves (P4) |
+| 26 | The live log is a Postgres table read by cursor; `session.jsonl` is still the durable record (P4) |
+| 27 | Pause reaps immediately; the **agent session** is a run artifact, and a failed restore loses context rather than the run (P4) |
+
+---
+
+## 15. Deferrals, with their reasons
+
+Each of these is a decision, not an omission. They are listed together so a later reader
+does not have to reconstruct which were considered.
+
+| Deferred | To | Why |
+|---|---|---|
+| **Git bundles and `bundle_key`** | not scheduled | Nothing reads a bundle. Revisions reconstruct from deduped content blobs, a crash commits nothing by design, and a resumed run needs the *agent session* — which P4 persists as a run artifact — rather than mid-step git history. The worktree is a plain directory; a bundle would mean a second history nobody reads (§3) |
+| **Per-tenant concurrency caps and monthly run quotas** | P5 | They are enforced at enqueue, for tenants, and there is one tenant. What bounds a wedged agent is the per-run limits, and P4 added those (§6) |
+| **The run queue and batch runs** | not scheduled | A second run on a busy target is refused with a 409, not queued. The queue is a scheduler *above* the lock trio, and §5 says to leave that trio alone |
+| **A K8s or Fargate scheduler** | when there is a cluster | The dispatch seam exists for them; Docker is the one implementation P4 ships, and the dev stack's socket mount is what the seam exists to replace (§6) |
+| **The run-scoped internal control-plane API** | P5 | It would remove `DATABASE_URL` and the `S3_*` credentials from a sandbox. It is the same mechanism as P5's tenant-scoped reads, and building it earlier would have meant building that worse (§6) |
+| **KMS envelope encryption of PATs; prompts in Postgres with tenant overrides** | P5 | Both are per-tenant mechanisms, and there is one tenant (§8, §12) |
+| **`audit_log`** | P5 | Delivery approvals are the thing it exists to record, and the approving actor is a per-tenant user (§10) |
+
+### What P5 inherits
+
+- **The dispatch seam**, so tenant-aware placement and quotas are enforced where a run is
+  dispatched rather than inside the lock trio.
+- **One allowlist builder**, so a tenant's allowlist is a change of input rather than of code.
+- **A log table already carrying `run_id` and `tenant_id`**, so tenant scoping is a filter.
+- **The store-credential decision**, written down in §6 with its successor named, so P5
+  inherits a decision rather than a surprise.

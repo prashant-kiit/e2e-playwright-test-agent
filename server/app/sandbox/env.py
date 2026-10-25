@@ -53,7 +53,12 @@ CLAUDE_CONFIG_DIR = "/data/claude-config"
 # filesystem that is destroyed with it.
 RUNS_DIR = "/data/runs"
 WORKTREES_DIR = "/data/worktrees"
-NPM_CACHE = "/data/npm-cache"
+# The cache the image baked from the template lockfile (docker/Dockerfile.sandbox).
+# Not a shared volume: a writable cache mounted into every sandbox would be a
+# supply-chain path between containers running different customers' agents,
+# which is what container-per-run exists to close. Warm *and* per-run, because
+# it is in the image and written to only in the container's own layer.
+NPM_CACHE = "/npm-cache"
 
 # Hosts the sandbox reaches without the proxy, because they are on its own
 # internal network: the stores it hydrates from and ingests to.
