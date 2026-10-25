@@ -10,14 +10,14 @@ race between two starters.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import target_config
 from .domain import lease
-from .domain.status import RunStatus, assert_transition, is_live
+from .domain.status import LIVE, RunStatus, assert_transition, is_live
 from .domain.steps import Step
 from .models import AppLock, Project, Run, RunStep, Target
 from .tenancy import current_tenant_id
@@ -300,6 +300,61 @@ def heartbeat(session: Session, run_id: int, now: datetime | None = None) -> Run
     return run
 
 
+def record_run_cost(
+    session: Session,
+    run_id: int,
+    *,
+    spend_usd: float | None = None,
+    sandbox_seconds: int | None = None,
+) -> None:
+    """What the run cost. Written once, at the end of the run (P4's limits).
+
+    Separate from the status transitions deliberately: a cost that failed to
+    record must never be able to stop a run from reaching a terminal state, and
+    a terminal state that failed to record must not be retried for the sake of
+    an accounting column.
+    """
+    run = get_run(session, run_id)
+    if spend_usd is not None:
+        run.spend_usd = spend_usd
+    if sandbox_seconds is not None:
+        run.sandbox_seconds = sandbox_seconds
+    session.commit()
+
+
+def fail_overdue_runs(
+    session: Session, *, max_age_s: float, now: datetime | None = None
+) -> list[int]:
+    """Fail every live run older than the per-run wall clock. Returns run ids.
+
+    The reaper's half of that limit (DESIGN.md §6): a run whose sandbox is gone
+    has no one left to check its own deadline, and a run still being driven is
+    stopped at its next step boundary by the runner's half
+    (app/orchestrator/limits.py). Both end the run `failed` naming the timeout,
+    with the lock freed and the last committed revision intact.
+
+    **A paused run is skipped**, like the lease reaper skips it: a deliberately
+    parked run is not a wedged agent, which is what this limit bounds.
+    """
+    now = now or lease.utcnow()
+    cutoff = now - timedelta(seconds=max_age_s)
+    overdue: list[int] = []
+    runs = session.scalars(
+        select(Run).where(Run.created_at <= cutoff, Run.status.in_(tuple(LIVE)))
+    ).all()
+    for run in runs:
+        if run.status is RunStatus.PAUSED:
+            continue
+        _fail_and_release(
+            session,
+            run,
+            f"run timed out after {max_age_s:.0f}s without finishing (reaped)",
+        )
+        overdue.append(run.id)
+    session.commit()
+    return overdue
+
+
 def reap_expired(session: Session, now: datetime | None = None) -> list[int]:
     """Fail every run whose lease has expired and free its app. Returns run ids."""
     now = now or lease.utcnow()
@@ -408,10 +463,52 @@ def fail_step(session: Session, run_id: int, step: Step, now: datetime | None = 
     session.commit()
 
 
+def set_sandbox_handle(session: Session, run_id: int, handle: str | None) -> None:
+    """Record which sandbox is executing this run (P4's dispatch seam).
+
+    Written by the launcher that dispatched it, cleared once that sandbox is
+    gone, and never interpreted here: what a handle means is the scheduler's
+    business.
+    """
+    run = get_run(session, run_id)
+    run.sandbox_handle = handle
+    session.commit()
+
+
 def set_session_id(session: Session, run_id: int, session_id: str) -> None:
     """Persist the Claude Code session id so later steps can --resume it."""
     run = get_run(session, run_id)
     run.claude_session_id = session_id
+    session.commit()
+
+
+def idle_sandbox_runs(session: Session) -> list[int]:
+    """Paused runs that still name a sandbox (P4).
+
+    A paused run's container exits at the step boundary that paused it -- pause
+    reaps immediately, with no grace window (DESIGN.md §5) -- so a handle still
+    on a paused row is either a container in the act of exiting or one that
+    never did. The reaper destroys it and clears the column, which makes "a
+    paused run has no sandbox" true rather than merely intended.
+    """
+    runs = session.scalars(
+        select(Run).where(
+            Run.status == RunStatus.PAUSED, Run.sandbox_handle.is_not(None)
+        )
+    ).all()
+    return [run.id for run in runs]
+
+
+def clear_session_id(session: Session, run_id: int) -> None:
+    """Forget the agent session this run was carrying.
+
+    Written when a resumed run's session archive could not be restored (P4): the
+    session genuinely is gone, and a run that still named it would tell the CLI
+    to `--resume` something that does not exist -- a failed step instead of a
+    forgotten exploration.
+    """
+    run = get_run(session, run_id)
+    run.claude_session_id = None
     session.commit()
 
 

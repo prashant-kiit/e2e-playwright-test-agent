@@ -3,9 +3,14 @@
 # are under server/app/, which is copied below), and a target's configuration
 # and tree come from Postgres and blob storage.
 #
-# It does not ship the `claude` CLI or node, so QA_RUNNER=claude needs an image
-# that does -- P4's prebaked per-run sandbox image. The default fake runner needs
-# neither.
+# It does not ship the `claude` CLI or node, and from P4 it does not have to:
+# a run executes in its own container from docker/Dockerfile.sandbox, which
+# carries the CLI, Node and the browsers. The two images are built from the same
+# server package -- so the prompts, the agent runtime and the tracked-tree
+# definition cannot disagree -- and versioned separately, so the thing serving
+# HTTP stays small. The thread path (QA_SANDBOX=thread) still runs here, which is
+# what keeps CI fast and token-free; with QA_RUNNER=claude it needs the sandbox
+# image, which is the default the compose stack uses.
 FROM python:3.13-slim
 
 # git is a runtime dependency, not a build one: app/delivery clones, commits and

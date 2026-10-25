@@ -198,6 +198,9 @@ class RunOut(BaseModel):
     pause_requested: bool
     stop_requested: bool
     lease_expires_at: datetime | None
+    sandbox_handle: str | None
+    spend_usd: float | None
+    sandbox_seconds: int | None
     error: str | None
     created_at: datetime
 

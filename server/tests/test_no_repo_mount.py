@@ -12,12 +12,12 @@ They are the assertion the phase's contract half rests on.
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 import pytest
 
 import app as app_package
+from tests.source_helpers import code_of
 
 PACKAGE_DIR = Path(app_package.__file__).resolve().parent
 REPO_ROOT = PACKAGE_DIR.parents[1]
@@ -29,31 +29,6 @@ MODULES = sorted(PACKAGE_DIR.rglob("*.py"))
 
 def _rel(path: Path) -> str:
     return path.relative_to(REPO_ROOT).as_posix()
-
-
-def code_of(path: Path) -> str:
-    """A module's code with its comments and docstrings removed.
-
-    The checks below are about what the code *does*, not about what its prose
-    says. Explaining in a docstring that `repo_root()` was deleted and why is
-    exactly the comment a future reader needs; a call to it is the thing to
-    catch. Parsing and unparsing drops comments, and the walk drops docstrings.
-    """
-    tree = ast.parse(path.read_text())
-    for node in ast.walk(tree):
-        if not isinstance(
-            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
-        ):
-            continue
-        body = node.body
-        if (
-            body
-            and isinstance(body[0], ast.Expr)
-            and isinstance(body[0].value, ast.Constant)
-            and isinstance(body[0].value.value, str)
-        ):
-            node.body = body[1:] or [ast.Pass()]
-    return ast.unparse(ast.fix_missing_locations(tree))
 
 
 def test_there_are_modules_to_check():

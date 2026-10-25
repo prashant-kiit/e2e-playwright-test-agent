@@ -25,7 +25,9 @@ change of *where* they run and not of *what* they do.
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -37,11 +39,15 @@ from .orchestrator.bus import LogBus, bus_from_env
 from .orchestrator.claude import ClaudeRunner
 from .orchestrator.driver import SessionFactory, run_pipeline
 from .orchestrator.fake import FakeRunner
+from .orchestrator.limits import LimitedRunner
 from .orchestrator.runner import Emit, Runner
 from .reaper import heartbeat_during
 from .sandbox import hydrate
+from .sandbox import session as agent_session
 from .storage import Storage
 from .target_config import config_of
+
+log = logging.getLogger(__name__)
 
 # A step-boundary half: it is handed the run and the step that just completed.
 # One of the two may raise, and that is deliberate -- see make_step_boundary_hook.
@@ -49,9 +55,21 @@ BoundaryHalf = Callable[[int, Step], None]
 
 
 def make_runner() -> Runner:
+    """The configured Runner, with P4's limits around it.
+
+    The limits wrap whichever runner is configured rather than living in one of
+    them: a wall clock only the real runner respects is a wall clock the fake
+    path cannot be tested against, and a budget only the fake reports is no
+    budget at all.
+    """
+    inner: Runner
     if config.runner_kind() == "fake":
-        return FakeRunner(delay=config.fake_delay())
-    return ClaudeRunner()
+        inner = FakeRunner(
+            delay=config.fake_delay(), writes_tree=config.fake_tree_writes()
+        )
+    else:
+        inner = ClaudeRunner()
+    return LimitedRunner(inner)
 
 
 def make_collector(
@@ -262,17 +280,103 @@ def drive_run(
     """
     log = log or bus_from_env()
     emit = log.emitter(run_id)
+    runner = runner or make_runner()
+    started = time.monotonic()
+    _restore_session(run_id, emit, session_factory=session_factory, store=store)
     try:
         with heartbeat_during(run_id, session_factory=session_factory):
             run_with_worktree(
                 run_id,
                 emit,
-                runner or make_runner(),
+                runner,
                 session_factory=session_factory,
                 store=store,
             )
     finally:
+        # Both in a `finally`, so every way out of a run records what it cost
+        # and leaves the agent's session where a resume can find it -- including
+        # a pause, whose container exits here like any other ending.
+        _persist_session(run_id, emit, session_factory=session_factory, store=store)
+        _record_cost(run_id, runner, started, session_factory=session_factory)
         log.close(run_id)
+
+
+def _restore_session(
+    run_id: int,
+    emit: Emit,
+    *,
+    session_factory: SessionFactory,
+    store: Storage | None,
+) -> None:
+    """Put a resumed run's agent session back before the pipeline starts.
+
+    Before, rather than inside, the composition: the CLI is invoked by the first
+    step, and the session has to be on disk by then. A run with no recorded
+    session is a first run and says nothing -- a line about continuity on every
+    fresh run would be noise.
+
+    If the restore fails the run continues **without** continuity, and the
+    recorded session id is cleared so the next step does not tell the CLI to
+    `--resume` a session that is not there (a failed step rather than a
+    forgotten exploration).
+    """
+    with session_factory() as session:
+        run = repo.get_run(session, run_id)
+        if not run.claude_session_id:
+            return
+        if agent_session.restore(
+            session, run, store or storage.from_env(), emit=emit
+        ):
+            return
+        repo.clear_session_id(session, run_id)
+
+
+def _persist_session(
+    run_id: int,
+    emit: Emit,
+    *,
+    session_factory: SessionFactory,
+    store: Storage | None,
+) -> None:
+    """Archive the agent's session as this run's reserved artifact.
+
+    Never allowed to fail the run: the tree is the carrier of the work, and the
+    session is the context for continuing it.
+    """
+    try:
+        with session_factory() as session:
+            run = repo.get_run(session, run_id)
+            agent_session.save(session, run, store or storage.from_env(), emit=emit)
+    except Exception:  # pragma: no cover - never lose a run over its session
+        log.warning("could not persist the session of run %s", run_id, exc_info=True)
+
+
+def _record_cost(
+    run_id: int,
+    runner: Runner,
+    started: float,
+    *,
+    session_factory: SessionFactory,
+) -> None:
+    """What the run spent of money and sandbox time, on the row.
+
+    In a `finally`, so every path through the composition records it -- success,
+    failure, pause and stop alike. A sandbox killed outright records nothing,
+    which is the case the lease reaper reconciles and the one case where "what
+    did it cost?" has no answer worth inventing.
+
+    Never allowed to fail the run: accounting is not the work.
+    """
+    try:
+        with session_factory() as session:
+            repo.record_run_cost(
+                session,
+                run_id,
+                spend_usd=float(getattr(runner, "spent_usd", 0.0) or 0.0),
+                sandbox_seconds=int(time.monotonic() - started),
+            )
+    except Exception:  # pragma: no cover - never lose a run over a cost column
+        log.warning("could not record the cost of run %s", run_id, exc_info=True)
 
 
 def launch_run(run_id: int) -> None:

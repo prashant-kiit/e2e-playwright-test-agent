@@ -99,6 +99,56 @@ def log_bus_kind() -> str:
     return "postgres" if sandbox_kind() == "docker" else "memory"
 
 
+# The limits P4 puts around a run (DESIGN.md §6, "Quotas and timeouts"). Each
+# is configurable with a sane default, and each breach is a `failed` run with an
+# explicit reason and the last committed revision intact -- never a silent kill.
+#
+# The defaults are deliberately generous rather than tight: the failure mode
+# being bounded is a wedged agent holding a browser open for hours, and a limit
+# that interrupts healthy work is a limit an operator turns off.
+DEFAULT_STEP_TIMEOUT_S = 1800.0      # 30 minutes for one step
+DEFAULT_RUN_TIMEOUT_S = 7200.0       # two hours for the whole run
+DEFAULT_SPEND_BUDGET_USD = 20.0      # per run, from the CLI's own cost reports
+
+
+def _positive_float(name: str, default: float) -> float:
+    """An env-configured limit. A value that is not a positive number is the
+    default rather than an outage: a typo in a limit must not wedge every run,
+    and 0 is how somebody would try to spell "no limit" -- which this is not."""
+    try:
+        value = float(os.environ.get(name, default))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def step_timeout_s() -> float:
+    """Wall clock for one step, enforced by the runner around the CLI."""
+    return _positive_float("QA_STEP_TIMEOUT_S", DEFAULT_STEP_TIMEOUT_S)
+
+
+def run_timeout_s() -> float:
+    """Wall clock for a whole run, checked at step boundaries and by the reaper."""
+    return _positive_float("QA_RUN_TIMEOUT_S", DEFAULT_RUN_TIMEOUT_S)
+
+
+def spend_budget_usd() -> float:
+    """What one run may cost before it is ended, from the `result` events the
+    runner already parses."""
+    return _positive_float("QA_SPEND_BUDGET_USD", DEFAULT_SPEND_BUDGET_USD)
+
+
+def fake_tree_writes() -> bool:
+    """Whether the FakeRunner also writes a tracked file per step.
+
+    Off by default: most tests want a runner that changes nothing, because a
+    step that changes no tracked file must commit no revision. The
+    container-path integration test turns it on, so a synthetic run exercises
+    ingest as well as the log and the artifacts.
+    """
+    return os.environ.get("QA_FAKE_TREE_WRITES", "0") not in ("0", "", "false")
+
+
 def log_retention_days() -> int:
     """How long a run's live log lines stay readable before the reaper prunes.
 

@@ -94,6 +94,14 @@ def render_playwright_config(cfg: TargetConfig) -> str:
     TypeScript source, so it goes through `json.dumps` rather than being
     interpolated: a quote in a base URL would otherwise be a code-injection
     point into the customer's repo.
+
+    **The proxy stanza lands here (P4) rather than in a second config.** A
+    sandbox's only way out is an allowlisting proxy, and Chromium has to be told
+    where it is; this file is already rendered from the target's row and already
+    has exactly one author, which makes it the one place a browser setting can
+    be added without reintroducing a hand-maintained copy. It reads
+    `QA_PROXY_URL`, which only a sandbox has (app/sandbox/env.py), so the same
+    file is unchanged in the customer's repo and on a laptop.
     """
     base_url = json.dumps(cfg.base_url)
     return f"""// GENERATED FILE -- do not edit.
@@ -111,6 +119,13 @@ const baseURL = {base_url};
  * revision is made of. */
 const RUN_DIR = process.env.QA_RUN_DIR;
 const outputPath = (name: string) => (RUN_DIR ? `${{RUN_DIR}}/${{name}}` : name);
+
+/* A sandboxed run has no route to the internet except an allowlisting proxy
+ * (DESIGN.md §6), and Chromium has to be told where it is. QA_PROXY_URL is set
+ * only inside a sandbox, so outside one -- in the customer's repo, on a laptop --
+ * this is absent and nothing changes. */
+const PROXY_URL = process.env.QA_PROXY_URL;
+const proxy = PROXY_URL ? {{ server: PROXY_URL }} : undefined;
 
 export default defineConfig({{
   /* One target per worktree: the whole tree is this target's, seed included. */
@@ -135,6 +150,7 @@ export default defineConfig({{
     actionTimeout: 10_000,
     navigationTimeout: 15_000,
     trace: 'on-first-retry',
+    ...(proxy ? {{ proxy }} : {{}}),
   }},
   projects: [
     {{ name: 'chromium', use: {{ ...devices['Desktop Chrome'], baseURL }} }},

@@ -1,8 +1,13 @@
 # Dev stack for the QA admin portal: Postgres (state) + SeaweedFS (blobs) +
-# the API + the web container.
+# the API + the web container, and from P4 a container per run.
 #
 # There is no repo mount. P3 removed the shared authoritative disk: truth is
 # Postgres plus blob storage, and the API's only local state is per-run scratch.
+#
+# P4 moved the run itself out of the API process. `make up` therefore gives
+# container-per-run on a laptop with no extra steps: the API dispatches a
+# sandbox from the prebaked image, that sandbox sits on an **internal** network
+# with no default route, and the only way out is a per-run allowlisting proxy.
 services:
   postgres:
     image: postgres:16-alpine
@@ -14,6 +19,12 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      # Also on the sandbox network: hydrate reads the head revision and ingest
+      # commits N+1, so a sandbox has to reach Postgres by name. It reaches
+      # nothing else -- that network has no default route (DESIGN.md §6).
+      - default
+      - sandbox
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U qa"]
       interval: 5s
@@ -27,6 +38,9 @@ services:
     volumes:
       - seaweeddata:/data
       - ./docker/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+    networks:
+      - default
+      - sandbox   # blobs in, blobs out, artifacts up: the other half of a run
     ports:
       - "8333:8333"   # S3 API
       - "8888:8888"   # filer
@@ -54,18 +68,37 @@ services:
       # revision in blob storage, and the prompts and agent runtime ship inside
       # the server package -- so the API needs no shared disk to run an agent
       # (DESIGN.md §12). What is left is per-run scratch on a local volume: the
-      # worktree hydrated from the head revision, and the run's output.
+      # run's output. The worktree itself now lives in the sandbox.
       QA_RUNS_DIR: /data/runs
       QA_WORKTREES_DIR: /data/worktrees
       QA_NPM_CACHE: /data/npm-cache
+      # P4: a container per run. `thread` is the test and CI default and runs
+      # the agent inside this process, which is what this phase exists to stop.
+      QA_SANDBOX: "${QA_SANDBOX:-docker}"
+      QA_SANDBOX_IMAGE: "${QA_SANDBOX_IMAGE:-qa-sandbox:latest}"
+      QA_SANDBOX_NETWORK: qa-sandbox
+      QA_EGRESS_NETWORK: qa-egress
+      QA_PROXY_IMAGE: "${QA_PROXY_IMAGE:-qa-egress-proxy:latest}"
       # Orchestrator knobs (host-overridable): fake runner by default so the
       # stack runs token-free; QA_FAKE_DELAY slows fake steps for pause demos.
       QA_RUNNER: "${QA_RUNNER:-fake}"
       QA_FAKE_DELAY: "${QA_FAKE_DELAY:-0}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
     volumes:
-      # Per-run scratch only: hydrated worktrees, run output, the npm cache.
-      # Nothing here is authoritative, and nothing is shared between replicas.
+      # Per-run scratch only: run output and the npm cache. Nothing here is
+      # authoritative, and nothing is shared between replicas.
       - apidata:/data
+      # The Docker socket, so the scheduler can start a container per run.
+      #
+      # **This is a dev-stack-only compromise, and it is root-equivalent on this
+      # host.** Anything that can talk to this socket can start a privileged
+      # container and own the machine, so it is acceptable on a laptop and
+      # nowhere else. It is also exactly what the dispatch seam exists to
+      # replace: in production `Scheduler` is a K8s Job or a Fargate task API
+      # call, authenticated as the API's own service identity, and the API holds
+      # no socket at all (app/sandbox/dispatch.py). Do not promote this line to
+      # a deployment manifest.
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "8000:8000"
     depends_on:
@@ -73,6 +106,36 @@ services:
         condition: service_healthy
       seaweedfs:
         condition: service_healthy
+
+  sandbox:
+    # **Built, never started.** There is no long-lived sandbox service: the
+    # API's scheduler creates one container per run from this image and destroys
+    # it with the run. The service exists so `make up` builds the image on a
+    # laptop in one step, which is why it carries a profile no target enables.
+    #
+    # No volumes: a sandbox holds exactly one target's tree, hydrated from the
+    # head revision, and P3's deleted mount is not reacquired here.
+    # No environment: app/sandbox/env.py builds a sandbox's environment per run
+    # from an explicit list, so a credential cannot arrive by inheritance.
+    profiles: ["never-started"]
+    image: "${QA_SANDBOX_IMAGE:-qa-sandbox:latest}"
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sandbox
+      target: sandbox
+
+  egress-proxy:
+    # Also built, never started: one proxy container per run, created beside the
+    # sandbox with that run's allowlist in its environment. Per-run rather than
+    # shared, because the allowlist is built from one target's row -- a shared
+    # proxy would have to be told which run is asking, and "which run is asking"
+    # is a question a tunnel cannot answer honestly.
+    profiles: ["never-started"]
+    image: "${QA_PROXY_IMAGE:-qa-egress-proxy:latest}"
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sandbox
+      target: egress-proxy
 
   web:
     # nginx serves the built SPA and reverse-proxies the API on one origin.
@@ -83,6 +146,24 @@ services:
       - "8080:80"
     depends_on:
       - api
+
+networks:
+  # The control plane: the API, the portal and the stores talk here.
+  default:
+    name: qa-control-plane
+
+  # Where a run executes. `internal: true` is the whole egress control: Docker
+  # attaches no gateway, so a container on this network has **no default route**
+  # and an agent that writes and runs code cannot opt out of that by unsetting a
+  # variable. Postgres and SeaweedFS are reachable by name because they are on
+  # this network too; everything else is reachable only through the proxy.
+  sandbox:
+    name: qa-sandbox
+    internal: true
+
+  # The proxy's way out, and the only service ever attached to it.
+  egress:
+    name: qa-egress
 
 volumes:
   pgdata:

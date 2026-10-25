@@ -27,11 +27,10 @@ from sqlalchemy.orm import Session
 from . import apphub, authoring, delivery, repo, revisions, storage, target_config
 from .auth import AuthDep
 from .db import SessionLocal, get_session
-from .domain.status import is_terminal
-from .launcher import launch_run
+from .domain.status import is_live, is_terminal
 from .models import Artifact
 from .orchestrator.bus import LogBus, bus_from_env
-from .sandbox import egress
+from .sandbox import dispatch, egress
 from .schemas import (
     ArtifactOut,
     DeliverBody,
@@ -63,8 +62,26 @@ router = APIRouter(dependencies=[AuthDep])
 
 
 def get_launcher() -> Callable[[int], None]:
-    """The background run launcher. Overridden to a no-op in tests."""
-    return launch_run
+    """The background run launcher: "start working on this run".
+
+    Still the only injection point for that, and still a plain
+    `Callable[[int], None]`, which is what keeps the tests' override a no-op
+    lambda. What changed in P4 is behind it: `make_launcher` picks a daemon
+    thread or a container per run from `QA_SANDBOX`, the way `make_runner` picks
+    `fake` or `claude` (app/sandbox/dispatch.py).
+    """
+    return dispatch.make_launcher()
+
+
+def get_scheduler() -> dispatch.Scheduler:
+    """The same dispatch seam, for the paths that *end* a run's work.
+
+    Not a second seam: one `Scheduler` protocol and one factory, exposed here as
+    well because pause and stop have to be able to reap a sandbox and a route
+    needs something a test can substitute. `get_launcher` remains the only
+    injection point for starting a run.
+    """
+    return dispatch.make_scheduler()
 
 
 def get_storage() -> Storage:
@@ -591,11 +608,34 @@ def pause_run(run_id: int, session: Session = Depends(get_session)):
 
 
 @router.post("/runs/{run_id}/stop", response_model=RunOut)
-def stop_run(run_id: int, session: Session = Depends(get_session)):
+def stop_run(
+    run_id: int,
+    session: Session = Depends(get_session),
+    scheduler: dispatch.Scheduler | None = Depends(get_scheduler),
+):
+    """Stop a run, and kill the sandbox doing the work.
+
+    "Stop" has to mean the work stops rather than the status changes, so a
+    running sandbox is destroyed here rather than asked to notice a flag at its
+    next step boundary -- which, for an agent holding a browser, may be minutes
+    of billing away. Mid-step work is lost, which is invariant 4 (a crash
+    commits nothing) and not a regression.
+
+    The driver's flag-at-a-boundary path stays for the thread path and for a run
+    with no sandbox, and `repo.request_stop` already stops a PENDING or PAUSED
+    run outright.
+    """
     try:
-        return repo.request_stop(session, run_id)
+        run = repo.request_stop(session, run_id)
     except repo.NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if run.sandbox_handle:
+        dispatch.destroy_handle(run.sandbox_handle, scheduler)
+        if is_live(run.status):
+            # A PENDING run was already stopped outright by `request_stop`; a
+            # RUNNING one has just lost the process that would have done it.
+            run = repo.stop_run(session, run_id)
+    return run
 
 
 @router.post("/runs/{run_id}/resume", response_model=RunOut)

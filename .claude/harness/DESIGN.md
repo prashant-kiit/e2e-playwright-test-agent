@@ -215,6 +215,24 @@ queued → hydrating → running → paused(live) → reaped → resuming → ru
   snapshots (git bundle + `session.jsonl`) to SeaweedFS and reaps it. Resume rehydrates
   and re-seeds the Claude session from the persisted `session.jsonl` rather than a live
   process. A SaaS cannot pay for idle sandboxes.
+
+  > **Amended by P4: pause reaps immediately, with no grace window.** The sandbox is
+  > destroyed at the step boundary that pauses the run — its container exits there, and
+  > the reaper clears any handle left naming one, so "a paused run has no sandbox" is
+  > enforced rather than intended. The reason is P3: resume already re-hydrates from the
+  > head revision and that path is tested, so an idle sandbox's only advantage — a warm
+  > worktree — is one the harness no longer needs. "A SaaS cannot pay for idle sandboxes"
+  > is the same sentence it always was; the grace window was only ever buying the
+  > worktree.
+  >
+  > What a paused run must not lose is the **agent session**, and that is now explicit
+  > rather than incidental: `--resume` worked only because the CLI's session store
+  > happened to sit on the host that started the run. The session directory is archived
+  > as a run artifact under a reserved name (`<run_key>/agent-session.tar.gz`) at the end
+  > of every run, pauses included, and restored into the next container before the CLI is
+  > invoked. **A failed restore does not fail the run**: it continues without session
+  > continuity and says so in the log, because the tree is the carrier of the work and
+  > the exploration is only context. Not a git bundle: see §3 on `bundle_key`.
 - **Crash** commits nothing (invariant 4). The run goes `failed` with the last committed
   revision intact and resumes **from the last completed step boundary**, never mid-step —
   that is what keeps "retries converge" true.
@@ -266,6 +284,35 @@ API, and the npm registry. Link-local and private ranges (`169.254.169.254`, RFC
 `localhost`) are blocked outright. The registered `baseURL` is validated to resolve to a
 public address **at save time and again at run time** (DNS rebinding). Open egress plus
 an LLM plus your cloud network is not a combination that can be patched later.
+
+**Built by P4, with two things this paragraph did not say.**
+
+*Enforced at the network layer, not by environment.* The sandbox sits on an internal
+network with no default route, and an allowlisting `CONNECT` proxy — one per run, holding
+that run's allowlist — is the only way out. An allowlist the agent can unset is a
+convention and not a control, so unsetting `HTTP_PROXY` closes the only door rather than
+opening the internet. **The proxy resolves, not the sandbox**: an internal network cannot
+reach a resolver and `CONNECT` carries a hostname, so name resolution happens in the one
+process that also enforces policy, and the tunnel is opened to the address that was
+verified rather than to the name again. One function builds the allowlist from the
+target's row (`app/sandbox/egress.py`), so "what can this run reach?" is one place to
+read, and a run against one target structurally cannot reach another's host. The agent
+runtime's telemetry and error reporting are **disabled by environment rather than
+allowlisted**, so the list stays the length of what a run genuinely needs.
+
+*The allowlist includes the internal stores, and that is a decision with a successor.*
+Postgres and the object store are reachable from the sandbox network by name, because
+hydrate reads the head revision and ingest commits N+1 — those **are** the run. So a
+sandbox holds `DATABASE_URL` and the `S3_*` credentials, and that is **accepted exposure
+for this phase, deliberately**. The credential rule above is specifically about GitHub,
+for a stated reason: delivery is human-approved and happens in the control plane, so the
+push need not happen where the agent is — and after P4 it cannot, because no sandbox
+environment, image or compose service carries a GitHub credential and no module reachable
+from the sandbox entrypoint can read one (both enforced by structural tests). The store
+credentials have no such argument available to them; what they have is a successor.
+**P5 replaces them with a narrow, run-scoped internal control-plane API**, where the token
+that authorizes one run's target is the same mechanism that authorizes one tenant's data.
+Bundling that into P4 would have been building P5's tenant scoping early and worse.
 
 ### Quotas and timeouts
 

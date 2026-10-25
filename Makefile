@@ -8,7 +8,7 @@ API_URL := http://localhost:8000
 .DEFAULT_GOAL := help
 
 .PHONY: help up down start stop restart build rebuild logs ps health open dev-web dev-api clean \
-        test lint ci-test check bootstrap deliver reset
+        test lint ci-test ci-test-docker sandbox-images check bootstrap deliver reset
 
 help: ## List available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -24,6 +24,11 @@ docker-up: # Ensure the Docker daemon is running (starts Docker Desktop on macOS
 	fi
 
 up: docker-up ## Build (if needed) and start the whole stack in the background
+	# The sandbox and proxy images carry a `never-started` profile -- there is no
+	# long-lived sandbox service, just a container per run -- so compose does not
+	# build them with the rest. Building them here is what makes `make up` give
+	# container-per-run on a laptop with no extra steps.
+	$(COMPOSE) --profile never-started build sandbox egress-proxy
 	$(COMPOSE) up -d --build
 	@echo "Portal: $(WEB_URL)   API: $(API_URL)/health"
 
@@ -78,6 +83,17 @@ lint: ## Lint the backend (ruff). Run by `make test` and by CI
 
 ci-test: ## `make test` as CI runs it: fails instead of skipping if Postgres is absent
 	QA_REQUIRE_DB=1 $(MAKE) test
+
+sandbox-images: docker-up ## Build the per-run sandbox and egress-proxy images
+	$(COMPOSE) --profile never-started build sandbox egress-proxy
+
+ci-test-docker: docker-up ## `make ci-test` plus the Docker-backed tests CI runs
+	# The tests that really start containers are the only proof the container
+	# path works at all, so CI fails rather than skips them (QA_REQUIRE_DOCKER,
+	# the sibling of QA_REQUIRE_DB). They build the image stages they need
+	# themselves -- python plus the server package, not the two-gigabyte image --
+	# which is why this does not depend on `sandbox-images`.
+	QA_REQUIRE_DB=1 QA_REQUIRE_DOCKER=1 $(MAKE) test
 
 # --- target-repo delivery (app/delivery; was scripts/*.sh) ---------------
 # APP and STORY are required where shown. GITHUB_PAT comes from the environment

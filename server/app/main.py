@@ -23,6 +23,7 @@ from . import models  # noqa: F401  (register ORM tables on Base.metadata)
 from .api import router
 from .auth_api import auth_router
 from .reaper import reaper_loop
+from .sandbox.dispatch import destroy_sandbox
 
 
 def _reaper_enabled() -> bool:
@@ -34,7 +35,14 @@ def _reaper_enabled() -> bool:
 async def lifespan(app: FastAPI):
     # Schema is managed by Alembic (the container entrypoint runs
     # `alembic upgrade head` before uvicorn), in the app and in the tests alike.
-    task = asyncio.create_task(reaper_loop()) if _reaper_enabled() else None
+    # `reap_sandbox` is passed rather than imported by the reaper: a reaped run
+    # whose container is still running is still costing money, and the dispatch
+    # seam cannot be imported from app/reaper.py without a cycle.
+    task = (
+        asyncio.create_task(reaper_loop(reap_sandbox=destroy_sandbox))
+        if _reaper_enabled()
+        else None
+    )
     try:
         yield
     finally:
