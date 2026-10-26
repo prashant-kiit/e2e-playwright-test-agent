@@ -91,6 +91,14 @@ services:
       QA_RUNNER: "${QA_RUNNER:-fake}"
       QA_FAKE_DELAY: "${QA_FAKE_DELAY:-0}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      # The per-run limits (host-overridable, .env.example documents them). The
+      # API forwards these into each sandbox's environment (app/sandbox/env.py),
+      # so `QA_STEP_TIMEOUT_S=30 QA_SPEND_BUDGET_USD=0.10 make up` reaches the
+      # runner -- without this they stayed at config.py's defaults no matter what
+      # the host set, and a by-hand breach could not be provoked from the stack.
+      QA_STEP_TIMEOUT_S: "${QA_STEP_TIMEOUT_S:-1800}"
+      QA_RUN_TIMEOUT_S: "${QA_RUN_TIMEOUT_S:-7200}"
+      QA_SPEND_BUDGET_USD: "${QA_SPEND_BUDGET_USD:-20}"
     volumes:
       # Per-run scratch only: run output and the npm cache. Nothing here is
       # authoritative, and nothing is shared between replicas.

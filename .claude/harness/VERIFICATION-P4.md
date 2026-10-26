@@ -10,17 +10,25 @@ container-per-run; bring §6 isolation and egress with it."*
 knows which paths are *proven* against real containers, a real network and a real object
 store, and which rest on fakes.
 
-> ## This record is incomplete, and P4 is therefore not closed
+> ## P4 is closed: the real agent run is recorded below
+>
+> **Third pass, 2026-10-26, on `eb1036a` + the compose fix below.** An `ANTHROPIC_API_KEY`
+> was supplied, so the one claim the first two passes could not make has now been made. A
+> real `QA_RUNNER=claude` run completed against `https://www.saucedemo.com` in the
+> `qa-sandbox:latest` image, in its own container, through its own egress proxy, with a real
+> Postgres and a real SeaweedFS — it committed two revisions, collected artifacts, streamed
+> its log and tore down. That is criterion 11 and the heart of ticket #28, and §"The third
+> pass" records it line by line, with the two by-hand limit breaches and the real-run replay
+> beside it.
 >
 > **Second pass, 2026-10-25, on `844ef1b` + the fixes below.** The disk that ended the first
 > pass had been freed (97 GiB) and the daemon was answering, so two of the first pass's three
-> open items are now closed and recorded below as observed. What remains is one item, and it
-> is not a code gap:
+> open items were closed and recorded below as observed. The third, now also closed:
 >
-> 1. **The real agent run (`QA_RUNNER=claude`) in the sandbox image has not been
->    performed.** There is no `ANTHROPIC_API_KEY` in the environment, and a real run spends
->    tokens against a live target, which is not a thing to do unasked. This is still the one
->    claim this record cannot make, and it is the whole of criterion 11 and ticket #28.
+> 1. **The real agent run (`QA_RUNNER=claude`) in the sandbox image — performed.** Recorded
+>    in §"The third pass": run `20261026-055333-saucedemo-e41fa3`, five steps green, `$3.5686`
+>    spent, `351` sandbox-seconds, revisions 3 and 4 authored by the run. This closes
+>    criterion 11 and ticket #28.
 >
 > Closed since the first pass:
 >
@@ -77,7 +85,7 @@ a change of **where** three functions run and not of **what** they do.
 | 8 | Pausing destroys the container; resuming re-hydrates, restores the agent session and continues at the next step | **Proven** at the seam with the fake runner, the review's pause fix included: its three tests now run green. Not observed as a real container disappearing — see §"What is covered only by fakes" |
 | 9 | The driver still takes exactly one step-boundary callable; hydrate, ingest and teardown are still plain composed functions | **Proven**, structurally |
 | 10 | `QA_RUNNER=fake` with `QA_SANDBOX=thread` keeps the full suite green, and the Docker-backed tests run in CI without skipping | **Proven** locally; the CI job is wired and not yet observed green |
-| 11 | A real agent run (`QA_RUNNER=claude`) completes in the sandbox image against a live target | **Not performed** — see the box above |
+| 11 | A real agent run (`QA_RUNNER=claude`) completes in the sandbox image against a live target | **Proven** — run `20261026-055333-saucedemo-e41fa3` completed against `https://www.saucedemo.com`, five steps green, two revisions committed, `$3.5686` spent; see §"The third pass" |
 
 ---
 
@@ -395,9 +403,10 @@ developer's laptop, where the only session store is the developer's own `~/.clau
 Named here as P1, P2 and P3 each named theirs, so P5 inherits a list rather than an
 impression.
 
-- **The real agent inside the sandbox image.** Everything about the container path is proven
-  with `QA_RUNNER=fake`. That the image's CLI, Node and browsers actually drive a run is the
-  one claim this record cannot make (see the box at the top).
+- ~~**The real agent inside the sandbox image.**~~ **Now proven** — the third pass ran
+  `QA_RUNNER=claude` against the live target in `qa-sandbox:latest`; the image's CLI, Node and
+  browsers drove a real run. This bullet is kept struck-through rather than deleted so the
+  list still reads as the history the first two passes left.
 - **A container killed outright.** The reaper's reconciliation is proven at the lease level
   (`test_reaper.py`, unchanged) and the heartbeat is proven to come from inside the process
   doing the work. The two have not been composed by killing a real container and watching
@@ -411,10 +420,16 @@ impression.
 - **Multi-replica streaming.** The log table removes the pinning cause and two readers are
   proven to see every line. Two API replicas have not been stood up.
 
-## Not yet verified, and the commands to finish it
+## The commands, now all run
 
-Items 1-3 are what the second pass could reach; **item 4 is the one that needs a key and a
-decision to spend**, and item 5 depends on it.
+Items 1-3 are what the second pass reached. **The third pass ran items 4 and 5** — a key was
+supplied — so nothing below is outstanding; the commands stay here as the reproduction, and
+§"The third pass" records what came back. One correction the third pass had to make first:
+items 4 and 5 both pass the limit knobs to `make up`, but the compose `api` service did not
+forward `QA_STEP_TIMEOUT_S`, `QA_RUN_TIMEOUT_S` or `QA_SPEND_BUDGET_USD`, so they stayed at
+`config.py`'s defaults no matter what the host set. The service now forwards all three
+(`docker-compose.yml`), which is what makes the item-5 command provoke a breach rather than
+run to completion.
 
 ```bash
 # 1. The sandbox image. Needs disk: the full image is ~2 GB on top of the base.
@@ -482,7 +497,7 @@ with these exceptions:
 | #22 | "No browser download happens at run time" | **Met and observed**: with `--network none`, `npm ci --offline` installs the lockfile's 1.63.0 from the baked cache and the prebaked Chromium launches — see §"The second pass" |
 | #23 | "A run started from the portal with `QA_SANDBOX=docker` executes in its own container and reaches `succeeded`" | **Met and observed** through the portal — after the `qa-egress` fix, without which it failed at dispatch |
 | #23 | "`make up` gives container-per-run on a laptop with no extra steps" | **Was broken, now met**: Compose never created `qa-egress`, so every run failed at dispatch. The scheduler creates it — see §"The second pass" |
-| #28 | All of it | See the box at the top |
+| #28 | All of it | **Met** — the real run, the two by-hand breaches, the live egress probe, the real-run replay across an API restart, and the live credential check are all in §"The third pass"; the DESIGN.md §12/§3/§15 and P5-inheritance edits it also asks for are in place |
 
 ---
 
@@ -726,6 +741,152 @@ with a dependency on DNS, and that is a flake CI can meet.
 
 ---
 
+## The third pass
+
+The first two passes proved everything a fake could, and named the one thing it could not:
+a real agent, in the real image, spending real tokens against a live site. An
+`ANTHROPIC_API_KEY` was supplied on 2026-10-26, so this pass made that claim. The stack was
+brought up with `QA_RUNNER=claude` over the already-built `qa-sandbox:latest` (2.84 GB), and
+a run was started for story `SCRUM-101` against the existing `saucedemo` target
+(`https://www.saucedemo.com`, revision 2 at head).
+
+### The real agent run
+
+Run `20261026-055333-saucedemo-e41fa3` (run id 4). It dispatched its own container
+(`qa-run-…e41fa3` on `qa-sandbox`) and its own egress proxy (`qa-proxy-…e41fa3` on
+`qa-egress` + `qa-sandbox`), ran the whole pipeline, and tore both down. Every step passed on
+the first attempt:
+
+| Step | Status | Wall clock |
+|---|---|---|
+| read_story | completed (attempt 1) | 05:53:35 → 05:53:56 |
+| plan | completed (attempt 1) | 05:53:56 → 05:55:39 |
+| explore | completed (attempt 1) | 05:55:39 → 05:57:26 |
+| generate | completed (attempt 1) | 05:57:26 → 05:58:52 |
+| heal | completed (attempt 1) | 05:58:52 → 05:59:25 |
+
+The run row, read back from the API:
+
+```
+status                completed
+last_completed_step   heal
+sandbox_handle        qa-run-20261026-055333-saucedemo-e41fa3
+spend_usd             3.5686
+sandbox_seconds       351
+error                 (none)
+```
+
+**Two revisions, authored by the run** — this is criterion 1's revision-committing proven
+by a real agent rather than by the `QA_FAKE_TREE_WRITES` flag the Docker-backed test needs:
+
+```
+rev 4  parent 3  author run:20261026-055333-saucedemo-e41fa3  by_run 4  files 13
+rev 3  parent 2  author run:20261026-055333-saucedemo-e41fa3  by_run 4  files 8
+rev 2  parent 1  author operator                              by_run –  files 7   (pre-existing head)
+rev 1  parent –  author operator                              by_run –  files 6
+```
+
+**Artifacts, in the real SeaweedFS**, each indexed with its sha256 and read back through the
+API: `playwright-report/index.html` (kind `report`), `test-results/.last-run.json`, the
+generated spec tree, `agent-settings.json`, `session.jsonl`, per-step `stderr.log` and
+`error-context.md`, and `agent-session.tar.gz` (kind `session`) at **version 5** — the
+per-boundary archive the review introduced, one version per step boundary.
+
+What the agent actually did, from its own log: it explored the live site, read the password
+`secret_sauce` off the real Sauce Demo login page, wrote five spec files (17 tests), ran them
+on Chromium — **17 passed, 0 failed**, and a `--repeat-each=3` stability pass of **51 passed,
+0 flaky** — and then stopped for review without opening a PR or writing to the tracked tree,
+because a sandbox has no credential and no `git`. The whole log streamed to Postgres and was
+read back by cursor across a restart (below).
+
+### Egress from inside the sandbox, by hand
+
+The suite proves the allowlist by construction; criterion 3 of #28 asks a human to see it. A
+proxy was stood up on the real two-network topology carrying a real run's allowlist, and a
+sandbox container on the internal network only was asked what it could reach. The CONNECT
+replies:
+
+| From inside the sandbox, via the proxy | Result |
+|---|---|
+| `www.saucedemo.com:443` (the target) | `200 Connection established` |
+| `api.anthropic.com:443` | `200 Connection established` |
+| `registry.npmjs.org:443` | `200 Connection established` |
+| `bank.example.com:443` (another host) | `403 Forbidden` |
+| `169.254.169.254:443` (the metadata endpoint) | `403 Forbidden` |
+
+And with nothing but the network — no proxy:
+
+```
+www.saucedemo.com   unresolvable (gaierror)    # the sandbox resolves nothing itself
+api.anthropic.com   unresolvable (gaierror)
+93.184.216.34:80    unreachable  (OSError)      # no default route
+169.254.169.254:80  unreachable  (OSError)
+```
+
+The proxy's own log shows the resolution happening in the deciding process:
+
+```
+ALLOW CONNECT www.saucedemo.com:443  -- www.saucedemo.com -> 185.199.108.153
+ALLOW CONNECT api.anthropic.com:443  -- api.anthropic.com -> 160.79.104.10
+ALLOW CONNECT registry.npmjs.org:443 -- registry.npmjs.org -> 104.16.0.34
+DENY  CONNECT bank.example.com:443   -- bank.example.com is not on this run's allowlist
+DENY  CONNECT 169.254.169.254:443    -- 169.254.169.254 is not on this run's allowlist
+```
+
+During the real run, the live proxy logged `ALLOW CONNECT api.anthropic.com` repeatedly (the
+agent talking to Claude) — observed while the run was in flight, before `AutoRemove` and the
+reaper took the proxy down.
+
+### The live credential check
+
+Criterion 6 is structural in the suite; here it is the running container. `printenv` inside
+`qa-run-…e41fa3` while it worked carried **no** `GITHUB_PAT`, `GITHUB_TOKEN`, `GH_TOKEN`,
+`QA_ADMIN_PASSWORD` or `QA_SECRET_KEY`. What it did carry: `ANTHROPIC_API_KEY`, the proxy
+variables, the `QA_*` run knobs, and the store credentials `DATABASE_URL` / `S3_*` (the
+deferred §6 store-credential decision, P5's). `command -v git` returned nothing — there is no
+binary to push with. And `NO_PROXY=localhost,127.0.0.1,postgres,seaweedfs`, derived from the
+endpoints the sandbox was handed, so boto3's S3 traffic bypasses the allowlisting proxy — the
+review's bug, confirmed fixed in the live container.
+
+### The portal replay across an API restart
+
+With the real run finished and its 88 log lines in the table, `docker compose restart api`
+was issued, and `GET /runs/4/events` was reopened against the fresh process. It replayed all
+88 lines from the table — first the `hydrate` line, last `event: end` — with nothing in the
+API's memory. That is criterion 5's replay half, now shown against a real run rather than a
+fake one. (The live-streaming half was shown in the second pass's portal walk-through.)
+
+### The two limit breaches, by hand
+
+Both were provoked against the real runner, after the compose fix that lets the host set the
+knobs. Each ended the run `failed` with the reason on the row and in the log, the app lock
+freed, and the head revision intact at **rev 4** (neither committed anything):
+
+| Breach | Setting | Run | Outcome |
+|---|---|---|---|
+| Spend budget | `QA_SPEND_BUDGET_USD=0.05` | id 6 | `failed`, `spend budget exceeded: $0.11 of $0.05`, spent `$0.1062`, failed during `read_story` |
+| Step timeout | `QA_STEP_TIMEOUT_S=15` | id 7 | `failed`, `step read_story timed out after 15s`, spent `$0.00`, failed during `read_story` |
+
+The log carried both forms the pipeline writes — `=== limit reached: … ===` and `=== step
+read_story FAILED: … ===` — and after each the target had no `running`, `pending` or `paused`
+run, so the next run was free to start. The process-group kill and the reaper's wall-clock
+sweep stay covered by `test_limits.py` with its real subprocess tree; these two by-hand runs
+are the budget and step-timeout cases observed end to end against the live agent.
+
+### The one code change this pass made
+
+The limit knobs are documented in `.env.example` as host-overridable and both commands in the
+section above pass them to `make up`, but the compose `api` service forwarded only
+`QA_RUNNER`, `QA_FAKE_DELAY` and `ANTHROPIC_API_KEY` — so `QA_SPEND_BUDGET_USD` and the two
+timeouts never left `config.py`'s defaults, and the first budget-breach attempt ran at `$20`
+until it was caught and stopped. The fix is three lines in `docker-compose.yml`, each
+`${…:-default}` with the documented default, mirroring `QA_RUNNER`. It is pinned by nothing
+new — `test_no_compose_service_carries_a_github_or_portal_credential` already parses every
+service's environment, and these are numbers, not credentials — and it changes no behaviour
+when the host sets nothing.
+
+---
+
 ## Closing
 
 P4's two clauses are both built, and the half that would have been easy to skip — egress — is
@@ -743,6 +904,14 @@ healthy, silent, and fatal to every run — and it was reachable only by standin
 which is the argument for the live walk-through that is still outstanding rather than against
 it.
 
-What is left is the evidence a real agent would provide: criterion 11 and ticket #28, which
-need an `ANTHROPIC_API_KEY` and a deliberate decision to spend tokens against a live target.
-Until that is recorded here, **P4 is implemented and not closed**.
+The third pass spent the one thing the first two withheld: tokens, against a live target,
+with a key that was finally supplied. It cost one code change — three lines of compose wiring
+so the documented limit knobs reach the runner — and bought the evidence a real agent
+provides and a fake cannot: a run that explored the real Sauce Demo site, wrote and healed
+seventeen passing tests, committed two revisions, filled the object store, streamed a log
+that replayed across a restart, and tore itself down, holding no GitHub credential and
+resolving nothing it was not allowed to reach. The two limit breaches ended `failed` with
+their reasons and left the head revision where it was.
+
+Criterion 11 and ticket #28 are now recorded rather than deferred, so there is nothing left
+that only a real agent could show. **P4 is implemented and closed.**
