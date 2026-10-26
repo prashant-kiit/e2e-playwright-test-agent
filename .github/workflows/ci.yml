@@ -39,9 +39,33 @@ jobs:
       # Fail loudly instead of skipping if Postgres is not reachable: a green
       # tick must never mean "the DB-backed tests all skipped".
       QA_REQUIRE_DB: "1"
+      # The same bargain for the two tests that really start containers (P4).
+      # They are the only proof the container path works at all, so a skip here
+      # would make this phase's green tick meaningless. The runners have Docker.
+      QA_REQUIRE_DOCKER: "1"
+      S3_ENDPOINT: http://localhost:8333
+      S3_ACCESS_KEY: qa
+      S3_SECRET_KEY: qa-secret
+      S3_BUCKET: qa-artifacts
 
     steps:
       - uses: actions/checkout@v4
+
+      # Not a `services:` entry: SeaweedFS needs command arguments
+      # (`server -s3 ...`) and a service container cannot be given any. The
+      # sandboxed run has to read its revision's blobs from a real store, so
+      # the Docker-backed test needs one published on the host.
+      - name: Start the object store
+        run: |
+          docker run -d --name seaweedfs -p 8333:8333 \
+            chrislusf/seaweedfs:latest server -s3 -dir=/data
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null http://localhost:8333/; then
+              echo "object store up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the object store never came up"; docker logs seaweedfs; exit 1
 
       - uses: astral-sh/setup-uv@v5
         with:

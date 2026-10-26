@@ -14,7 +14,7 @@ story gets in.
 from __future__ import annotations
 
 import json
-import queue
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
@@ -27,10 +27,10 @@ from sqlalchemy.orm import Session
 from . import apphub, authoring, delivery, repo, revisions, storage, target_config
 from .auth import AuthDep
 from .db import SessionLocal, get_session
-from .domain.status import is_terminal
-from .launcher import launch_run
+from .domain.status import RunStatus, is_live, is_terminal
 from .models import Artifact
-from .orchestrator.bus import DONE, bus
+from .orchestrator.bus import LogBus, bus_from_env
+from .sandbox import dispatch, egress
 from .schemas import (
     ArtifactOut,
     DeliverBody,
@@ -62,13 +62,56 @@ router = APIRouter(dependencies=[AuthDep])
 
 
 def get_launcher() -> Callable[[int], None]:
-    """The background run launcher. Overridden to a no-op in tests."""
-    return launch_run
+    """The background run launcher: "start working on this run".
+
+    Still the only injection point for that, and still a plain
+    `Callable[[int], None]`, which is what keeps the tests' override a no-op
+    lambda. What changed in P4 is behind it: `make_launcher` picks a daemon
+    thread or a container per run from `QA_SANDBOX`, the way `make_runner` picks
+    `fake` or `claude` (app/sandbox/dispatch.py).
+    """
+    return dispatch.make_launcher()
+
+
+def get_scheduler() -> dispatch.Scheduler | None:
+    """The same dispatch seam, for the paths that *end* a run's work.
+
+    Not a second seam: one `Scheduler` protocol and one factory, exposed here as
+    well because pause and stop have to be able to reap a sandbox and a route
+    needs something a test can substitute. `get_launcher` remains the only
+    injection point for starting a run.
+
+    `None` on the thread path, where there is no sandbox to schedule -- the
+    paths that reap one ask without having to catch anything.
+    """
+    return dispatch.make_scheduler()
 
 
 def get_storage() -> Storage:
     """The artifact blob store. Overridden with a fake in tests."""
     return storage.from_env()
+
+
+def get_resolver() -> egress.Resolver:
+    """The DNS resolver the write path checks a base URL with.
+
+    A dependency rather than a module default because the check is load-bearing
+    (DESIGN.md §6: a base URL must resolve to a **public** address) and a check
+    nothing can substitute is a check nothing can test. Overridden in tests; the
+    suite also refuses the real resolver outright, so forgetting the override
+    fails loudly instead of depending on DNS.
+    """
+    return egress.system_resolver
+
+
+def get_log_bus() -> LogBus:
+    """Where a run's live log lines are read from.
+
+    The same factory the launcher publishes through, so the reader and the
+    writer cannot disagree about where a run's lines are: in-process for a
+    thread run, `run_log` for a run in a container.
+    """
+    return bus_from_env()
 
 
 def get_bootstrap_runner() -> Callable[[str], apphub.BootstrapOutcome]:
@@ -138,6 +181,7 @@ def create_target(
     session: Session = Depends(get_session),
     store: Storage = Depends(get_storage),
     run_sync=Depends(get_bootstrap_runner),
+    resolve: egress.Resolver = Depends(get_resolver),
 ):
     """Create a target, its configuration, and its revision 1.
 
@@ -162,6 +206,7 @@ def create_target(
             target_branch=body.target_branch,
             locators=body.locators,
             agent_notes=body.agent_notes,
+            resolve=resolve,
         )
     except repo.NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -188,6 +233,7 @@ def update_target_config(
     body: TargetConfigUpdate,
     session: Session = Depends(get_session),
     store: Storage = Depends(get_storage),
+    resolve: egress.Resolver = Depends(get_resolver),
 ):
     """Edit a target's configuration. A changed base URL commits a revision.
 
@@ -199,7 +245,11 @@ def update_target_config(
     target = _target_or_404(session, target_id)
     with _authoring_errors(session):
         _target, revision = authoring.update_config(
-            session, store, target, **body.model_dump(exclude_none=True)
+            session,
+            store,
+            target,
+            resolve=resolve,
+            **body.model_dump(exclude_none=True),
         )
     return _write_out(session, store, target, revision)
 
@@ -443,6 +493,11 @@ def _target_or_404(session: Session, target_id: int):
 # extension implies. See revision_file_content.
 TRACKED_FILE_MEDIA_TYPE = "text/plain; charset=utf-8"
 
+# How often the events route reads forward from its cursor, and how long it
+# stays silent before reassuring the browser that the connection is alive.
+POLL_INTERVAL_S = 0.5
+KEEPALIVE_S = 15.0
+
 
 def _revision_out(rev, file_count: int) -> RevisionOut:
     return RevisionOut(
@@ -548,19 +603,72 @@ def get_run(run_id: int, session: Session = Depends(get_session)):
 
 
 @router.post("/runs/{run_id}/pause", response_model=RunOut)
-def pause_run(run_id: int, session: Session = Depends(get_session)):
+def pause_run(
+    run_id: int,
+    session: Session = Depends(get_session),
+    scheduler: dispatch.Scheduler | None = Depends(get_scheduler),
+):
+    """Pause a run, and destroy the sandbox at once.
+
+    Pause exists to stop costing money, so it cannot wait for a step boundary
+    that an agent holding a browser may be minutes of billing away from. The
+    container is killed here and the row is moved to `paused` here, because the
+    process that would otherwise have done it is the one just killed.
+
+    What a paused run must not lose is the agent session, and that is why the
+    session is archived at **every step boundary** rather than on the way out
+    (app/launcher.py): a sandbox that dies without warning cannot archive
+    anything, so the boundary is the last moment the session is known good. A
+    pause therefore costs the exploration of the step it interrupted and no
+    more.
+
+    The driver's flag-at-a-boundary path stays for the thread path and for a run
+    with no sandbox.
+    """
     try:
-        return repo.request_pause(session, run_id)
+        run = repo.request_pause(session, run_id)
     except repo.NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if run.sandbox_handle and run.status is RunStatus.RUNNING:
+        dispatch.destroy_handle(run.sandbox_handle, scheduler)
+        run = repo.pause_run(session, run_id)
+        # So "a paused run has no sandbox" is true of the row as well: the
+        # reaper's sweep for idle sandboxes is the net under this, not the way
+        # it normally happens.
+        repo.set_sandbox_handle(session, run_id, None)
+        session.refresh(run)
+    return run
 
 
 @router.post("/runs/{run_id}/stop", response_model=RunOut)
-def stop_run(run_id: int, session: Session = Depends(get_session)):
+def stop_run(
+    run_id: int,
+    session: Session = Depends(get_session),
+    scheduler: dispatch.Scheduler | None = Depends(get_scheduler),
+):
+    """Stop a run, and kill the sandbox doing the work.
+
+    "Stop" has to mean the work stops rather than the status changes, so a
+    running sandbox is destroyed here rather than asked to notice a flag at its
+    next step boundary -- which, for an agent holding a browser, may be minutes
+    of billing away. Mid-step work is lost, which is invariant 4 (a crash
+    commits nothing) and not a regression.
+
+    The driver's flag-at-a-boundary path stays for the thread path and for a run
+    with no sandbox, and `repo.request_stop` already stops a PENDING or PAUSED
+    run outright.
+    """
     try:
-        return repo.request_stop(session, run_id)
+        run = repo.request_stop(session, run_id)
     except repo.NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if run.sandbox_handle:
+        dispatch.destroy_handle(run.sandbox_handle, scheduler)
+        if is_live(run.status):
+            # A PENDING run was already stopped outright by `request_stop`; a
+            # RUNNING one has just lost the process that would have done it.
+            run = repo.stop_run(session, run_id)
+    return run
 
 
 @router.post("/runs/{run_id}/resume", response_model=RunOut)
@@ -620,9 +728,24 @@ def artifact_content(
 
 
 @router.get("/runs/{run_id}/events")
-def run_events(run_id: int, session: Session = Depends(get_session)):
-    """Server-sent events of the run's live log. A finished run replays its
-    recorded history and closes; a live run streams until it ends."""
+def run_events(
+    run_id: int,
+    session: Session = Depends(get_session),
+    bus: LogBus = Depends(get_log_bus),
+):
+    """Server-sent events of the run's live log, read forward from a cursor.
+
+    A cursor rather than a subscription, because P4 moved the run out of this
+    process: the lines are appended by whatever executes the run, and a reader
+    that polls a cursor is a reader that works on any replica, for any run, and
+    for a run that finished before the last deploy. A late subscriber therefore
+    receives the run's real history rather than whatever one process remembers.
+
+    A finished run replays its history and closes; a live run streams until the
+    bus says the stream is over -- which, for a run in a container, means its
+    status reached a terminal state or a pause, because that is the only
+    end-of-stream marker another process can see.
+    """
     try:
         run = repo.get_run(session, run_id)
     except repo.NotFound as exc:
@@ -633,24 +756,29 @@ def run_events(run_id: int, session: Session = Depends(get_session)):
         return f"data: {json.dumps(line)}\n\n"
 
     def gen():
-        q, history = bus.subscribe(run_id)
-        try:
-            for line in history:
+        cursor = 0
+        silent_for = 0.0
+        while True:
+            lines, cursor = bus.read_from(run_id, cursor)
+            for line in lines:
                 yield _event(line)
             if terminal:
-                yield "event: end\ndata: \"\"\n\n"
+                # Read once, at the top: a run that was already finished when
+                # the reader arrived has nothing more to send.
+                yield 'event: end\ndata: ""\n\n'
                 return
-            while True:
-                try:
-                    item = q.get(timeout=15)
-                except queue.Empty:
-                    yield ": keepalive\n\n"
-                    continue
-                if item is DONE:
-                    yield "event: end\ndata: \"\"\n\n"
-                    return
-                yield _event(item)
-        finally:
-            bus.unsubscribe(run_id, q)
+            if lines:
+                silent_for = 0.0
+                continue
+            if bus.is_closed(run_id):
+                # One more pass has already run above, so everything the writer
+                # appended before it finished has been sent.
+                yield 'event: end\ndata: ""\n\n'
+                return
+            time.sleep(POLL_INTERVAL_S)
+            silent_for += POLL_INTERVAL_S
+            if silent_for >= KEEPALIVE_S:
+                silent_for = 0.0
+                yield ": keepalive\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")

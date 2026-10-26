@@ -9,13 +9,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import apphub
-from app.api import get_bootstrap_runner, get_launcher, get_storage
+from app.api import get_bootstrap_runner, get_launcher, get_resolver, get_storage
 from app.auth import require_auth
 from app.db import get_session
 from app.main import app
 from app.tenancy import current_tenant_id
 from tests.storage_helpers import FakeStorage
-from tests.target_helpers import target_body
+from tests.target_helpers import public_resolver, target_body
 
 
 @pytest.fixture()
@@ -27,6 +27,8 @@ def client(session):
     app.dependency_overrides[get_launcher] = lambda: launched.append
     # Bypass auth for the API tests (auth itself is tested in test_auth.py).
     app.dependency_overrides[require_auth] = lambda: None
+    # P4: the write path resolves a base URL, and no test may touch real DNS.
+    app.dependency_overrides[get_resolver] = lambda: public_resolver
     # Creating a target commits its revision 1, so the blob store is in play.
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_bootstrap_runner] = lambda: (
@@ -282,6 +284,35 @@ def test_an_invalid_configuration_is_a_422(client):
 
     assert r.status_code == 422
     assert "base URL" in r.json()["detail"]
+
+
+def test_a_base_url_that_does_not_resolve_publicly_is_a_422_with_the_reason(client):
+    """P4, §6: the save-time half of the public-address rule, as the operator
+    meets it. The portal shows `detail`, so the message has to say why."""
+    pid = client.post("/projects", json={"name": "demo"}).json()["id"]
+    app.dependency_overrides[get_resolver] = lambda: (lambda host: ["10.1.2.3"])
+
+    r = client.post(
+        f"/projects/{pid}/targets",
+        json=target_body(app="internal", base_url="https://internal.example.com"),
+    )
+
+    assert r.status_code == 422
+    assert "10.1.2.3" in r.json()["detail"]
+    assert "public address" in r.json()["detail"]
+    assert client.get("/targets").json() == [], "nothing was created"
+
+
+def test_editing_a_base_url_to_a_private_name_is_refused_too(client):
+    _pid, tid = _make_target(client)
+    app.dependency_overrides[get_resolver] = lambda: (lambda host: ["169.254.169.254"])
+
+    r = client.patch(
+        f"/targets/{tid}/config", json={"base_url": "http://metadata.example.com"}
+    )
+
+    assert r.status_code == 422
+    assert "169.254.169.254" in r.json()["detail"]
 
 
 def test_a_blank_display_name_is_refused_at_create_as_it_is_at_edit(client):

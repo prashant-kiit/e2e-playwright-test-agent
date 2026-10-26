@@ -46,6 +46,7 @@ from .delivery.render import (
 )
 from .models import Revision, Target
 from .sandbox import hydrate as hyd
+from .sandbox.egress import Resolver
 from .storage import Storage
 from .target_config import config_of
 
@@ -160,6 +161,7 @@ def create_target(
     target_branch: str | None = None,
     locators: str = "",
     agent_notes: list[str] | None = None,
+    resolve: Resolver | None = None,
 ) -> tuple[Target, Revision]:
     """Create a target and commit its revision 1.
 
@@ -177,6 +179,7 @@ def create_target(
         target_branch=target_branch,
         locators=locators,
         agent_notes=agent_notes,
+        resolve=resolve,
     )
     tmp = Path(tempfile.mkdtemp(prefix="qa-new-target-"))
     try:
@@ -313,7 +316,7 @@ def delete_story(
 # --- configuration --------------------------------------------------------
 
 def update_config(
-    session: Session, store: Storage, target: Target, **fields
+    session: Session, store: Storage, target: Target, *, resolve: Resolver | None = None, **fields
 ) -> tuple[Target, Revision | None]:
     """Change a target's configuration, and record the tree diff it causes.
 
@@ -333,10 +336,10 @@ def update_config(
     # refused edit must not have moved the row -- and a typo should be reported
     # as a typo rather than as a conflict. One cleaner map, shared with the
     # write path, so the two cannot disagree about which fields exist.
-    target_config.clean_fields(given)
+    target_config.clean_fields(given, resolve=resolve)
     repo.assert_no_live_run(session, target.id)
 
-    target = repo.update_target_config(session, target.id, **given)
+    target = repo.update_target_config(session, target.id, resolve=resolve, **given)
     revision = _commit_edit(session, target, store, lambda root: None)
     return target, revision
 

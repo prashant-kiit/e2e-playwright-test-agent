@@ -12,11 +12,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import delivery
-from app.api import get_catalog, get_delivery_tools, get_launcher
+from app.api import get_catalog, get_delivery_tools, get_launcher, get_resolver
 from app.auth import require_auth
 from app.db import get_session
 from app.main import app
-from tests.target_helpers import target_body
+from tests.target_helpers import public_resolver, target_body
 
 
 class _StubCatalog:
@@ -70,6 +70,8 @@ def client(session):
     app.dependency_overrides[get_session] = lambda: session
     app.dependency_overrides[get_launcher] = lambda: (lambda run_id: None)
     app.dependency_overrides[require_auth] = lambda: None
+    # P4: the write path resolves a base URL, and no test may touch real DNS.
+    app.dependency_overrides[get_resolver] = lambda: public_resolver
     app.dependency_overrides[get_delivery_tools] = lambda: _StubDelivery()
     app.dependency_overrides[get_catalog] = lambda: _StubCatalog()
     # Creating a target commits its revision 1.
@@ -141,6 +143,8 @@ def test_delivery_state_needs_no_credential(session):
     app.dependency_overrides[get_session] = lambda: session
     app.dependency_overrides[get_launcher] = lambda: (lambda run_id: None)
     app.dependency_overrides[require_auth] = lambda: None
+    # P4: the write path resolves a base URL, and no test may touch real DNS.
+    app.dependency_overrides[get_resolver] = lambda: public_resolver
     app.dependency_overrides[get_storage] = lambda: FakeStorage()
     app.dependency_overrides[get_catalog] = lambda: _StubCatalog()
     # Deliberately NOT overriding get_delivery_tools, and making it fail the way
@@ -348,6 +352,8 @@ def test_a_missing_git_or_pat_is_a_503_not_a_bare_500(session, monkeypatch):
     app.dependency_overrides[get_session] = lambda: session
     app.dependency_overrides[get_launcher] = lambda: (lambda run_id: None)
     app.dependency_overrides[require_auth] = lambda: None
+    # P4: the write path resolves a base URL, and no test may touch real DNS.
+    app.dependency_overrides[get_resolver] = lambda: public_resolver
     # Creating a target commits its revision 1.
     app.dependency_overrides[get_storage] = lambda: FakeStorage()
     # Deliberately NOT overriding get_delivery_tools: the real one must run.

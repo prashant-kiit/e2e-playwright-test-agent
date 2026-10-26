@@ -24,7 +24,7 @@ from app.sandbox import hydrate as hyd
 from app.target_config import config_of
 from tests.delivery_helpers import make_worktree
 from tests.storage_helpers import FakeStorage
-from tests.target_helpers import create_target
+from tests.target_helpers import create_target, public_resolver
 
 
 @pytest.fixture()
@@ -202,7 +202,12 @@ def test_a_changed_base_url_changes_the_hydrated_config(session, target, tmp_pat
 
     first = tmp_path / "one"
     hyd.hydrate(session, target, store, first, emit=lambda line: None)
-    repo.update_target_config(session, target.id, base_url="https://moved.example.com")
+    repo.update_target_config(
+        session,
+        target.id,
+        base_url="https://moved.example.com",
+        resolve=public_resolver,
+    )
     second = tmp_path / "two"
     hyd.hydrate(session, target, store, second, emit=lambda line: None)
 

@@ -1,0 +1,139 @@
+# The per-run sandbox image: where an agent writes and runs code (P4).
+#
+# Built from the **same server package as the API**, deliberately: the prompts,
+# the agent runtime and the tracked-tree definition must not be able to disagree
+# between the thing that serves HTTP and the thing that runs agents. What differs
+# is what is installed around that package, and what is not installed at all.
+#
+# Not here, and that is the point:
+#
+#   * **no GitHub credential and no git.** §6's rule is that no GitHub
+#     credential ever enters a sandbox, and delivery is a human-approved
+#     control-plane action (§7) -- so the push neither needs to happen here nor
+#     can. There is no `git` binary in this image to push with.
+#   * **no repo mount, no VOLUME, no path into the control plane.** P3 deleted
+#     the shared authoritative disk and this image does not reacquire it: a
+#     sandbox holds exactly one target's tree, hydrated from the head revision
+#     and destroyed with the container.
+#
+# Two stages, and the first one is not scaffolding:
+#
+#   sandbox-runtime   python + the server package. This is what the
+#                     Docker-backed integration test dispatches with
+#                     QA_RUNNER=fake, because a synthetic run needs no browser
+#                     and CI should not build two gigabytes to prove that a
+#                     container hydrates, commits revisions and streams a log.
+#   egress-proxy      the allowlisting proxy that is a sandbox's only way out.
+#                     Same stage as above on purpose: it shares the one
+#                     allowlist builder with the control plane, and it carries
+#                     no Node, no CLI and no browser.
+#   sandbox           the real thing: Node, the `claude` CLI and the browsers.
+#                     `make up` builds this one and the verification record
+#                     (VERIFICATION-P4.md) is a real agent run inside it.
+#
+# ---------------------------------------------------------------------------
+FROM python:3.13-slim AS sandbox-runtime
+
+# uv: the same fast, lockfile-reproducible install the API image uses.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+WORKDIR /app
+
+# Dependencies first, so the layer is cached until the lockfile changes.
+COPY server/pyproject.toml server/uv.lock* ./
+RUN uv sync --no-dev --no-install-project
+
+# The server package, and nothing else from the repository. No alembic: the
+# schema is the control plane's to migrate, and a sandbox that could migrate is
+# a sandbox that could migrate *wrongly*.
+COPY server/app ./app
+
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1
+
+# `docker run <image> <run_id>`: the entrypoint is the composition's second call
+# site (app/sandbox/run.py), which drives exactly one run and exits with its
+# outcome.
+ENTRYPOINT ["python", "-m", "app.sandbox.run"]
+
+# ---------------------------------------------------------------------------
+FROM sandbox-runtime AS egress-proxy
+
+EXPOSE 3128
+ENTRYPOINT ["python", "-m", "app.sandbox.proxy"]
+
+# ---------------------------------------------------------------------------
+FROM sandbox-runtime AS sandbox
+
+# Node for the `claude` CLI, for `npm ci` in the hydrated worktree, and for the
+# Playwright MCP server the agent drives the browser through.
+#
+# Grafted from the official image rather than installed from apt: the CLI
+# requires Node >= 22 and this base's distribution ships 20, so apt's `nodejs`
+# would produce an image whose agent runtime refuses to start -- the kind of
+# breakage that shows up only in a real run.
+ARG NODE_IMAGE=node:22-bookworm-slim
+COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version && npm --version
+
+# The agent runtime, pinned. app/orchestrator/claude.py's isolation flags are
+# verified against the 2.1.x CLI, so the image says which 2.1.x it is rather
+# than tracking a moving tag -- an image that silently changes the thing running
+# the prompts is an image that invalidates the verification record.
+ARG CLAUDE_CODE_VERSION=2.1.310
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+# Prebaked browsers: the expensive, slow-changing half of a run's setup,
+# amortized in the image so a run starts without downloading one (§6, decision
+# 14). `npm ci` from the revision's lockfile still installs the JS dependencies
+# -- the lockfile stays the source of truth -- and finds these browsers already
+# there, which is what makes that install fast rather than absent.
+#
+# PLAYWRIGHT_BROWSERS_PATH is a shared location rather than a per-worktree
+# `~/.cache`, so every run's `npm ci` resolves to the same prebaked copy.
+#
+# **Chromium only, on purpose.** The generated config declares four projects,
+# but the agent generates and heals on `chromium` alone (app/prompts: a full
+# four-project run is the customer's CI, not a token-burning step here).
+#
+# **The version is read out of the template lockfile, not written here.** A
+# browser build that does not match the `@playwright/test` the revision installs
+# is the one failure that silently undoes the "no download at run time" promise,
+# and a second hand-maintained copy of a pin is how that happens six months from
+# now. The lockfile is already the source of truth for the dependency; this
+# makes it the source of truth for the browser too.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+COPY server/app/delivery/templates/package-lock.json /tmp/pin/package-lock.json
+RUN PLAYWRIGHT_VERSION="$(node -e "process.stdout.write(require('/tmp/pin/package-lock.json').packages['node_modules/@playwright/test'].version)")" \
+    && echo "playwright ${PLAYWRIGHT_VERSION} (from the template lockfile)" \
+    && npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
+    && playwright install --with-deps chromium \
+    && npm uninstall -g playwright \
+    && rm -rf /tmp/pin /var/lib/apt/lists/*
+
+# A warm npm cache, baked rather than shared.
+#
+# Story 23 asks for `npm ci` from the revision's lockfile "against a shared
+# cache", and the obvious reading -- a cache volume mounted into every sandbox --
+# is one this phase cannot have: a writable directory shared between containers
+# running different customers' agents is a supply-chain path between them, which
+# is precisely what container-per-run exists to close. So the cache is **in the
+# image**: populated at build time from the template lockfile that every
+# target's revision 1 carries, identical for every run, and written to only in
+# the container's own layer, which is destroyed with it.
+#
+# `install_dependencies` is unchanged and still one named function: the lockfile
+# in the revision remains the source of truth for dependencies, and this only
+# decides whether that install is a download or a copy.
+COPY server/app/delivery/templates/package.json server/app/delivery/templates/package-lock.json /tmp/warm/
+RUN cd /tmp/warm \
+    && npm ci --cache /npm-cache --no-audit --no-fund \
+    && rm -rf /tmp/warm \
+    && chmod -R a+rX /npm-cache
+ENV QA_NPM_CACHE=/npm-cache

@@ -21,11 +21,23 @@ dependencies = [
 dev = [
     "pytest>=8",
     "ruff>=0.6",
+    # Read by the structural tests that assert on docker-compose.yml: the
+    # sandbox service mounts nothing, no service carries a credential, the
+    # sandbox network is internal. Parsing beats grepping for those -- a comment
+    # explaining a decision mentions the thing the decision is about.
+    "pyyaml>=6",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    # The container tests (tests/test_docker_sandbox.py).
+    # They run in CI rather than skipping -- QA_REQUIRE_DOCKER=1 turns a missing
+    # daemon into a failure there, the way QA_REQUIRE_DB does for Postgres --
+    # and the marker is for running or excluding them deliberately in local work.
+    "docker: really starts containers (needs a Docker daemon)",
+]
 
 [tool.ruff]
 line-length = 100

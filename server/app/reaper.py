@@ -13,6 +13,32 @@ Two pieces fix that:
 
 A PAUSED run deliberately holds its lock with no lease, and repo.reap_expired
 already skips it; nothing here changes that.
+
+P4 hung two more pieces of maintenance on the same loop, both sweeps *beside*
+the reap rather than inside it -- a failed sweep must never stop a dead run's
+lock from being freed:
+
+  - the live log is a Postgres table now (DESIGN.md §10) and its rows are pruned
+    past a retention window;
+  - a run past the per-run wall clock is failed with that reason (§6). That is
+    the reaper's half of the limit: a run whose sandbox is gone has nobody left
+    to check its own deadline, and `app/orchestrator/limits.py` is the half that
+    stops a run still being driven from starting another step;
+  - a **paused or finished** run that still names a sandbox has it destroyed
+    and the column cleared. For a paused run this is a net: pause reaps
+    immediately, with no grace window (§5), so a handle still on a paused row
+    means that did not happen -- an API that died mid-pause, or a pause that
+    raced a dispatch. For a *finished* run it is the only mechanism there is.
+    The run container carries `AutoRemove` and vanishes on its own, but the
+    run's **egress proxy** is long-running and exits on nobody's schedule, and
+    the process that finished the run is inside the sandbox, has no Docker
+    socket by design, and needs that proxy alive until its last step. Without
+    this sweep every completed run leaves an idle proxy behind for ever.
+
+`reap_sandbox` is how a reaped run's container stops costing money. It is a
+callback rather than an import because the dispatch seam imports the launcher
+and the launcher imports this module; main.py passes
+`sandbox.dispatch.destroy_sandbox`.
 """
 
 from __future__ import annotations
@@ -23,9 +49,10 @@ import logging
 import threading
 from collections.abc import Callable, Iterator
 
-from . import repo
+from . import config, repo
 from .db import SessionLocal
 from .domain import lease
+from .orchestrator.bus import prune_run_logs
 
 log = logging.getLogger(__name__)
 
@@ -92,8 +119,9 @@ async def reaper_loop(
     interval_s: float = REAP_INTERVAL_S,
     session_factory=SessionLocal,
     on_reap: Callable[[list[int]], None] | None = None,
+    reap_sandbox: Callable[[int], object] | None = None,
 ) -> None:
-    """Fail runs whose lease has expired and free their apps, forever."""
+    """Fail runs whose lease has expired or whose wall clock ran out, forever."""
     while True:
         try:
             await asyncio.sleep(interval_s)
@@ -102,6 +130,33 @@ async def reaper_loop(
                 log.warning("reaped %d run(s) with expired leases: %s", len(reaped), reaped)
                 if on_reap is not None:
                     on_reap(reaped)
+            # Beside the reap, never inside it: housekeeping must not be able to
+            # keep a dead run's app locked.
+            try:
+                overdue = await asyncio.to_thread(_sweep_overdue, session_factory)
+            except Exception:  # pragma: no cover - a failed sweep is not an outage
+                log.warning("sweeping overdue runs failed; continuing", exc_info=True)
+                overdue = []
+            if reap_sandbox is not None:
+                # A container still burning minutes for a run that has failed or
+                # been parked is the cost these limits exist to stop.
+                idle = await asyncio.to_thread(_idle_sandboxes, session_factory)
+                for run_id in list(reaped) + overdue + idle:
+                    try:
+                        await asyncio.to_thread(reap_sandbox, run_id)
+                    except Exception:  # pragma: no cover - best effort by design
+                        log.warning("reaping the sandbox of run %s failed", run_id)
+                        continue
+                    if run_id in idle:
+                        # A paused or finished run has no sandbox once this has
+                        # run, and the row should say so: the stop path reads
+                        # that column, and a handle left on the row would make
+                        # the next sweep do this all over again.
+                        await asyncio.to_thread(_forget_sandbox, session_factory, run_id)
+            try:
+                await asyncio.to_thread(_prune_once, session_factory)
+            except Exception:  # pragma: no cover - a failed prune is not an outage
+                log.warning("pruning the run log failed; continuing", exc_info=True)
         except asyncio.CancelledError:
             raise
         except Exception:  # pragma: no cover - a dead reaper must not kill the API
@@ -111,3 +166,35 @@ async def reaper_loop(
 def _reap_once(session_factory=SessionLocal) -> list[int]:
     with session_factory() as session:
         return repo.reap_expired(session)
+
+
+def _sweep_overdue(session_factory=SessionLocal) -> list[int]:
+    with session_factory() as session:
+        overdue = repo.fail_overdue_runs(session, max_age_s=config.run_timeout_s())
+    if overdue:
+        log.warning("failed %d run(s) past the run wall clock: %s", len(overdue), overdue)
+    return overdue
+
+
+def _idle_sandboxes(session_factory=SessionLocal) -> list[int]:
+    with session_factory() as session:
+        return repo.idle_sandbox_runs(session)
+
+
+def _forget_sandbox(session_factory, run_id: int) -> None:
+    """A run has no sandbox once its container is gone; the row says so.
+
+    Both arguments required: a default `run_id` here would be a sentinel that
+    silently cleared nothing, and the other helpers' `session_factory` default
+    exists only because the loop may be called without one.
+    """
+    with session_factory() as session:
+        repo.set_sandbox_handle(session, run_id, None)
+
+
+def _prune_once(session_factory=SessionLocal) -> int:
+    with session_factory() as session:
+        pruned = prune_run_logs(session)
+    if pruned:
+        log.info("pruned %d run_log row(s) past the retention window", pruned)
+    return pruned

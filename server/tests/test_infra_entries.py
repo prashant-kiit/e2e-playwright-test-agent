@@ -183,3 +183,32 @@ def test_the_base_url_survives_as_a_string_literal_and_nothing_more(hostile):
         line for line in text.splitlines() if line.startswith("const baseURL = ")
     )
     assert json.loads(literal[len("const baseURL = ") :].rstrip(";")) == hostile
+
+
+# --- P4: the proxy stanza, and the one author it has ----------------------
+
+def test_the_generated_config_carries_the_proxy_stanza():
+    """A sandbox's only way out is an allowlisting proxy, and Chromium has to be
+    told where it is. This file is already rendered from the row and already has
+    exactly one author, which is why the setting lands here."""
+    config = render.render_playwright_config(_config())
+
+    assert "process.env.QA_PROXY_URL" in config
+    assert "proxy" in config
+
+
+def test_the_proxy_stanza_is_absent_outside_a_sandbox():
+    """The same bytes in the customer's repo and on a laptop: `QA_PROXY_URL` is
+    set only inside a sandbox, so there is no second variant of this file --
+    one condition, spread into `use` or spreading nothing."""
+    config = render.render_playwright_config(_config())
+
+    assert "const PROXY_URL = process.env.QA_PROXY_URL;" in config
+    assert "...(PROXY_URL ? { proxy: { server: PROXY_URL } } : {})" in config
+
+
+def test_there_is_still_exactly_one_author_of_the_generated_config():
+    """The reason the stanza went here rather than into a second file."""
+    generated = [e for e in render.INFRA_ENTRIES if e.generated]
+    assert [e.destination for e in generated] == ["playwright.config.ts"]
+    assert render.infra_entry("playwright.config.ts").template is None

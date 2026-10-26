@@ -26,6 +26,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -157,6 +158,19 @@ class Run(Base):
         DateTime(timezone=True), nullable=True
     )
     claude_session_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # The sandbox executing this run, as its scheduler names it: a container id,
+    # a job name, a task ARN. Opaque to the control plane, which records it so an
+    # SRE can find the sandbox behind a live run and the stop path has something
+    # to kill. Null for a run on the thread path: there is no sandbox to find,
+    # and the column says so rather than guessing (P4).
+    sandbox_handle: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # What the run cost: the agent's reported spend and how long its sandbox
+    # existed. Recorded so cost is attributable per run before per-tenant
+    # quotas exist (P5's), and written by the launcher at the end of a run --
+    # null for a run whose sandbox vanished without recording anything, which
+    # the lease reaper is what reconciles (P4).
+    spend_usd: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
+    sandbox_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -210,6 +224,32 @@ class Artifact(Base):
     )
 
     run: Mapped[Run] = relationship(back_populates="artifacts")
+
+
+class RunLog(Base):
+    """One live log line of one run: the stream the portal reads by cursor.
+
+    P4 moved the run into a container, so the lines have to land somewhere both
+    the writer and the API can reach. Append-only, `(run_id, seq)` as the primary
+    key, and `seq` counted by the one writer that executes the run.
+
+    **The live view and its recent history, not the archive.** `session.jsonl`
+    remains the durable per-run record (DESIGN.md §10) and these rows are pruned
+    past a retention window (`orchestrator.bus.prune_run_logs`), so the
+    convenience of a readable stream does not become unbounded growth.
+    """
+
+    __tablename__ = "run_log"
+
+    run_id: Mapped[int] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    seq: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    tenant_id: Mapped[int] = _tenant_col()
+    line: Mapped[str] = mapped_column(Text, nullable=False)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
 
 
 class AppLock(Base):

@@ -125,6 +125,28 @@ def _no_real_blob_storage(monkeypatch):
     monkeypatch.setattr("app.storage.from_env", refuse)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_dns(monkeypatch):
+    """No test may resolve a name against real DNS.
+
+    P4's write path refuses a base URL that does not resolve to a public address
+    (DESIGN.md §6). The resolver is injected for exactly that reason, so a test
+    that reaches the real one has forgotten to pass it -- and would then pass or
+    fail depending on what `demo.example.com` happens to resolve to from the
+    machine running it, which for a check this load-bearing is worse than
+    useless. The sibling of `_no_real_blob_storage`.
+    """
+
+    def refuse(host, *args, **kwargs):
+        raise AssertionError(
+            f"a test resolved {host!r} against real DNS; pass resolve= (see "
+            f"tests.target_helpers.public_resolver) or override the "
+            f"app.api.get_resolver dependency"
+        )
+
+    monkeypatch.setattr("app.sandbox.egress.system_resolver", refuse)
+
+
 # `tenants` is deliberately not truncated: its single row is seeded by the
 # migration, so it is schema-level reference data rather than test state. Wiping
 # it would leave every tenant_id FK dangling and make the fixture describe a

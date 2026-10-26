@@ -1,8 +1,17 @@
-"""Launches the orchestrator for a run on a background thread.
+"""Starts the orchestrator for a run, and composes everything around it.
 
 Kept separate from the API so tests can override it with a no-op (they drive the
 driver directly with a FakeRunner). The real launcher picks the configured
-runner, streams log lines to the bus, and closes the stream when the run ends.
+runner, streams log lines to the configured bus, and closes the stream when the
+run ends.
+
+**One composition, two call sites.** `drive_run` is the whole of "work a run":
+heartbeat, runner, composition, close the stream. The thread launcher calls it
+on a daemon thread (`launch_run`); the sandbox entrypoint calls it as a process
+(`app/sandbox/run.py`). There is no second pipeline for the container to use,
+which is the thing a structural test keeps true
+(tests/test_sandbox_entrypoint.py) because a second pipeline is invisible to a
+behavioural test for as long as it happens to agree.
 
 It is also where everything that happens *around* a run is composed: hydrate
 before the pipeline, teardown after it, and the step-boundary hook the driver
@@ -16,7 +25,9 @@ change of *where* they run and not of *what* they do.
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -24,15 +35,19 @@ from . import config, repo, revisions, storage
 from .artifacts import ArtifactCollector
 from .db import SessionLocal
 from .domain.steps import Step
-from .orchestrator.bus import bus
+from .orchestrator.bus import LogBus, bus_from_env
 from .orchestrator.claude import ClaudeRunner
 from .orchestrator.driver import SessionFactory, run_pipeline
 from .orchestrator.fake import FakeRunner
+from .orchestrator.limits import LimitedRunner
 from .orchestrator.runner import Emit, Runner
 from .reaper import heartbeat_during
 from .sandbox import hydrate
+from .sandbox import session as agent_session
 from .storage import Storage
 from .target_config import config_of
+
+log = logging.getLogger(__name__)
 
 # A step-boundary half: it is handed the run and the step that just completed.
 # One of the two may raise, and that is deliberate -- see make_step_boundary_hook.
@@ -40,9 +55,21 @@ BoundaryHalf = Callable[[int, Step], None]
 
 
 def make_runner() -> Runner:
+    """The configured Runner, with P4's limits around it.
+
+    The limits wrap whichever runner is configured rather than living in one of
+    them: a wall clock only the real runner respects is a wall clock the fake
+    path cannot be tested against, and a budget only the fake reports is no
+    budget at all.
+    """
+    inner: Runner
     if config.runner_kind() == "fake":
-        return FakeRunner(delay=config.fake_delay())
-    return ClaudeRunner()
+        inner = FakeRunner(
+            delay=config.fake_delay(), writes_tree=config.fake_tree_writes()
+        )
+    else:
+        inner = ClaudeRunner()
+    return LimitedRunner(inner)
 
 
 def make_collector(
@@ -109,16 +136,21 @@ def make_step_boundary_hook(
     collect: BoundaryHalf | None = None,
     ingest: BoundaryHalf | None = None,
 ) -> BoundaryHalf:
-    """The driver's ONE step-boundary callable, with both halves composed in.
+    """The driver's ONE step-boundary callable, with every half composed in.
 
-    Order is deliberate: **artifacts first, then ingest.** Evidence collection
-    runs first and is never delayed by the work that matters more.
+    Order is deliberate: **artifacts, then the session, then ingest.** What is
+    cheapest to lose goes first and never delays the work that matters more.
 
-    The two halves are treated differently, and the asymmetry is the phase:
+    The halves are treated differently, and the asymmetry is the phase:
 
     - **Artifact collection stays best-effort.** Its failure is reported to the
       run's log and swallowed. Evidence is not the work; losing a trace is not a
       reason to fail a run that produced a healed suite.
+    - **The session archive stays best-effort too**, and it is here rather than
+      only at the end of a run because pause destroys the container at once
+      (app/api.py): a sandbox killed without warning archives nothing, so the
+      boundary is the last moment the session is known good. A pause costs the
+      exploration of the step it interrupted and no more.
     - **A failed ingest fails the run.** It is reported to the log and then
       re-raised. P2's code said so in a comment, because while `apps/` was
       authoritative a swallowed failure cost nothing -- and once truth has moved
@@ -149,6 +181,9 @@ def make_step_boundary_hook(
             collect_half(run_id, step)
         except Exception as exc:
             emit(f"=== step {step.value}: artifact collection failed: {exc} ===")
+
+        # Already swallows its own failures, and already a no-op off a sandbox.
+        _persist_session(run_id, emit, session_factory=session_factory, store=store)
 
         try:
             ingest_half(run_id, step)
@@ -229,18 +264,139 @@ def run_with_worktree(
         emit("=== teardown: worktree removed ===")
 
 
-def launch_run(run_id: int) -> None:
-    """Start the pipeline for run_id on a daemon thread."""
+def drive_run(
+    run_id: int,
+    *,
+    runner: Runner | None = None,
+    bus: LogBus | None = None,
+    session_factory: SessionFactory = SessionLocal,
+    store: Storage | None = None,
+) -> None:
+    """Work the run: heartbeat, runner, the composition, close the stream.
+
+    The one function both call sites use. Its keyword arguments are the things
+    a container otherwise takes from its environment -- the runner, the log bus,
+    the database and the object store -- passed in rather than read from `env`
+    so the entrypoint is testable without a container, exactly as
+    `run_with_worktree` already allows.
+
+    The heartbeat is taken **here**, inside whichever process does the work, so
+    the reaper's crash detection measures the thing that is actually working
+    rather than a thread in a process that may be fine while the run is not. It
+    wraps hydrate too: the lease is otherwise refreshed only at step boundaries,
+    and `npm ci` on a cold cache outlasts the TTL easily.
+    """
+    bus = bus or bus_from_env()
     emit = bus.emitter(run_id)
+    runner = runner or make_runner()
+    started = time.monotonic()
+    try:
+        # Inside the `try`, so a failure here still closes the stream a reader
+        # is waiting on rather than leaving it open on a run nothing is driving.
+        _restore_session(run_id, emit, session_factory=session_factory, store=store)
+        with heartbeat_during(run_id, session_factory=session_factory):
+            run_with_worktree(
+                run_id,
+                emit,
+                runner,
+                session_factory=session_factory,
+                store=store,
+            )
+    finally:
+        # Both in a `finally`, so every way out of a run records what it cost
+        # and leaves the agent's session where a resume can find it. A pause
+        # does not come through here at all -- its container is killed outright
+        # -- which is why the session is archived at each step boundary too.
+        _persist_session(run_id, emit, session_factory=session_factory, store=store)
+        _record_cost(run_id, runner, started, session_factory=session_factory)
+        bus.close(run_id)
 
-    def _target() -> None:
-        try:
-            # The lease is otherwise refreshed only at step boundaries, so a step
-            # longer than the TTL would look like a crash to the reaper. It wraps
-            # hydrate too: `npm ci` on a cold cache outlasts the TTL easily.
-            with heartbeat_during(run_id):
-                run_with_worktree(run_id, emit, make_runner())
-        finally:
-            bus.close(run_id)
 
-    threading.Thread(target=_target, name=f"run-{run_id}", daemon=True).start()
+def _restore_session(
+    run_id: int,
+    emit: Emit,
+    *,
+    session_factory: SessionFactory,
+    store: Storage | None,
+) -> None:
+    """Put a resumed run's agent session back before the pipeline starts.
+
+    Before, rather than inside, the composition: the CLI is invoked by the first
+    step, and the session has to be on disk by then. A run with no recorded
+    session is a first run and says nothing -- a line about continuity on every
+    fresh run would be noise.
+
+    If the restore fails the run continues **without** continuity, and the
+    recorded session id is cleared so the next step does not tell the CLI to
+    `--resume` a session that is not there (a failed step rather than a
+    forgotten exploration).
+    """
+    with session_factory() as session:
+        run = repo.get_run(session, run_id)
+        if not run.claude_session_id:
+            return
+        if agent_session.restore(
+            session, run, store or storage.from_env(), emit=emit
+        ):
+            return
+        repo.clear_session_id(session, run_id)
+
+
+def _persist_session(
+    run_id: int,
+    emit: Emit,
+    *,
+    session_factory: SessionFactory,
+    store: Storage | None,
+) -> None:
+    """Archive the agent's session as this run's reserved artifact.
+
+    Never allowed to fail the run: the tree is the carrier of the work, and the
+    session is the context for continuing it.
+    """
+    try:
+        with session_factory() as session:
+            run = repo.get_run(session, run_id)
+            agent_session.save(session, run, store or storage.from_env(), emit=emit)
+    except Exception:  # pragma: no cover - never lose a run over its session
+        log.warning("could not persist the session of run %s", run_id, exc_info=True)
+
+
+def _record_cost(
+    run_id: int,
+    runner: Runner,
+    started: float,
+    *,
+    session_factory: SessionFactory,
+) -> None:
+    """What the run spent of money and sandbox time, on the row.
+
+    In a `finally`, so every path through the composition records it -- success,
+    failure, pause and stop alike. A sandbox killed outright records nothing,
+    which is the case the lease reaper reconciles and the one case where "what
+    did it cost?" has no answer worth inventing.
+
+    Never allowed to fail the run: accounting is not the work.
+    """
+    try:
+        with session_factory() as session:
+            repo.record_run_cost(
+                session,
+                run_id,
+                spend_usd=float(getattr(runner, "spent_usd", 0.0) or 0.0),
+                sandbox_seconds=int(time.monotonic() - started),
+            )
+    except Exception:  # pragma: no cover - never lose a run over a cost column
+        log.warning("could not record the cost of run %s", run_id, exc_info=True)
+
+
+def launch_run(run_id: int) -> None:
+    """Start the pipeline for run_id on a daemon thread.
+
+    The thread call site. `QA_SANDBOX=thread` selects it (app/sandbox/dispatch.py);
+    it keeps CI fast and token-free and it is what lets the existing suite prove
+    the behaviour did not move when the work did.
+    """
+    threading.Thread(
+        target=drive_run, args=(run_id,), name=f"run-{run_id}", daemon=True
+    ).start()

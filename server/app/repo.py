@@ -10,16 +10,17 @@ race between two starters.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import target_config
 from .domain import lease
-from .domain.status import RunStatus, assert_transition, is_live
+from .domain.status import LIVE, TERMINAL, RunStatus, assert_transition, is_live
 from .domain.steps import Step
 from .models import AppLock, Project, Run, RunStep, Target
+from .sandbox.egress import Resolver
 from .tenancy import current_tenant_id
 
 VALID_MODES = ("changed", "full")
@@ -82,6 +83,7 @@ def create_target(
     target_branch: str | None = None,
     locators: str = "",
     agent_notes: list[str] | None = None,
+    resolve: Resolver | None = None,
 ) -> Target:
     """Create a target with its configuration, validated before the insert.
 
@@ -96,6 +98,11 @@ def create_target(
     visible for `clean_fields` to tell the operator which field they mistyped.
     Creating and editing then clean through the same map, which is the part that
     matters -- a sixth field cannot reach one path and miss the other.
+
+    `resolve` is the injected DNS resolver the base-URL check uses (P4, §6).
+    It is a parameter rather than a module default because the check is
+    load-bearing and has to be testable without DNS; left unset, the real
+    resolver is used.
     """
     get_project(session, project_id)  # ensure the project exists
     cleaned = target_config.clean_fields(
@@ -106,7 +113,8 @@ def create_target(
             "target_branch": target_branch,
             "locators": locators,
             "agent_notes": agent_notes,
-        }
+        },
+        resolve=resolve,
     )
     target = Target(
         tenant_id=current_tenant_id(),
@@ -120,7 +128,9 @@ def create_target(
     return target
 
 
-def update_target_config(session: Session, target_id: int, **fields) -> Target:
+def update_target_config(
+    session: Session, target_id: int, *, resolve: Resolver | None = None, **fields
+) -> Target:
     """Change a target's editable fields, validated the same way as a create.
 
     Only the fields named are touched, so the portal's form can send one changed
@@ -129,7 +139,7 @@ def update_target_config(session: Session, target_id: int, **fields) -> Target:
     `name` is, because it is only ever a label.
     """
     target = get_target(session, target_id)
-    cleaned = target_config.clean_fields(fields)
+    cleaned = target_config.clean_fields(fields, resolve=resolve)
     for field, value in cleaned.items():
         setattr(target, field, value)
     session.commit()
@@ -291,6 +301,61 @@ def heartbeat(session: Session, run_id: int, now: datetime | None = None) -> Run
     return run
 
 
+def record_run_cost(
+    session: Session,
+    run_id: int,
+    *,
+    spend_usd: float | None = None,
+    sandbox_seconds: int | None = None,
+) -> None:
+    """What the run cost. Written once, at the end of the run (P4's limits).
+
+    Separate from the status transitions deliberately: a cost that failed to
+    record must never be able to stop a run from reaching a terminal state, and
+    a terminal state that failed to record must not be retried for the sake of
+    an accounting column.
+    """
+    run = get_run(session, run_id)
+    if spend_usd is not None:
+        run.spend_usd = spend_usd
+    if sandbox_seconds is not None:
+        run.sandbox_seconds = sandbox_seconds
+    session.commit()
+
+
+def fail_overdue_runs(
+    session: Session, *, max_age_s: float, now: datetime | None = None
+) -> list[int]:
+    """Fail every live run older than the per-run wall clock. Returns run ids.
+
+    The reaper's half of that limit (DESIGN.md §6): a run whose sandbox is gone
+    has no one left to check its own deadline, and a run still being driven is
+    stopped at its next step boundary by the runner's half
+    (app/orchestrator/limits.py). Both end the run `failed` naming the timeout,
+    with the lock freed and the last committed revision intact.
+
+    **A paused run is skipped**, like the lease reaper skips it: a deliberately
+    parked run is not a wedged agent, which is what this limit bounds.
+    """
+    now = now or lease.utcnow()
+    cutoff = now - timedelta(seconds=max_age_s)
+    overdue: list[int] = []
+    runs = session.scalars(
+        select(Run).where(Run.created_at <= cutoff, Run.status.in_(tuple(LIVE)))
+    ).all()
+    for run in runs:
+        if run.status is RunStatus.PAUSED:
+            continue
+        _fail_and_release(
+            session,
+            run,
+            f"run timed out after {max_age_s:.0f}s without finishing (reaped)",
+        )
+        overdue.append(run.id)
+    session.commit()
+    return overdue
+
+
 def reap_expired(session: Session, now: datetime | None = None) -> list[int]:
     """Fail every run whose lease has expired and free its app. Returns run ids."""
     now = now or lease.utcnow()
@@ -399,10 +464,71 @@ def fail_step(session: Session, run_id: int, step: Step, now: datetime | None = 
     session.commit()
 
 
+def set_sandbox_handle(session: Session, run_id: int, handle: str | None) -> None:
+    """Record which sandbox is executing this run (P4's dispatch seam).
+
+    Written by the launcher that dispatched it, cleared once that sandbox is
+    gone, and never interpreted here: what a handle means is the scheduler's
+    business.
+    """
+    run = get_run(session, run_id)
+    run.sandbox_handle = handle
+    session.commit()
+
+
 def set_session_id(session: Session, run_id: int, session_id: str) -> None:
     """Persist the Claude Code session id so later steps can --resume it."""
     run = get_run(session, run_id)
     run.claude_session_id = session_id
+    session.commit()
+
+
+# The statuses whose sandbox nobody is using any more. It lives here rather than
+# in domain/status.py because "idle" is a sandbox word, not a run-status one: the
+# domain knows nothing about containers, and this is the one query that asks.
+IDLE_SANDBOX = TERMINAL | {RunStatus.PAUSED}
+
+
+def idle_sandbox_runs(session: Session) -> list[int]:
+    """Runs that still name a sandbox nothing is using any more (P4).
+
+    Paused **and** terminal, because the two leave the same thing behind for
+    different reasons:
+
+    * A *paused* run reaps immediately, with no grace window (DESIGN.md §5): the
+      route that pauses a run destroys the container and clears this column
+      itself. A handle still on a paused row means that did not finish -- an API
+      that died mid-pause, or a pause that raced a dispatch.
+    * A *terminal* run always leaves one. The run container carries `AutoRemove`
+      and vanishes when the pipeline ends, but its **egress proxy** is a
+      long-running container that exits on nobody's schedule, and the process
+      that could ask for its removal is the one inside the sandbox -- which has
+      no Docker socket, by design, and needs the proxy alive until its last
+      step. So the reaper is not a net here; it is the only thing that removes
+      a finished run's proxy, and without it every completed run leaks one.
+
+    Live runs are excluded, and that is the load-bearing half: sweeping a
+    RUNNING run would destroy the container doing the work, and a PENDING one is
+    a dispatch that has not begun yet.
+    """
+    runs = session.scalars(
+        select(Run).where(
+            Run.status.in_(IDLE_SANDBOX), Run.sandbox_handle.is_not(None)
+        )
+    ).all()
+    return [run.id for run in runs]
+
+
+def clear_session_id(session: Session, run_id: int) -> None:
+    """Forget the agent session this run was carrying.
+
+    Written when a resumed run's session archive could not be restored (P4): the
+    session genuinely is gone, and a run that still named it would tell the CLI
+    to `--resume` something that does not exist -- a failed step instead of a
+    forgotten exploration.
+    """
+    run = get_run(session, run_id)
+    run.claude_session_id = None
     session.commit()
 
 

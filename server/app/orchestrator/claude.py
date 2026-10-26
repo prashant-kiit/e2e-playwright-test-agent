@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -232,8 +233,35 @@ def _summarise(event: dict) -> str | None:
 
 
 class ClaudeRunner:
+    """The real runner, and the only thing that knows what it started.
+
+    Two P4 additions, both about the limits around a run
+    (app/orchestrator/limits.py):
+
+    - **`last_cost_usd`** is read off the `result` event this already parses,
+      which is what makes the per-run budget a budget rather than a new
+      accounting system.
+    - **`abort()`** kills the process group. The CLI spawns node, which spawns
+      an MCP server, which spawns a browser; killing the one process this holds
+      would leave the expensive half running, so the child gets its own session
+      (`start_new_session`) and the whole group is signalled. A browser does not
+      stop politely, which is why this is SIGKILL rather than SIGTERM.
+    """
+
     def __init__(self, workers: str | None = None) -> None:
         self.workers = workers or os.environ.get("QA_WORKERS", "2")
+        self.last_cost_usd = 0.0
+        self._proc: subprocess.Popen | None = None
+
+    def abort(self) -> None:
+        """Kill the step's whole process group, if one is running."""
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):  # pragma: no cover
+            proc.kill()  # already gone, or no group to signal: the process will do
 
     def run_step(self, ctx: StepContext, emit: Emit) -> StepResult:
         ctx.run_dir.mkdir(parents=True, exist_ok=True)
@@ -244,6 +272,7 @@ class ClaudeRunner:
 
         session_id: str | None = None
         is_error = True
+        self.last_cost_usd = 0.0
         with session_jsonl.open("a") as jf, stderr_log.open("a") as ef:
             proc = subprocess.Popen(
                 cmd,
@@ -254,7 +283,11 @@ class ClaudeRunner:
                 stderr=ef,
                 text=True,
                 bufsize=1,
+                # Its own process group, so `abort()` can take the browser with
+                # it rather than orphaning the expensive half of the step.
+                start_new_session=True,
             )
+            self._proc = proc
             assert proc.stdout is not None
             for line in proc.stdout:
                 jf.write(line)
@@ -270,6 +303,7 @@ class ClaudeRunner:
                     session_id = event["session_id"]
                 if event.get("type") == "result":
                     is_error = bool(event.get("is_error", True))
+                    self.last_cost_usd = float(event.get("total_cost_usd") or 0.0)
                 summary = _summarise(event)
                 if summary:
                     emit(f"[{ctx.step.value}] {summary}")

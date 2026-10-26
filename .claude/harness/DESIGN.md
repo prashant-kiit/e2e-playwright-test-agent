@@ -99,6 +99,16 @@ met code:**
   keeps `test_migrations_match_the_models` a meaningful signal rather than a column
   inventory.
 
+  > **P4 built the sandbox and left this deferred, now with its own reason rather than a
+  > forward reference.** Nothing in P4 reads a bundle. Revisions reconstruct from deduped
+  > content blobs; a crash commits nothing by design (invariant 4), so there is no mid-step
+  > history worth recovering; and what a resumed run actually needs is the **agent
+  > session**, which P4 persists as a run artifact (§5) — a tar of the CLI's session store,
+  > not a git history. The worktree is still a plain directory with no git in it, so a
+  > bundle would mean introducing a second history for the sake of a column nobody reads,
+  > which is the thing this design rejects. P2's rule — add only columns something writes —
+  > is the one being kept.
+
 **The head revision is derived, not stored**: it is the row with the greatest `rev` for
 a target. There is no mutable `targets.head_revision_id`, because revisions are
 append-only and a second place recording "which is current" is a second thing that can
@@ -215,6 +225,31 @@ queued → hydrating → running → paused(live) → reaped → resuming → ru
   snapshots (git bundle + `session.jsonl`) to SeaweedFS and reaps it. Resume rehydrates
   and re-seeds the Claude session from the persisted `session.jsonl` rather than a live
   process. A SaaS cannot pay for idle sandboxes.
+
+  > **Amended by P4: pause reaps immediately, with no grace window.** The route that
+  > pauses a run destroys its container there and then (`app/api.py`) and moves the row
+  > to `paused` itself, because the process that would otherwise have done it is the one
+  > just killed; the handle is cleared with it, and the reaper's sweep for idle sandboxes
+  > is the net under that rather than the way it normally happens. Waiting for the next
+  > step boundary would be a grace window by another name — an agent holding a browser
+  > is minutes of billing away from one. The reason it costs nothing is P3: resume
+  > already re-hydrates from the head revision and that path is tested, so an idle
+  > sandbox's only advantage — a warm worktree — is one the harness no longer needs. "A
+  > SaaS cannot pay for idle sandboxes" is the same sentence it always was; the grace
+  > window was only ever buying the worktree.
+  >
+  > What a paused run must not lose is the **agent session**, and that is now explicit
+  > rather than incidental: `--resume` worked only because the CLI's session store
+  > happened to sit on the host that started the run. The session directory is archived
+  > as a run artifact under a reserved name (`<run_key>/agent-session.tar.gz`) **at every
+  > step boundary** and at the end of every run, and restored into the next container
+  > before the CLI is invoked. At the boundary and not only on the way out, because a
+  > sandbox killed outright archives nothing: the boundary is the last moment the session
+  > is known good, so a pause — like a crash — costs the exploration of the step it
+  > interrupted and no more. **A failed restore does not fail the run**: it continues
+  > without session continuity and says so in the log, because the tree is the carrier of
+  > the work and the exploration is only context. Not a git bundle: see §3 on
+  > `bundle_key`.
 - **Crash** commits nothing (invariant 4). The run goes `failed` with the last committed
   revision intact and resumes **from the last completed step boundary**, never mid-step —
   that is what keeps "retries converge" true.
@@ -266,6 +301,35 @@ API, and the npm registry. Link-local and private ranges (`169.254.169.254`, RFC
 `localhost`) are blocked outright. The registered `baseURL` is validated to resolve to a
 public address **at save time and again at run time** (DNS rebinding). Open egress plus
 an LLM plus your cloud network is not a combination that can be patched later.
+
+**Built by P4, with two things this paragraph did not say.**
+
+*Enforced at the network layer, not by environment.* The sandbox sits on an internal
+network with no default route, and an allowlisting `CONNECT` proxy — one per run, holding
+that run's allowlist — is the only way out. An allowlist the agent can unset is a
+convention and not a control, so unsetting `HTTP_PROXY` closes the only door rather than
+opening the internet. **The proxy resolves, not the sandbox**: an internal network cannot
+reach a resolver and `CONNECT` carries a hostname, so name resolution happens in the one
+process that also enforces policy, and the tunnel is opened to the address that was
+verified rather than to the name again. One function builds the allowlist from the
+target's row (`app/sandbox/egress.py`), so "what can this run reach?" is one place to
+read, and a run against one target structurally cannot reach another's host. The agent
+runtime's telemetry and error reporting are **disabled by environment rather than
+allowlisted**, so the list stays the length of what a run genuinely needs.
+
+*The allowlist includes the internal stores, and that is a decision with a successor.*
+Postgres and the object store are reachable from the sandbox network by name, because
+hydrate reads the head revision and ingest commits N+1 — those **are** the run. So a
+sandbox holds `DATABASE_URL` and the `S3_*` credentials, and that is **accepted exposure
+for this phase, deliberately**. The credential rule above is specifically about GitHub,
+for a stated reason: delivery is human-approved and happens in the control plane, so the
+push need not happen where the agent is — and after P4 it cannot, because no sandbox
+environment, image or compose service carries a GitHub credential and no module reachable
+from the sandbox entrypoint can read one (both enforced by structural tests). The store
+credentials have no such argument available to them; what they have is a successor.
+**P5 replaces them with a narrow, run-scoped internal control-plane API**, where the token
+that authorizes one run's target is the same mechanism that authorizes one tenant's data.
+Bundling that into P4 would have been building P5's tenant scoping early and worse.
 
 ### Quotas and timeouts
 
@@ -373,6 +437,31 @@ when?" must be answerable from a table, not from logs.
 - The SSE log bus stays for the live run view; `session.jsonl` remains the durable
   per-run record.
 
+**Amended by P4: the live log is a Postgres table.** The sentence above said "the SSE log
+bus stays", and it does — but the bus behind it stopped being an in-process dictionary,
+because P4 executes a run in a container that cannot publish into the API's memory. It was
+already the wrong place for two reasons that had nothing to do with containers: a restart
+erased the history of every run that had ever streamed, including finished ones, and only
+the replica that started a run could stream it.
+
+```
+run_log(run_id, seq, line, at)      PRIMARY KEY (run_id, seq)
+```
+
+`LogBus` is a protocol with two implementations and one read model — append a line, read
+forward from a cursor. The in-memory one serves the thread path and the tests; the
+Postgres-backed one serves anything out of process. `Emit` did not change shape, so the
+driver, the runners and the step-boundary hook were untouched by the move. `seq` is counted
+by the **one writer per run** rather than by a database identity, so a second writer loses
+on the primary key; the API never publishes on behalf of a run it does not execute.
+`/runs/{id}/events` reads forward from a cursor with the keepalive it already sent, so a
+late subscriber gets the run's real history and any replica can stream any run.
+
+**These rows are the live view and its recent history, not the archive.** `session.jsonl`
+is still the durable per-run record, and the reaper loop prunes `run_log` past a retention
+window (7 days by default, matching §9's reaped-snapshot retention) — because an
+append-only table nobody prunes is the slowest kind of outage.
+
 ---
 
 ## 11. Module map (shell → Python)
@@ -441,10 +530,20 @@ not a P1 fix: see the queue note in §5.
   in-process, so a live run is still pinned to the replica that started it. That is P4's job,
   and `tests/test_no_repo_mount.py` is what keeps the mount from coming back in the meantime.
 - The runner moves out of a thread in the API process ([launcher.py](../../server/app/launcher.py))
-  into a container-per-run sandbox. **P4.** It inherits hydrate, ingest and teardown as three
-  plain functions the launcher composes around the pipeline, a worktree path travelling
-  through `StepContext`, and dependency install already isolated as the single step a
-  prebaked image replaces.
+  into a container-per-run sandbox. **Done (P4.)** It inherited exactly what P3 left it:
+  hydrate, ingest and teardown as three plain functions the launcher composes around the
+  pipeline, a worktree path travelling through `StepContext`, and dependency install
+  isolated as the single step a prebaked image makes fast. The composition was not
+  rewritten — `drive_run` is one function with two call sites, a daemon thread
+  (`QA_SANDBOX=thread`, for CI and development) and a container
+  (`QA_SANDBOX=docker`, `python -m app.sandbox.run <run_id>`), and a structural test fails
+  if a second pipeline appears. The egress and isolation half of §6 came with it: an
+  internal network, a per-run allowlisting proxy, no GitHub credential, and per-step,
+  per-run and per-spend limits.
+
+  The thread path is kept on purpose. It is the same composition invoked without a
+  container, it keeps CI fast and token-free, and it is what lets the existing suite prove
+  the behaviour did not move when the work did.
 - Delivery stops being a shell script a human runs and becomes an approved portal action.
   **Done (P1 for the mechanism, P3 for the reads):** it works through one injected `Tools`
   value, pushes a materialized head revision, and records `delivered_sha`.
@@ -514,3 +613,33 @@ one hook by the caller. Recorded here because the natural way to write P2 is to 
 | 21 | Immutable `audit_log` for every control-plane mutation |
 | 22 | Five-phase migration; `tenant_id` carried from P2 |
 | 23 | Infra entries carry `(source, destination)` from P3; a delivered workflow is never a live workflow of the harness repo |
+| 24 | `get_launcher` stays the one dispatch seam; one `Scheduler` protocol behind it, Docker the only implementation (P4) |
+| 25 | Egress enforced at the network layer: an internal network plus a per-run allowlisting proxy that resolves (P4) |
+| 26 | The live log is a Postgres table read by cursor; `session.jsonl` is still the durable record (P4) |
+| 27 | Pause reaps immediately — the route that pauses destroys the container, not the next step boundary; the **agent session** is a run artifact archived at every boundary, and a failed restore loses context rather than the run (P4) |
+
+---
+
+## 15. Deferrals, with their reasons
+
+Each of these is a decision, not an omission. They are listed together so a later reader
+does not have to reconstruct which were considered.
+
+| Deferred | To | Why |
+|---|---|---|
+| **Git bundles and `bundle_key`** | not scheduled | Nothing reads a bundle. Revisions reconstruct from deduped content blobs, a crash commits nothing by design, and a resumed run needs the *agent session* — which P4 persists as a run artifact — rather than mid-step git history. The worktree is a plain directory; a bundle would mean a second history nobody reads (§3) |
+| **Per-tenant concurrency caps and monthly run quotas** | P5 | They are enforced at enqueue, for tenants, and there is one tenant. What bounds a wedged agent is the per-run limits, and P4 added those (§6) |
+| **The run queue and batch runs** | not scheduled | A second run on a busy target is refused with a 409, not queued. The queue is a scheduler *above* the lock trio, and §5 says to leave that trio alone |
+| **A K8s or Fargate scheduler** | when there is a cluster | The dispatch seam exists for them; Docker is the one implementation P4 ships, and the dev stack's socket mount is what the seam exists to replace (§6) |
+| **The run-scoped internal control-plane API** | P5 | It would remove `DATABASE_URL` and the `S3_*` credentials from a sandbox. It is the same mechanism as P5's tenant-scoped reads, and building it earlier would have meant building that worse (§6) |
+| **KMS envelope encryption of PATs; prompts in Postgres with tenant overrides** | P5 | Both are per-tenant mechanisms, and there is one tenant (§8, §12) |
+| **`audit_log`** | P5 | Delivery approvals are the thing it exists to record, and the approving actor is a per-tenant user (§10) |
+
+### What P5 inherits
+
+- **The dispatch seam**, so tenant-aware placement and quotas are enforced where a run is
+  dispatched rather than inside the lock trio.
+- **One allowlist builder**, so a tenant's allowlist is a change of input rather than of code.
+- **A log table already carrying `run_id` and `tenant_id`**, so tenant scoping is a filter.
+- **The store-credential decision**, written down in §6 with its successor named, so P5
+  inherits a decision rather than a surprise.

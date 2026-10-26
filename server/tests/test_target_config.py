@@ -99,3 +99,122 @@ def test_a_refused_write_leaves_no_target_behind(session):
     with pytest.raises(target_config.ConfigError):
         create_target(session, project.id, app="never", base_url="nope")
     assert [t.app for t in repo.list_targets(session)] == []
+
+
+# --- save-time resolution: the public-address rule, at the write path ------
+#
+# P4 brings §6's egress rules, and one half of "what can this run reach?" is a
+# question about the target row: a base URL that does not resolve to a public
+# address is refused **when it is saved**, where the operator who typed it is
+# still around to fix it, rather than hours later when a run fails. The
+# docstring above said this was P4's; this is P4.
+#
+# Resolution is injected, never performed against real DNS: a test that depends
+# on what a name resolves to today is a test that fails on a train.
+
+def _resolves_to(**mapping):
+    """A resolver over a fixed table. An unknown name does not resolve."""
+    from app.sandbox import egress
+
+    def resolve(host: str) -> list[str]:
+        try:
+            return mapping[host.replace(".", "_")]
+        except KeyError as exc:
+            raise egress.ResolutionError(f"{host} does not resolve") from exc
+
+    return resolve
+
+
+def test_a_base_url_resolving_publicly_is_saved(session):
+    project = _project(session)
+    resolve = _resolves_to(shop_example_com=["93.184.216.34"])
+
+    target = create_target(
+        session, project.id, base_url="https://shop.example.com", resolve=resolve
+    )
+
+    assert target.base_url == "https://shop.example.com"
+
+
+def test_a_base_url_resolving_to_a_private_address_is_refused_at_save(session):
+    project = _project(session)
+    resolve = _resolves_to(internal_example_com=["10.1.2.3"])
+
+    with pytest.raises(target_config.ConfigError) as exc:
+        create_target(
+            session, project.id, base_url="https://internal.example.com", resolve=resolve
+        )
+
+    assert "10.1.2.3" in str(exc.value), "the message says why"
+    assert [t.app for t in repo.list_targets(session)] == [], "nothing was written"
+
+
+def test_a_base_url_naming_the_metadata_endpoint_is_refused_at_save(session):
+    project = _project(session)
+
+    with pytest.raises(target_config.ConfigError):
+        create_target(
+            session,
+            project.id,
+            base_url="http://169.254.169.254/latest/meta-data/",
+            resolve=_resolves_to(),
+        )
+
+
+def test_a_base_url_that_does_not_resolve_is_refused_at_save(session):
+    project = _project(session)
+
+    with pytest.raises(target_config.ConfigError) as exc:
+        create_target(
+            session, project.id, base_url="https://nope.example.com", resolve=_resolves_to()
+        )
+
+    assert "resolve" in str(exc.value)
+
+
+def test_editing_a_base_url_resolves_it_again(session):
+    """The same refusal on the edit path, through the same cleaner map."""
+    project = _project(session)
+    resolve = _resolves_to(
+        demo_example_com=["93.184.216.34"], internal_example_com=["192.168.0.9"]
+    )
+    target = create_target(session, project.id, resolve=resolve)
+
+    with pytest.raises(target_config.ConfigError):
+        repo.update_target_config(
+            session, target.id, base_url="https://internal.example.com", resolve=resolve
+        )
+
+    session.expire_all()
+    assert repo.get_target(session, target.id).base_url == "https://demo.example.com"
+
+
+def test_an_edit_that_does_not_touch_the_base_url_resolves_nothing(session):
+    """A `locators` edit must not need DNS to succeed."""
+    project = _project(session)
+    target = create_target(
+        session, project.id, resolve=_resolves_to(demo_example_com=["93.184.216.34"])
+    )
+
+    def refuse(host):  # pragma: no cover - called means the test failed
+        raise AssertionError(f"resolved {host} for an edit that changed no URL")
+
+    updated = repo.update_target_config(
+        session, target.id, locators="roles only", resolve=refuse
+    )
+
+    assert updated.locators == "roles only"
+
+
+def test_the_shape_check_runs_before_resolution(session):
+    """A URL that is not a URL has no host to resolve, and the operator should
+    be told the thing that is actually wrong with it."""
+    project = _project(session)
+
+    def refuse(host):  # pragma: no cover - called means the test failed
+        raise AssertionError(f"resolved {host!r} from a URL with no host")
+
+    with pytest.raises(target_config.ConfigError) as exc:
+        create_target(session, project.id, base_url="not-a-url", resolve=refuse)
+
+    assert "absolute http(s) URL" in str(exc.value)
