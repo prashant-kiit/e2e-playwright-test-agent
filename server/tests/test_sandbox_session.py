@@ -149,12 +149,18 @@ def test_the_archive_is_rewritten_rather_than_duplicated_on_resume(
     """One reserved name per run, versioned: the newest session is the one a
     resume restores, and the history is kept the way every other artifact's is.
 
-    Versioned on *content*, like the artifact sweep: a resumed run whose agent
-    explored further archives a new version, and one that changed nothing does
-    not manufacture one."""
+    Versioned on *content*, like the artifact sweep, so the count is the number
+    of boundaries whose bytes differed and not one per attempt -- the session is
+    archived at every step boundary (DESIGN.md §5), which is why this asserts
+    that a resume moved the version on rather than naming a number. The
+    no-change half of the rule is the next test."""
     run_id, _run_key, _target_id, store = run_env
 
     _drive(session_factory, run_id, store, _PausesAfter(Step.PLAN, session_factory))
+    paused = _session_artifacts(session_factory, run_id)
+    assert len(paused) == 1, "the interrupted attempt left one archive"
+    before = paused[0].version
+
     with session_factory() as s:
         repo.resume_run(s, run_id)
 
@@ -169,7 +175,30 @@ def test_the_archive_is_rewritten_rather_than_duplicated_on_resume(
 
     artifacts = _session_artifacts(session_factory, run_id)
     assert len(artifacts) == 1, "one reserved name, not one archive per attempt"
-    assert artifacts[0].version == 2
+    assert artifacts[0].version > before, (
+        "a resumed run that explored further archives a new version"
+    )
+
+
+def test_a_resume_that_changes_nothing_does_not_manufacture_a_version(
+    run_env, session_factory, config_dir
+):
+    """The other half of "versioned on content", and the half the per-boundary
+    archive made load-bearing: the archive is now written at *every* step
+    boundary, so an agent that explores nothing would bump the version once per
+    step for identical bytes if the digest were not what decides."""
+    run_id, _run_key, _target_id, store = run_env
+
+    _drive(session_factory, run_id, store, _PausesAfter(Step.PLAN, session_factory))
+    before = _session_artifacts(session_factory, run_id)[0].version
+
+    with session_factory() as s:
+        repo.resume_run(s, run_id)
+    _drive(session_factory, run_id, store)  # the plain fake writes no session state
+
+    artifacts = _session_artifacts(session_factory, run_id)
+    assert len(artifacts) == 1
+    assert artifacts[0].version == before, "identical bytes are not a new version"
 
 
 def test_nothing_is_archived_where_there_is_no_sandbox_session_directory(

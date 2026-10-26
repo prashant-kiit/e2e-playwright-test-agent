@@ -34,7 +34,14 @@ services:
   seaweedfs:
     # Open-source, freely-pullable S3-compatible store (MinIO was dropped).
     image: chrislusf/seaweedfs:latest
-    command: server -s3 -s3.config=/etc/seaweedfs/s3.json -dir=/data
+    # `-ip.bind=0.0.0.0` is load-bearing, not tidiness. SeaweedFS binds one
+    # interface, and this container is on two networks: without it the S3 port
+    # comes up on whichever address it picked -- observed as qa-sandbox only --
+    # and is a closed socket on the other. That makes the store unreachable
+    # from the API (and from the host's published port) while the healthcheck,
+    # which curls localhost, still reports healthy. Postgres is immune because
+    # it binds 0.0.0.0 already; this makes the store behave the same way.
+    command: server -ip.bind=0.0.0.0 -s3 -s3.config=/etc/seaweedfs/s3.json -dir=/data
     volumes:
       - seaweeddata:/data
       - ./docker/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro

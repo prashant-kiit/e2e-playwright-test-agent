@@ -32,7 +32,7 @@ dev = [
 testpaths = ["tests"]
 addopts = "-q"
 markers = [
-    # The two tests that really start containers (tests/test_docker_sandbox.py).
+    # The container tests (tests/test_docker_sandbox.py).
     # They run in CI rather than skipping -- QA_REQUIRE_DOCKER=1 turns a missing
     # daemon into a failure there, the way QA_REQUIRE_DB does for Postgres --
     # and the marker is for running or excluding them deliberately in local work.

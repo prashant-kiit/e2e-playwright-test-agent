@@ -341,3 +341,56 @@ def test_pausing_a_run_without_a_sandbox_still_asks_the_boundary(client, session
     assert r.status_code == 200
     assert r.json()["status"] == RunStatus.RUNNING.value
     assert r.json()["pause_requested"] is True
+
+
+# --- a sandbox nothing is using -----------------------------------------
+#
+# Found by watching a real run finish rather than by a test: the run container
+# carries `AutoRemove` and vanishes, but its egress proxy is a long-running
+# container that exits on nobody's schedule, and only `destroy` removes it. With
+# the sweep limited to paused runs, **every completed run left a proxy running
+# for ever** -- one idle container per run, which is exactly what "a finished run
+# leaves nothing to pay for" was supposed to rule out. No test caught it because
+# the seam tests use a recording scheduler and the container test runs with
+# `with_proxy=False`.
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.STOPPED],
+)
+def test_a_finished_run_that_still_names_a_sandbox_is_the_reapers_business(
+    client, session, scheduler, terminal
+):
+    """Terminal, not just paused. The run's own process cannot do this: it is
+    inside the sandbox, it has no Docker socket by design, and the proxy has to
+    outlive it long enough to serve the last step."""
+    target_id = _target(client)
+    run = _start(client, target_id)
+    repo.begin_run(session, run["id"])
+    if terminal is RunStatus.COMPLETED:
+        repo.complete_run(session, run["id"])
+    elif terminal is RunStatus.FAILED:
+        repo.fail_run(session, run["id"], "whatever ended it")
+    else:
+        repo.stop_run(session, run["id"])
+
+    assert repo.get_run(session, run["id"]).status is terminal
+    assert repo.idle_sandbox_runs(session) == [run["id"]], (
+        "a terminal run's proxy is nobody else's to remove"
+    )
+
+
+def test_a_live_run_is_never_swept(client, session, scheduler):
+    """The other side of it, and the one that would be a disaster: sweeping a
+    RUNNING run would destroy the container doing the work. A PENDING run is a
+    dispatch that has not begun yet, which is the same mistake a moment earlier.
+    """
+    target_id = _target(client)
+    run = _start(client, target_id)
+
+    assert repo.get_run(session, run["id"]).status is RunStatus.PENDING
+    assert repo.idle_sandbox_runs(session) == [], "a pending dispatch is not idle"
+
+    repo.begin_run(session, run["id"])
+    assert repo.idle_sandbox_runs(session) == [], "a running run is not idle"

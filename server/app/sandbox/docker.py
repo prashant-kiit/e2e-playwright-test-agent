@@ -145,6 +145,10 @@ class DockerScheduler:
         # again at connect time -- this one exists so the run fails *before* it
         # costs tokens, with a reason an operator can read.
         egress.resolve_public(egress.host_of(cfg.base_url), resolve=self._resolve)
+        # A precondition of the sandbox, not of the proxy: it has to hold on the
+        # `with_proxy=False` path too, which is why it is here and not beside
+        # the egress network it is the counterpart to.
+        self._require_sandbox_network()
 
         name = RUN_PREFIX + run_key
         self._remove(name)  # a resumed run reuses its key; no stale namesake
@@ -193,6 +197,7 @@ class DockerScheduler:
         """
         name = PROXY_PREFIX + run_key
         self._remove(name)
+        self._ensure_egress_network()
         self._create_and_start(
             name,
             image=self.settings.proxy_image,
@@ -206,6 +211,63 @@ class DockerScheduler:
         )
         self._connect(self.settings.network, name)
         return f"http://{name}:{PROXY_PORT}"
+
+    # --- the networks ----------------------------------------------------
+
+    def _require_sandbox_network(self) -> None:
+        """Fail unless the sandbox network already exists -- never create it.
+
+        The counterpart to `_ensure_egress_network`, and the asymmetry between
+        the two is deliberate. A network Docker creates by default is **not**
+        `internal`, so inventing `qa-sandbox` here would give every sandbox a
+        default route and remove the whole egress control -- silently, because
+        nothing would fail. It would also carry none of the stores, so hydrate
+        would fail anyway. A missing sandbox network is a broken stack, and the
+        honest thing to do with it is say so, with the reason.
+
+        Checked in `dispatch` rather than beside the proxy, because it is a
+        precondition of the *sandbox* and must hold on the path that runs
+        without a proxy too.
+        """
+        response = self._request("GET", f"/networks/{self.settings.network}")
+        if response.status_code == 404:
+            raise DockerError(
+                f"the sandbox network {self.settings.network!r} does not exist. "
+                "It is not created for you on purpose: a default network is not "
+                "`internal`, so creating one would give every sandbox a default "
+                "route and remove the egress control. Bring the stack up "
+                "(`make up`), which declares it with `internal: true`."
+            )
+
+    def _ensure_egress_network(self) -> None:
+        """Create the egress network if it is not there, idempotently.
+
+        Compose *declares* `qa-egress` but never creates it: the only service
+        attached to it is the `never-started` egress-proxy, and Compose skips
+        the networks of a service a profile excludes. So on a laptop where the
+        stack was brought up with `make up`, the first run dispatched would fail
+        with "network qa-egress not found" -- which is #23's "no extra steps",
+        broken.
+
+        Safe to create, unlike the sandbox network: `qa-egress` is an ordinary
+        bridge whose only job is to be a way out, and being a plain bridge is
+        the whole of what it has to be. See `_require_sandbox_network`.
+        """
+        response = self._request("GET", f"/networks/{self.settings.egress_network}")
+        if response.status_code != 404:
+            return
+        log.info("creating the egress network %s", self.settings.egress_network)
+        created = self._request(
+            "POST",
+            "/networks/create",
+            json={"Name": self.settings.egress_network, "Driver": "bridge"},
+        )
+        # 409 is another dispatch winning the race, which is success here.
+        if created.status_code >= 400 and created.status_code != 409:
+            raise DockerError(
+                f"could not create the egress network "
+                f"{self.settings.egress_network}: {_message(created)}"
+            )
 
     # --- the Docker Engine API ------------------------------------------
 

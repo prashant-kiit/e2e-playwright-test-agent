@@ -24,13 +24,16 @@ lock from being freed:
     the reaper's half of the limit: a run whose sandbox is gone has nobody left
     to check its own deadline, and `app/orchestrator/limits.py` is the half that
     stops a run still being driven from starting another step;
-  - a **paused** run that still names a sandbox has it destroyed and the column
-    cleared. Pause reaps immediately, with no grace window (§5): the route that
-    pauses a run kills the container itself, so a handle still on a paused row
+  - a **paused or finished** run that still names a sandbox has it destroyed
+    and the column cleared. For a paused run this is a net: pause reaps
+    immediately, with no grace window (§5), so a handle still on a paused row
     means that did not happen -- an API that died mid-pause, or a pause that
-    raced a dispatch. This is the net under it, not the way it normally works,
-    and it is what makes "no sandbox is left running for a paused run" true
-    rather than intended.
+    raced a dispatch. For a *finished* run it is the only mechanism there is.
+    The run container carries `AutoRemove` and vanishes on its own, but the
+    run's **egress proxy** is long-running and exits on nobody's schedule, and
+    the process that finished the run is inside the sandbox, has no Docker
+    socket by design, and needs that proxy alive until its last step. Without
+    this sweep every completed run leaves an idle proxy behind for ever.
 
 `reap_sandbox` is how a reaped run's container stops costing money. It is a
 callback rather than an import because the dispatch seam imports the launcher
@@ -145,8 +148,10 @@ async def reaper_loop(
                         log.warning("reaping the sandbox of run %s failed", run_id)
                         continue
                     if run_id in idle:
-                        # A paused run has no sandbox once this has run, and the
-                        # row should say so: the stop path reads that column.
+                        # A paused or finished run has no sandbox once this has
+                        # run, and the row should say so: the stop path reads
+                        # that column, and a handle left on the row would make
+                        # the next sweep do this all over again.
                         await asyncio.to_thread(_forget_sandbox, session_factory, run_id)
             try:
                 await asyncio.to_thread(_prune_once, session_factory)
@@ -177,7 +182,7 @@ def _idle_sandboxes(session_factory=SessionLocal) -> list[int]:
 
 
 def _forget_sandbox(session_factory, run_id: int) -> None:
-    """A paused run has no sandbox once its container is gone; the row says so.
+    """A run has no sandbox once its container is gone; the row says so.
 
     Both arguments required: a default `run_id` here would be a sentinel that
     silently cleared nothing, and the other helpers' `session_factory` default

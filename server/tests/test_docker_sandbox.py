@@ -383,3 +383,95 @@ def test_from_the_sandbox_network_only_the_allowlist_is_reachable(runtime_image)
         _docker("rm", "-f", proxy_name, check=False)
         _docker("network", "rm", internal, check=False)
         _docker("network", "rm", egress_net, check=False)
+
+
+# --- the networks a dispatch needs --------------------------------------
+#
+# Found by running a run from the portal rather than by a test: Compose
+# *declares* `qa-egress` but never creates it, because the only service on it is
+# the `never-started` egress-proxy, and Compose skips the networks of a service
+# a profile excludes. Every run therefore failed at dispatch with "network
+# qa-egress not found" -- #23's "no extra steps", broken. These two pin the fix
+# and, more importantly, its asymmetry.
+
+
+@pytest.mark.docker
+def test_the_egress_network_is_created_when_it_is_missing():
+    """The proxy's way out is an ordinary bridge, so a dispatch may create it,
+    and must, or `make up` does not give container-per-run on a laptop."""
+    name = f"qa-egress-test-{uuid.uuid4().hex[:8]}"
+    scheduler = sandbox_docker.DockerScheduler(
+        sandbox_docker.DockerSettings(network="bridge", egress_network=name),
+        resolve=public_resolver,
+    )
+    assert _docker("network", "inspect", name, check=False).returncode != 0, (
+        "the premise: it is not there yet"
+    )
+    try:
+        scheduler._ensure_egress_network()
+        assert _docker("network", "inspect", name, check=False).returncode == 0
+        # Idempotent, because every dispatch calls it.
+        scheduler._ensure_egress_network()
+        assert _docker("network", "inspect", name, check=False).returncode == 0
+    finally:
+        _docker("network", "rm", name, check=False)
+
+
+@pytest.mark.docker
+def test_a_missing_sandbox_network_is_refused_and_not_created():
+    """The asymmetry, and the reason it is not a tidy-up away from being gone:
+    a network Docker creates by default is **not** `internal`, so inventing
+    `qa-sandbox` here would hand every sandbox a default route and remove the
+    egress control without failing anything. A broken stack is the honest
+    answer."""
+    missing = f"qa-sandbox-absent-{uuid.uuid4().hex[:8]}"
+    egress_name = f"qa-egress-test-{uuid.uuid4().hex[:8]}"
+    scheduler = sandbox_docker.DockerScheduler(
+        sandbox_docker.DockerSettings(network=missing, egress_network=egress_name),
+        resolve=public_resolver,
+    )
+    try:
+        with pytest.raises(sandbox_docker.DockerError) as caught:
+            scheduler._require_sandbox_network()
+        assert missing in str(caught.value)
+        assert "internal" in str(caught.value), "it says why, not just that"
+        assert _docker("network", "inspect", missing, check=False).returncode != 0, (
+            "it did not create the one it refused"
+        )
+        assert _docker("network", "inspect", egress_name, check=False).returncode != 0, (
+            "and it creates nothing at all: this method only ever refuses"
+        )
+    finally:
+        _docker("network", "rm", missing, check=False)
+        _docker("network", "rm", egress_name, check=False)
+
+
+@pytest.mark.docker
+def test_dispatch_checks_the_sandbox_network_even_with_no_proxy(
+    seeded_run, session_factory
+):
+    """Where the check is called from, not what it does.
+
+    The first fix put this check inside `_start_proxy`, so the `with_proxy=False`
+    path never ran it -- the one configuration with no proxy to make a missing
+    network loud was the one configuration that skipped the guard. The two tests
+    above call the methods directly and would both stay green if the line in
+    `dispatch` were deleted, so this one goes through `dispatch` and asserts the
+    run is refused *before* a container is created.
+    """
+    run_id, run_key, _target_id = seeded_run
+    missing = f"qa-sandbox-absent-{uuid.uuid4().hex[:8]}"
+    scheduler = sandbox_docker.DockerScheduler(
+        sandbox_docker.DockerSettings(network=missing, with_proxy=False),
+        session_factory=session_factory,
+        resolve=public_resolver,
+    )
+
+    with pytest.raises(sandbox_docker.DockerError) as caught:
+        scheduler.dispatch(run_id)
+    assert missing in str(caught.value)
+    listed = _docker(
+        "ps", "-a", "--filter", f"name={sandbox_docker.RUN_PREFIX}{run_key}",
+        "--format", "{{.Names}}",
+    ).stdout
+    assert not listed.strip(), "it failed before starting anything"

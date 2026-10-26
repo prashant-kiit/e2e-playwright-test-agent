@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from . import target_config
 from .domain import lease
-from .domain.status import LIVE, RunStatus, assert_transition, is_live
+from .domain.status import LIVE, TERMINAL, RunStatus, assert_transition, is_live
 from .domain.steps import Step
 from .models import AppLock, Project, Run, RunStep, Target
 from .sandbox.egress import Resolver
@@ -483,19 +483,37 @@ def set_session_id(session: Session, run_id: int, session_id: str) -> None:
     session.commit()
 
 
-def idle_sandbox_runs(session: Session) -> list[int]:
-    """Paused runs that still name a sandbox (P4).
+# The statuses whose sandbox nobody is using any more. It lives here rather than
+# in domain/status.py because "idle" is a sandbox word, not a run-status one: the
+# domain knows nothing about containers, and this is the one query that asks.
+IDLE_SANDBOX = TERMINAL | {RunStatus.PAUSED}
 
-    Pause reaps immediately, with no grace window (DESIGN.md §5): the route that
-    pauses a run destroys the container and clears this column itself. A handle
-    still on a paused row therefore means that did not finish -- an API that
-    died mid-pause, or a pause that raced a dispatch. The reaper destroys it and
-    clears the column, which makes "a paused run has no sandbox" true rather
-    than merely intended.
+
+def idle_sandbox_runs(session: Session) -> list[int]:
+    """Runs that still name a sandbox nothing is using any more (P4).
+
+    Paused **and** terminal, because the two leave the same thing behind for
+    different reasons:
+
+    * A *paused* run reaps immediately, with no grace window (DESIGN.md §5): the
+      route that pauses a run destroys the container and clears this column
+      itself. A handle still on a paused row means that did not finish -- an API
+      that died mid-pause, or a pause that raced a dispatch.
+    * A *terminal* run always leaves one. The run container carries `AutoRemove`
+      and vanishes when the pipeline ends, but its **egress proxy** is a
+      long-running container that exits on nobody's schedule, and the process
+      that could ask for its removal is the one inside the sandbox -- which has
+      no Docker socket, by design, and needs the proxy alive until its last
+      step. So the reaper is not a net here; it is the only thing that removes
+      a finished run's proxy, and without it every completed run leaks one.
+
+    Live runs are excluded, and that is the load-bearing half: sweeping a
+    RUNNING run would destroy the container doing the work, and a PENDING one is
+    a dispatch that has not begun yet.
     """
     runs = session.scalars(
         select(Run).where(
-            Run.status == RunStatus.PAUSED, Run.sandbox_handle.is_not(None)
+            Run.status.in_(IDLE_SANDBOX), Run.sandbox_handle.is_not(None)
         )
     ).all()
     return [run.id for run in runs]
