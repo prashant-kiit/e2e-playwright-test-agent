@@ -43,7 +43,7 @@ export class AuthError extends Error {}
 export const api = {
   // auth
   me: () => req("GET", "/auth/me"),
-  login: (password) => req("POST", "/auth/login", { password }),
+  login: (email, password) => req("POST", "/auth/login", { email, password }),
   logout: () => req("POST", "/auth/logout"),
 
   // projects + targets. A target carries its own configuration now: creating

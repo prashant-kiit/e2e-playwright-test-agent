@@ -13,8 +13,9 @@ from sqlalchemy.exc import IntegrityError
 import app.models  # noqa: F401  (register the ORM tables on Base.metadata)
 from app import repo
 from app.db import Base
-from app.models import Revision, Tenant
-from app.tenancy import DEFAULT_TENANT_ID, current_tenant_id
+from app.domain.roles import UserRole
+from app.models import Revision, Tenant, User
+from app.tenancy import DEFAULT_TENANT_ID, current_tenant_id, tenant_scope
 from tests.target_helpers import create_target
 
 
@@ -49,13 +50,72 @@ def test_no_table_keeps_the_backfill_server_default():
 
 
 def test_current_tenant_id_is_the_single_seeded_tenant():
-    """The one call site P5 replaces."""
+    """Outside any request/run scope it is the seeded default -- which is what
+    keeps the thread/CI path and every pure-domain test writing tenant 1."""
     assert current_tenant_id() == DEFAULT_TENANT_ID == 1
+
+
+def test_current_tenant_id_resolves_from_an_active_scope():
+    """P5's replacement: inside a scope (a request's authenticated user, or a
+    run on the thread path) the resolver answers that tenant, not the constant.
+
+    The call sites in repo.py do not change; this one function does."""
+    with tenant_scope(42):
+        assert current_tenant_id() == 42
+    # and it falls back the moment the scope closes
+    assert current_tenant_id() == DEFAULT_TENANT_ID
+
+
+def test_tenant_scopes_nest_and_restore():
+    with tenant_scope(7):
+        assert current_tenant_id() == 7
+        with tenant_scope(9):
+            assert current_tenant_id() == 9
+        assert current_tenant_id() == 7
+    assert current_tenant_id() == DEFAULT_TENANT_ID
 
 
 def test_the_migration_seeds_exactly_one_tenant(session):
     tenants = list(session.scalars(repo.select(Tenant)))
     assert [t.id for t in tenants] == [DEFAULT_TENANT_ID]
+
+
+def test_the_migration_seeds_the_single_operator_as_a_tenant_admin(session):
+    """P5 preserves the shared-password operator as one admin user in the
+    default tenant, so yesterday's login still works -- as a real user now."""
+    users = list(session.scalars(repo.select(User)))
+    assert len(users) == 1
+    (admin,) = users
+    assert admin.tenant_id == DEFAULT_TENANT_ID
+    assert admin.role is UserRole.ADMIN
+    # The credential is a hash, never the password itself.
+    assert admin.credential != "admin"
+
+
+def test_the_thread_path_binds_the_runs_tenant(session):
+    """The background equivalent of `require_auth`: `drive_run` resolves the
+    run's tenant and binds it, so a run's inserts are written as its own tenant
+    and not the resolver's default."""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.launcher import _run_tenant_scope
+
+    session.add(Tenant(id=2, name="second"))
+    session.commit()
+    with tenant_scope(2):
+        project = repo.create_project(session, name="t2")
+        target = create_target(session, project.id, app="a2", name="A2")
+        run = repo.start_run(session, target_id=target.id, story_id="SCRUM-1", mode="full")
+    assert run.tenant_id == 2
+
+    # A throwaway factory on the same engine: `_run_tenant_scope` opens and
+    # closes its own session, so it must not be handed the fixture's shared one.
+    factory = sessionmaker(bind=session.get_bind(), expire_on_commit=False, future=True)
+
+    assert current_tenant_id() == DEFAULT_TENANT_ID  # outside the scope
+    with _run_tenant_scope(run.id, factory):
+        assert current_tenant_id() == 2
+    assert current_tenant_id() == DEFAULT_TENANT_ID  # restored after
 
 
 def test_insert_paths_set_tenant_id_explicitly(session):

@@ -147,13 +147,19 @@ def _no_real_dns(monkeypatch):
     monkeypatch.setattr("app.sandbox.egress.system_resolver", refuse)
 
 
-# `tenants` is deliberately not truncated: its single row is seeded by the
-# migration, so it is schema-level reference data rather than test state. Wiping
-# it would leave every tenant_id FK dangling and make the fixture describe a
-# database production never has. Any *extra* tenant a test adds (to prove the
-# tenant filter does real work) is still cleaned up, so the next test starts
-# from exactly the state the migration left.
-_PRESERVED_TABLES = frozenset({"tenants"})
+# `tenants` and `users` are deliberately not truncated: each has a single row
+# seeded by the migration (the default tenant, and the single-operator admin
+# that P5 preserved from the shared-password era), so they are schema-level
+# reference data rather than test state. Wiping `tenants` would leave every
+# tenant_id FK dangling; wiping `users` would delete the seeded admin the auth
+# tests log in as. Any *extra* row a test adds -- a second tenant to prove the
+# filter works, a member user to prove the role gate works -- is still cleaned
+# up, so the next test starts from exactly the state the migration left.
+_PRESERVED_TABLES = frozenset({"tenants", "users"})
+
+# The ids the migration seeds (and that these DELETEs keep). Kept in step with
+# the P5 users migration's _SEED_ADMIN_ID.
+_SEED_ADMIN_ID = 1
 
 
 def _truncate_all(engine):
@@ -164,6 +170,13 @@ def _truncate_all(engine):
     )
     with engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+        # Users before tenants: a user FKs its tenant (ondelete RESTRICT), so a
+        # test's extra user must go before its extra tenant.
+        conn.execute(
+            text("DELETE FROM users WHERE id <> :seeded").bindparams(
+                seeded=_SEED_ADMIN_ID
+            )
+        )
         conn.execute(
             text("DELETE FROM tenants WHERE id <> :seeded").bindparams(
                 seeded=DEFAULT_TENANT_ID

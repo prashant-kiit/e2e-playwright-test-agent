@@ -10,7 +10,7 @@ In the sandbox environment:
 Never in the sandbox:
 
     GITHUB_PAT            or any GitHub credential
-    QA_ADMIN_PASSWORD     or any portal credential
+    QA_SECRET_KEY         the session-cookie signing key, or any portal credential
     a repo mount          or any path into the control plane
     the control plane's own configuration
 

@@ -17,9 +17,10 @@ from sqlalchemy.orm import Session
 
 from . import target_config
 from .domain import lease
+from .domain.roles import UserRole
 from .domain.status import LIVE, TERMINAL, RunStatus, assert_transition, is_live
 from .domain.steps import Step
-from .models import AppLock, Project, Run, RunStep, Target
+from .models import AppLock, Project, Run, RunStep, Target, User
 from .sandbox.egress import Resolver
 from .tenancy import current_tenant_id
 
@@ -49,6 +50,46 @@ class RunConflict(RepoError):
         )
         self.target_id = target_id
         self.run_id = run_id
+
+
+# --- users ----------------------------------------------------------------
+
+def get_user_by_email(session: Session, email: str) -> User | None:
+    """The user with this login handle, across tenants.
+
+    Login is by email alone -- the handle is globally unique -- so this is not
+    tenant-scoped: the whole point is to discover which tenant the caller
+    belongs to. Every *other* read is tenant-scoped; this is the one that
+    establishes the tenant.
+    """
+    return session.scalars(select(User).where(User.email == email)).one_or_none()
+
+
+def create_user(
+    session: Session,
+    *,
+    email: str,
+    credential: str,
+    role: UserRole = UserRole.MEMBER,
+    tenant_id: int | None = None,
+) -> User:
+    """Add a user to a tenant.
+
+    `tenant_id` defaults to the acting tenant (`current_tenant_id()`): a tenant
+    admin inviting a teammate adds them to their own tenant, never another's,
+    without the route having to pass it. `credential` is already a hash -- this
+    layer never sees a plaintext password.
+    """
+    user = User(
+        tenant_id=tenant_id if tenant_id is not None else current_tenant_id(),
+        email=email,
+        role=role,
+        credential=credential,
+    )
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
 
 
 # --- projects / targets --------------------------------------------------

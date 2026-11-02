@@ -38,6 +38,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
+from .domain.roles import UserRole
 from .domain.status import RunStatus
 from .domain.steps import Step
 
@@ -73,6 +74,33 @@ class Tenant(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class User(Base):
+    """One person who logs into the portal, a member of exactly one tenant.
+
+    P5 replaces the single shared password (QA_ADMIN_PASSWORD) with real
+    per-user auth: a user logs in as themselves, their session carries their
+    tenant, and `tenancy.current_tenant_id()` resolves from it. `role` gates the
+    tenant-admin actions (delivery approval, PAT rotation, quota/user changes).
+
+    `credential` is a password *hash*, never the password (app/auth.py owns the
+    algorithm). `email` is globally unique: it is the login handle, so one
+    address is one account in one tenant. The table carries `tenant_id` like
+    every other table -- the membership column P5 was shaped around -- so the
+    structural tenant tests cover it for free.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[int] = _tenant_col()
+    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
+    role: Mapped[UserRole] = mapped_column(_enum_col(UserRole), nullable=False)
+    credential: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
