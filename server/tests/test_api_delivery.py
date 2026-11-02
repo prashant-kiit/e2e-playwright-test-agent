@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from app import delivery
 from app.api import get_catalog, get_delivery_tools, get_launcher, get_resolver
-from app.auth import require_auth
+from app.auth import require_auth, require_tenant_admin
 from app.db import get_session
 from app.main import app
 from tests.target_helpers import public_resolver, target_body
@@ -70,6 +70,7 @@ def client(session):
     app.dependency_overrides[get_session] = lambda: session
     app.dependency_overrides[get_launcher] = lambda: (lambda run_id: None)
     app.dependency_overrides[require_auth] = lambda: None
+    app.dependency_overrides[require_tenant_admin] = lambda: None
     # P4: the write path resolves a base URL, and no test may touch real DNS.
     app.dependency_overrides[get_resolver] = lambda: public_resolver
     app.dependency_overrides[get_delivery_tools] = lambda: _StubDelivery()
@@ -143,6 +144,7 @@ def test_delivery_state_needs_no_credential(session):
     app.dependency_overrides[get_session] = lambda: session
     app.dependency_overrides[get_launcher] = lambda: (lambda run_id: None)
     app.dependency_overrides[require_auth] = lambda: None
+    app.dependency_overrides[require_tenant_admin] = lambda: None
     # P4: the write path resolves a base URL, and no test may touch real DNS.
     app.dependency_overrides[get_resolver] = lambda: public_resolver
     app.dependency_overrides[get_storage] = lambda: FakeStorage()
@@ -352,6 +354,7 @@ def test_a_missing_git_or_pat_is_a_503_not_a_bare_500(session, monkeypatch):
     app.dependency_overrides[get_session] = lambda: session
     app.dependency_overrides[get_launcher] = lambda: (lambda run_id: None)
     app.dependency_overrides[require_auth] = lambda: None
+    app.dependency_overrides[require_tenant_admin] = lambda: None
     # P4: the write path resolves a base URL, and no test may touch real DNS.
     app.dependency_overrides[get_resolver] = lambda: public_resolver
     # Creating a target commits its revision 1.

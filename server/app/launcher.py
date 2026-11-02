@@ -274,13 +274,25 @@ def _run_tenant_scope(run_id: int, session_factory: SessionFactory) -> Iterator[
     set `current_tenant_id()` the way `require_auth` does for a request. This is
     the background equivalent of that seam: every insert the run makes -- its
     revisions, its step rows, its log lines -- is written as the run's own
-    tenant rather than the resolver's default. If the run cannot be read yet,
-    the default stands, and the work that follows will fail on its own terms.
+    tenant rather than the resolver's default.
+
+    If the run cannot be read, the default stands and the work proceeds to fail
+    on its own terms a moment later -- the alternative, raising here, would skip
+    the `finally` in `drive_run` and leave a reader waiting on a stream nobody
+    will close. That is a deliberate trade and the reason it is **logged**: a
+    run that wrote someone else's tenant id must not be something only a
+    database query can discover.
     """
     try:
         with session_factory() as session:
             tenant_id = repo.get_run(session, run_id).tenant_id
-    except Exception:  # pragma: no cover - the pipeline reports the real failure
+    except Exception:
+        log.warning(
+            "could not resolve the tenant of run %s; proceeding as the default "
+            "tenant, which is wrong for any run that is not tenant 1",
+            run_id,
+            exc_info=True,
+        )
         yield
         return
     with tenant_scope(tenant_id):

@@ -43,6 +43,12 @@ def client(session, monkeypatch):
     app.dependency_overrides.clear()
 
 
+def client_session(client):
+    """The session the overridden dependency hands the routes -- the same one
+    the test writes its fixtures into."""
+    return app.dependency_overrides[get_session]()
+
+
 def _add_user(session, *, email, password, role=UserRole.MEMBER, tenant_id=1):
     user = User(
         tenant_id=tenant_id,
@@ -164,6 +170,30 @@ def test_a_member_is_refused_a_tenant_admin_action(client):
     assert r.status_code == 403
 
 
+def test_the_admin_gate_refuses_a_bypassed_user(client):
+    """The gate does not treat "auth was overridden" as "allowed".
+
+    It used to: a `None` user fell through the role check, which put an
+    authorization decision in the hands of a test convention. A test that wants
+    past this gate overrides the gate.
+    """
+    from app.auth import require_auth, require_tenant_admin
+
+    app.dependency_overrides[require_auth] = lambda: None
+    try:
+        assert client.post(
+            "/targets/999/deliver", json={"story_id": "SCRUM-1"}
+        ).status_code == 403
+        # ...and overriding the gate itself is what lets a test through.
+        app.dependency_overrides[require_tenant_admin] = lambda: None
+        assert client.post(
+            "/targets/999/deliver", json={"story_id": "SCRUM-1"}
+        ).status_code == 404
+    finally:
+        app.dependency_overrides.pop(require_auth, None)
+        app.dependency_overrides.pop(require_tenant_admin, None)
+
+
 def test_an_admin_passes_the_gate(client):
     """The seeded admin is let through the gate -- the 404 is the handler not
     finding target 999, which only runs because the role check passed (a member
@@ -174,9 +204,3 @@ def test_an_admin_passes_the_gate(client):
     )
     r = client.post("/targets/999/deliver", json={"story_id": "SCRUM-1"})
     assert r.status_code == 404
-
-
-def client_session(client):
-    """The session the overridden dependency hands the routes -- the same one
-    the test writes fixtures into."""
-    return app.dependency_overrides[get_session]()

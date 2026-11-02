@@ -7,25 +7,36 @@ backfill half of that -- the data that lets a session name a tenant.
 
 The existing single-operator access is *preserved*, not dropped: it is seeded
 here as one admin user in the default tenant, so the person who logged in with
-the shared password yesterday logs in as themselves today. Its email and
-initial password come from QA_SEED_ADMIN_EMAIL / QA_SEED_ADMIN_PASSWORD
-(admin@example.com / admin by default), hashed by the same function the login
-path verifies against, so there is one source of truth for the algorithm.
+the shared password yesterday logs in as themselves today -- **with the same
+password**. That is what the QA_ADMIN_PASSWORD fallback below is for: an
+operator deployed with QA_ADMIN_PASSWORD=s3cret must not wake up to an account
+whose password is "admin". The variable is dead as a *login path* (there is no
+code left that compares against it) and read here once, as the thing whose
+access this row inherits.
 
 Unlike P2's tenant column, `users` is a brand-new table with no pre-existing
 rows, so it needs no backfill server default: the one row is seeded with its
 `tenant_id` set explicitly, exactly as application inserts must.
 
+**The hash is computed here rather than imported from app/auth.py.** A
+migration is frozen history: the other six import no application code, and a
+later change to the app's hashing would otherwise silently change what this
+revision does when replayed from zero (which CI does on every run). The format
+is self-describing -- algorithm, cost and salt all live in the string -- so
+`auth.verify_password` still reads this row after the app raises its iteration
+count.
+
 Revision ID: b2f4a6c08d1e
 Revises: f6a31d05c8e9
 Create Date: 2026-11-02 12:00:00.000000
 """
+import hashlib
 import os
+import secrets
 
 import sqlalchemy as sa
 
 from alembic import op
-from app.auth import hash_password
 
 revision = 'b2f4a6c08d1e'
 down_revision = 'f6a31d05c8e9'
@@ -37,6 +48,30 @@ _DEFAULT_TENANT_ID = 1
 # A fixed id so the test fixture can preserve the seeded row across truncation,
 # the way it preserves the seeded tenant.
 _SEED_ADMIN_ID = 1
+
+# Frozen copy of app/auth.py's hash format at the time of this revision. See the
+# module docstring for why this is not an import.
+_PBKDF2_ITERATIONS = 240_000
+
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, _PBKDF2_ITERATIONS)
+    return f"pbkdf2_sha256${_PBKDF2_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def _seed_password() -> str:
+    """The password the seeded admin inherits.
+
+    QA_ADMIN_PASSWORD is the pre-P5 shared password: honouring it is what makes
+    "the migration preserves existing access" true rather than nearly true.
+    QA_SEED_ADMIN_PASSWORD overrides it for a fresh install that never had one.
+    """
+    return (
+        os.environ.get("QA_SEED_ADMIN_PASSWORD")
+        or os.environ.get("QA_ADMIN_PASSWORD")
+        or "admin"
+    )
 
 
 def upgrade() -> None:
@@ -56,7 +91,6 @@ def upgrade() -> None:
     op.create_index('ix_users_tenant_id', 'users', ['tenant_id'])
 
     email = os.environ.get("QA_SEED_ADMIN_EMAIL", "admin@example.com")
-    password = os.environ.get("QA_SEED_ADMIN_PASSWORD", "admin")
     op.execute(
         sa.text(
             "INSERT INTO users (id, tenant_id, email, role, credential) "
@@ -65,7 +99,7 @@ def upgrade() -> None:
             id=_SEED_ADMIN_ID,
             tid=_DEFAULT_TENANT_ID,
             email=email,
-            cred=hash_password(password),
+            cred=_hash_password(_seed_password()),
         )
     )
     # Leave the sequence past the seeded row so the first invited user does not

@@ -17,7 +17,6 @@ from sqlalchemy.orm import Session
 
 from . import target_config
 from .domain import lease
-from .domain.roles import UserRole
 from .domain.status import LIVE, TERMINAL, RunStatus, assert_transition, is_live
 from .domain.steps import Step
 from .models import AppLock, Project, Run, RunStep, Target, User
@@ -65,31 +64,9 @@ def get_user_by_email(session: Session, email: str) -> User | None:
     return session.scalars(select(User).where(User.email == email)).one_or_none()
 
 
-def create_user(
-    session: Session,
-    *,
-    email: str,
-    credential: str,
-    role: UserRole = UserRole.MEMBER,
-    tenant_id: int | None = None,
-) -> User:
-    """Add a user to a tenant.
-
-    `tenant_id` defaults to the acting tenant (`current_tenant_id()`): a tenant
-    admin inviting a teammate adds them to their own tenant, never another's,
-    without the route having to pass it. `credential` is already a hash -- this
-    layer never sees a plaintext password.
-    """
-    user = User(
-        tenant_id=tenant_id if tenant_id is not None else current_tenant_id(),
-        email=email,
-        role=role,
-        credential=credential,
-    )
-    session.add(user)
-    session.commit()
-    session.refresh(user)
-    return user
+# Creating and removing users is the tenant-admin surface, which is its own P5
+# ticket; this phase adds only what it uses, so there is no create_user here
+# yet. The seeded admin comes from the migration.
 
 
 # --- projects / targets --------------------------------------------------

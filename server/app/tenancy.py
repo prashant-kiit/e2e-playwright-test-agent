@@ -53,15 +53,16 @@ def current_tenant_id() -> int:
     return DEFAULT_TENANT_ID if tenant_id is None else tenant_id
 
 
-def set_current_tenant(tenant_id: int) -> contextvars.Token:
-    """Bind the current tenant for the rest of this context. Returns the token
-    `reset_current_tenant` restores from. Used by `require_auth`, where a
-    dependency cannot wrap the request in a `finally`; task isolation frees it."""
-    return _current_tenant.set(tenant_id)
+def set_current_tenant(tenant_id: int) -> None:
+    """Bind the current tenant for the rest of this context, with no unbinding.
 
-
-def reset_current_tenant(token: contextvars.Token) -> None:
-    _current_tenant.reset(token)
+    What `require_auth` uses: a dependency cannot wrap the request in a
+    `finally`, so there is nowhere to restore from. Nothing is leaked by that,
+    because the server gives each request its own task and therefore its own
+    `Context` -- one request's tenant is not visible to the next. Code that
+    *does* own a begin and an end uses `tenant_scope` instead.
+    """
+    _current_tenant.set(tenant_id)
 
 
 @contextmanager

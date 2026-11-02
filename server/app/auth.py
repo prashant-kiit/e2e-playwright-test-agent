@@ -148,16 +148,22 @@ async def require_auth(request: Request) -> CurrentUser:
 
 
 async def require_tenant_admin(
-    user: CurrentUser | None = Depends(require_auth),
-) -> CurrentUser | None:
+    user: CurrentUser = Depends(require_auth),
+) -> CurrentUser:
     """A tenant-admin action: `require_auth` plus a role check.
 
     It depends on `require_auth` rather than re-reading the cookie, so a route
-    that requires admin also gets the tenant bound. When auth is bypassed (the
-    API tests override `require_auth` to return None) there is no user to check
-    and the gate is a no-op -- the same bypass those tests already rely on.
+    that requires admin also gets the tenant bound.
+
+    **It refuses anything that is not demonstrably an admin.** An earlier
+    version let a `None` user through so that a test overriding `require_auth`
+    to a no-op kept working; that put the safety of an authorization gate in
+    the hands of a test convention, and a gate whose production behaviour
+    depends on how tests are written is not a gate. A test that needs past this
+    one overrides *it*, explicitly, the way the suite already overrides every
+    other dependency it wants out of the way.
     """
-    if user is not None and user.role is not UserRole.ADMIN:
+    if not isinstance(user, CurrentUser) or user.role is not UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="tenant-admin role required")
     return user
 
