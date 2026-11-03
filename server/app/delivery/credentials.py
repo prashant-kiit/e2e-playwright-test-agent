@@ -41,6 +41,7 @@ no GitHub call -- the same reason "is this delivered?" is a Postgres question.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -79,6 +80,8 @@ __all__ = [
 # because bootstrap pushes .github/workflows/playwright.yml and GitHub refuses
 # that path without it (DESIGN.md §8).
 REQUIRED_SCOPES = ("repo", "workflow")
+
+log = logging.getLogger(__name__)
 
 
 def validate_with_github(token: str) -> TokenInfo:
@@ -312,6 +315,13 @@ class DbCredentials:
         rejected your token" with whatever went wrong while writing that down.
         A target that has vanished under us is the realistic case, and the
         delivery's own error is the more useful one to surface.
+
+        Never raising is not the same as never saying: it **logs**. A failed
+        mark means the next delivery will fail the same way with no warning on
+        the row, which is precisely the silent retry §8 forbids -- so it must
+        not be indistinguishable from a successful one in the one place an
+        operator can still look (P5-03 review). The log carries the app, never
+        the credential.
         """
         from .catalog import target_by_app
 
@@ -319,5 +329,10 @@ class DbCredentials:
             with self._sessions() as session:
                 mark_invalid(session, target_by_app(session, app))
         except Exception:
-            # Deliberately broad, and deliberately silent -- see the docstring.
-            pass
+            # Deliberately broad -- see the docstring. Logged, not silent.
+            log.exception(
+                "could not record that GitHub rejected the credential for %r; "
+                "the row still reads valid and the next delivery will fail the "
+                "same way",
+                app,
+            )

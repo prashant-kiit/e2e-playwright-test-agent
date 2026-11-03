@@ -134,3 +134,34 @@ def test_with_a_kms_key_the_kms_wrapper_is_built(monkeypatch):
 
     assert isinstance(built, envelope.KmsKeyWrapper)
     assert "arn:aws:kms:eu-west-1:1:key/abc" in built.describe
+
+
+def test_a_kms_failure_does_not_echo_the_data_key():
+    """botocore reports a bad parameter by echoing its value, and the parameter
+    here is `Plaintext=<the data key>` -- the one thing that opens the seal. The
+    wrapper's own error must name what failed without quoting what it was given.
+    """
+    data_keys: list[bytes] = []
+
+    class EchoingKms:
+        def encrypt(self, *, KeyId: str, Plaintext: bytes) -> dict:  # noqa: N803
+            data_keys.append(Plaintext)
+            raise ValueError(
+                f"Parameter validation failed: Invalid type for Plaintext={Plaintext!r}"
+            )
+
+        def decrypt(self, *, CiphertextBlob: bytes) -> dict:  # noqa: N803
+            raise AssertionError("not reached")
+
+    wrapper = envelope.KmsKeyWrapper("alias/qa", client=EchoingKms())
+
+    with pytest.raises(envelope.SealError) as caught:
+        envelope.seal(PAT, wrapper)
+
+    assert data_keys, "the wrapper never called the KMS, so this proves nothing"
+    message = str(caught.value)
+    for fragment in (repr(data_keys[0]), str(data_keys[0])):
+        assert fragment not in message
+    # Still diagnosable: it says the wrap failed and what kind of failure it was.
+    assert "wrap" in message
+    assert "ValueError" in message

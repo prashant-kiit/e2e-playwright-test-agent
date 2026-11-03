@@ -27,22 +27,30 @@ in one context manager means an entry point cannot do the first and forget the
 second -- and the five entry points that need a credential all read
 `with for_target(tools, app) as tools:` identically.
 
-Two paths deliberately do **not** bind: `is_bootstrapped` and the
-already-bootstrapped arm of `ensure_bootstrapped`. "Has anything been delivered
-to this repo?" is a Postgres query (invariant 5), and requiring a credential to
-answer it would be requiring the network by another name -- the same bug
-`api.get_catalog` exists to avoid.
+Four paths deliberately do **not** bind: `is_bootstrapped`, the
+already-bootstrapped arm of `ensure_bootstrapped`, and the `--dry-run` arms of
+bootstrap and push. "Has anything been delivered to this repo?" is a Postgres
+query (invariant 5), and requiring a credential to answer it would be requiring
+the network by another name -- the same bug `api.get_catalog` exists to avoid.
+A dry run of bootstrap or push reports what it *would* send from the row and
+the head revision, so a target created a minute ago with no PAT saved yet --
+the normal state of a new one -- can still say where it stands.
+
+`plan_reset` is the exception that proves the rule: it is a dry run and it
+*does* bind, because "does this repo have commits, and what branches are on
+it?" is two authenticated calls to GitHub rather than a Postgres read. The test
+is whether a path dials out, not whether it writes.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from .catalog import Catalog
 from .credentials import Credentials
-from .errors import CredentialError
+from .errors import CredentialError, GitError
 from .git import Git, require_git
 from .github import GitHubClient, clone_url
 
@@ -73,14 +81,23 @@ UNBOUND_GITHUB = _UnboundGitHub()
 class Tools:
     gh: GitHubClient
     git: Git
-    token: str
+    # `repr=False`, and that is load-bearing rather than tidy: this is a
+    # dataclass, so a generated `repr` of a *bound* seam would print the
+    # tenant's PAT verbatim into every traceback frame dump, every
+    # `logger.exception` that holds one, and every failed assertion in a test.
+    # `errors.redact` is no help here -- it is the choke point for messages
+    # somebody *builds*, and a repr is not one. DESIGN.md §8: the credential
+    # never reaches a log.
+    token: str = field(repr=False)
     catalog: Catalog
     # Where a target's credential comes from. `None` is the test doubles' path:
     # a `Tools` carrying a literal `token` is already bound to whatever it is
     # going to push with, so `for_app` has nothing to resolve. Production
     # always has one (`default_tools`), which is what retires the process-wide
     # `GITHUB_PAT` -- there is no longer anywhere for it to be read into.
-    credentials: Credentials | None = None
+    # Also `repr=False`: it holds the key wrapper and a session factory, and
+    # `token_for` is one call away from plaintext for any target.
+    credentials: Credentials | None = field(default=None, repr=False)
     # How a resolved token becomes a client. A field rather than a direct call
     # so a test can observe what `for_app` built without a real httpx client.
     gh_factory: Callable[[str], GitHubClient] = GitHubClient.from_token
@@ -143,12 +160,31 @@ def for_target(tools: Tools | None, app: str, *, bind: bool = True) -> Iterator[
         yield tools
         return
     bound = tools.for_app(app)
+
+    def rejected(app: str) -> None:
+        if bound.credentials is not None:
+            bound.credentials.mark_invalid(app)
+
     try:
         yield bound
     except CredentialError:
-        if bound.credentials is not None:
-            bound.credentials.mark_invalid(app)
+        rejected(app)
         raise
+    except GitError as exc:
+        # The other half of "a 401/403 at delivery". The credential travels in
+        # the clone URL, so git's HTTPS transport rejects a revoked or
+        # under-scoped token before any REST call is made -- `push_artifacts`
+        # clones first. Translating it here rather than letting a `GitError`
+        # through is what makes the rejection one outcome: the same sticky
+        # `credential_state = invalid`, and the same 502 the operator reads,
+        # whichever layer refused us. Anything git failed at for its own
+        # reasons is re-raised untouched.
+        if not exc.is_credential_rejection:
+            raise
+        rejected(app)
+        raise CredentialError(
+            f"GitHub rejected the stored credential for {app!r} at delivery: {exc}"
+        ) from exc
 
 
 def default_tools() -> Tools:

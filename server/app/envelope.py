@@ -135,13 +135,28 @@ class KmsKeyWrapper:
                 "CiphertextBlob"
             ]
         except Exception as exc:  # boto3 raises a family; the caller needs one
-            raise SealError(f"the KMS could not wrap a data key: {exc}") from exc
+            # The exception's *type*, never its text. botocore reports a bad
+            # parameter by echoing its value, and the parameter on this call is
+            # `Plaintext=<the data key>` -- the one thing that opens the seal.
+            # The chained `from exc` keeps the full detail in the traceback,
+            # which stays in the process; the message is what travels.
+            raise SealError(
+                f"the KMS could not wrap a data key ({type(exc).__name__}); "
+                f"key {self._key_id}"
+            ) from exc
 
     def unwrap(self, wrapped: bytes) -> bytes:
         try:
             return self._client.decrypt(CiphertextBlob=wrapped)["Plaintext"]
         except Exception as exc:
-            raise SealError(f"the KMS could not unwrap a data key: {exc}") from exc
+            # The type, not the text, for the same reason as `wrap` -- and here
+            # the *response* is the one that carries a plaintext data key. The
+            # type is what is diagnostic anyway: AccessDenied, InvalidCiphertext
+            # and KeyUnavailable are three different operator problems.
+            raise SealError(
+                f"the KMS could not unwrap a data key ({type(exc).__name__}); "
+                f"key {self._key_id}"
+            ) from exc
 
 
 def kms_client():

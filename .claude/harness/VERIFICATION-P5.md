@@ -14,16 +14,15 @@ fakes, and what was deliberately deferred.
 >
 > Three of seven tickets are complete **in the tree**; four are not started. Tree state and
 > tracker state are two separate facts and the tracker is the source of the second one
-> (`docs/agents/issue-tracker.md`): #31 and #32 are closed `completed`; **#34 is complete in
-> the tree but still open on the tracker**, pending the two-axis code review, which could not
-> be run in the session that wrote this — see §Follow-ups item 27. #30, #33 and #35–#37 are
-> open.
+> (`docs/agents/issue-tracker.md`): #31, #32 and #34 are closed `completed` — #34's
+> two-axis review was re-run and acted on (§Follow-ups items 27 and 27b), which is what its
+> close was waiting on. #30, #33 and #35–#37 are open.
 >
 > | Ticket | State in the tree |
 > |---|---|
 > | #31 P5-01 — users table + session-resolved `current_tenant_id()` | Implemented (`e492a9d`, review fixes `06a3acd`). **Not independently re-verified in this record** — see the note below |
 > | #32 P5-02 — tenant-scoped reads + tenant-scoped uniqueness + fail-closed | **Complete.** The `users.email` half plus token expiry/refresh landed first (`105e9b7`); the enforced read path and the `projects`/`targets` composite uniqueness landed in the slice below, and were exercised against a live stack with a second real tenant |
-> | #34 P5-03 — per-tenant KMS-encrypted PATs, scope/expiry/fail-loud | **Complete in the tree, not yet reviewed or closed.** The envelope, the per-target `Tools` binding, the save-time scope check, the portal surface and the structural credential tests. **Not yet seen against a real KMS, a real GitHub token or a browser** — see §"What is covered only by fakes" |
+> | #34 P5-03 — per-tenant KMS-encrypted PATs, scope/expiry/fail-loud | **Complete, reviewed and closed.** The envelope, the per-target `Tools` binding, the save-time scope check, the portal surface and the structural credential tests. The two-axis review found two real credential leaks (the PAT in `Tools.__repr__`, a data key reachable in a `SealError`) and one half-true acceptance criterion (a git-transport 401/403 did not mark the credential invalid); all fixed — see §Follow-ups 27b. **Still not seen against a real KMS, a real GitHub token or a browser** — see §"What is covered only by fakes" |
 > | #33 P5-05, #35 P5-04, #36 P5-06, #37 P5-07 | Not started |
 >
 > **What this record does and does not claim.** The three §"Verified" sections below each
@@ -32,8 +31,9 @@ fakes, and what was deliberately deferred.
 > **P5-02's isolation claims were checked against a second real tenant** over HTTP against
 > the live stack. That tenant was deleted again afterwards, so the evidence was observed
 > and then reverted and no second tenant exists in the dev database now. **P5-03's claims
-> rest on the suite plus two by-hand migration runs on throwaway databases**; it has not
-> met the live stack, a real KMS key or a real GitHub PAT. A real browser has still not
+> rest on the suite, two by-hand migration runs on throwaway databases, and a two-axis
+> review that was re-run and acted on**; it has not met the live stack, a real KMS key or a
+> real GitHub PAT. A real browser has still not
 > been part of any P5 verification.
 
 ---
@@ -253,11 +253,14 @@ delivery entry point acquires a credential, and it binds *and* marks-invalid-on-
 one context manager — because those are two halves of one decision, and five entry points
 each able to do the first and forget the second is how the fail-loud rule would quietly stop
 holding. An unbound seam raises a `CredentialError` naming the call that was missed, rather
-than an `AttributeError` on `None` from somewhere inside a push. Three paths deliberately do
-**not** bind: `is_bootstrapped`, the already-bootstrapped arm of `ensure_bootstrapped`, and
-the `--dry-run` arms of bootstrap and push. All four answer from Postgres and the blob store
-and dial out to nothing, and a new target with no PAT saved yet — the normal state of one —
-must still be able to say where it stands.
+than an `AttributeError` on `None` from somewhere inside a push. **Four** paths deliberately
+do **not** bind: `is_bootstrapped`, the already-bootstrapped arm of `ensure_bootstrapped`,
+and the `--dry-run` arms of bootstrap and push. All four answer from Postgres and the blob
+store and dial out to nothing, and a new target with no PAT saved yet — the normal state of
+one — must still be able to say where it stands. `plan_reset` is a dry run that *does* bind,
+because it makes two authenticated GitHub calls: the test is whether a path dials out, not
+whether it writes. (The count said "three" here and "two" in `tools.py`'s module docstring
+until the review in the slice below; both now say four.)
 
 ---
 
@@ -515,16 +518,96 @@ hygiene.
     expiry test asserts through a module attribute rather than a parameter. Flagged by the
     standards review; left as the user-chosen seam.
 
-27. **P5-03 was not code-reviewed.** Every prior slice in this phase went through the
-    two-axis review (standards and spec) before its ticket was closed, and P5-02's item 10b
-    records what that review caught — a migration docstring claiming a `pg_constraint`
-    readback it did not perform, a database read left on the event loop, a bypass scan blind
-    to one spelling. This slice's review was launched and **died on an API rate limit before
-    either axis reported**, so nothing was aggregated and nothing was acted on. The suite is
-    green and the migration was checked by hand, but neither of those is the review. **#34 is
-    deliberately left open on the tracker because of this**, and the review should be re-run
-    against `17293a5` before it is closed. Treat the §Decisions rows above as the author's
-    account rather than as reviewed conclusions.
+27. ~~**P5-03 was not code-reviewed.**~~ **Done.** The first attempt died on an API rate
+    limit before either axis reported; it was re-run against `17293a5` and both axes
+    reported. What it found and what was done with it is item 27b. The §Decisions rows above
+    are now reviewed conclusions rather than only the author's account — with the one
+    correction 27b records.
+
+27b. **P5-03's review, and what was done with it.** Two axes, as every prior slice.
+
+    **Accepted and fixed — two of them were real credential leaks:**
+
+    - **The PAT was in `Tools.__repr__`.** `Tools` is a `@dataclass(frozen=True)` and
+      `token: str` carried no `field(repr=False)`, so `repr(bound_tools)` printed a tenant's
+      plaintext PAT — into any traceback frame dump, any `logger.exception` holding one, any
+      failed pytest assertion. `errors.redact` is no defence: it is the choke point for
+      messages somebody *builds*, and a generated repr is not one. The slice's own
+      documentation (README, `TargetCredential.jsx`) promised the customer the opposite.
+      `token` and `credentials` are now `repr=False`, with a test, plus a sibling test that
+      the production `GitHubClient` does not print its token either — hiding the field is
+      worth nothing if the client built from it leaks instead.
+    - **A plaintext data key could reach a `SealError` message.** `KmsKeyWrapper.wrap`
+      interpolated `{exc}`, and botocore reports a bad parameter by echoing its value — here
+      `Plaintext=<the 32-byte data key>`, the one thing that opens the seal. Both `wrap` and
+      `unwrap` now carry the exception's *type* and the key id, never its text; `from exc`
+      keeps the full detail in the traceback, which stays in the process. Done for `unwrap`
+      too although the review only flagged `wrap`: its *response* is the one carrying a
+      plaintext data key, and the type name is the diagnostic part anyway (AccessDenied,
+      InvalidCiphertext and KeyUnavailable are three different operator problems).
+    - **AC5 was only half true, and the missing half is the common case.** `for_target` keyed
+      the fail-loud rule on `CredentialError`, which only `GitHubClient._raise_for_credentials`
+      raises — but the PAT also travels in the **clone URL**, and `push_artifacts` clones
+      *before* its first REST call. A revoked or under-scoped token is therefore rejected by
+      git's HTTPS transport, which reports a failed subprocess rather than a status code, so
+      it arrived as a `GitError` — a sibling of `CredentialError` under `DeliveryError`. The
+      credential stayed `valid` and the route answered **400 instead of 502**. The existing
+      test passed only because it stubs `gh_factory`, so nothing ever exercised a git auth
+      failure. Now `GitError.is_credential_rejection` classifies git's own stderr and
+      `for_target` translates a match into the same `CredentialError`: one outcome, one
+      status, one sticky `credential_state`, whichever layer refused us. Deliberately
+      conservative — a non-fast-forward push or a missing ref is re-raised untouched, because
+      marking a working credential invalid sends a customer to rotate it for nothing.
+    - **`DbCredentials.mark_invalid` swallowed every exception silently.** Never *raising* is
+      right (it runs on the failure path of a delivery that is already failing, and a second
+      exception there would replace "GitHub rejected your token" with whatever went wrong
+      recording it). Never *saying* is not: a failed mark leaves the row reading `valid`, so
+      the next delivery fails identically with no warning — the silent retry §8 forbids. It
+      now logs, with the app and never the credential.
+    - **Three documents disagreed on how many delivery paths do not bind**: `tools.py` said
+      two, this record said three-then-four, DESIGN.md §8 named one. The answer is **four**
+      (`is_bootstrapped`, the already-bootstrapped arm, and the `--dry-run` arms of bootstrap
+      and push); all three now say so. The review also read `plan_reset` as contradicting
+      "the dry runs dial out to nothing" — it does not, because `plan_reset` is not on that
+      list: it is a dry run that *does* bind, since it makes two authenticated GitHub calls.
+      That distinction (the test is whether a path dials out, not whether it writes) is now
+      written down in all three places rather than being inferable from the code.
+    - **README's P4 paragraph** still described the sandbox's credential safety in terms of
+      "no module can read `GITHUB_PAT`", a variable this slice deleted; it now states the
+      stronger thing that is actually true.
+
+    **Found while fixing, and worth more than the finding that led to it:** the new
+    `mark_invalid` log test passed alone and failed in the suite. `alembic/env.py` called
+    `fileConfig(config.config_file_name)`, whose `disable_existing_loggers` defaults to
+    **True** — so building the test schema in process disabled every `app.*` logger for the
+    rest of the session. Production survives it by accident (migrations run as their own CLI
+    process). It **failed open**: a test asserting something was logged saw an empty
+    `caplog`, and a test asserting nothing was logged passed for the wrong reason, which
+    means no log assertion anywhere in this suite meant anything. Fixed with
+    `disable_existing_loggers=False`. The regression test for it is **structural** (it reads
+    `env.py` and asserts the argument) after the observable version was written first and
+    found to pass with the bug reintroduced: `disable_existing_loggers` only disables loggers
+    that already *exist*, so observing one passes or fails on whether some other module
+    happened to be imported first — the same order-dependence that hid the bug. The
+    structural one was confirmed to fail with the fix reverted and pass with it restored.
+
+    **Declined, recorded so they are decisions and not oversights:** extracting a `Binding`
+    type for `token`/`gh`/`app` (a real Data Clump, but `Tools` being both the injection
+    bundle and the per-target binding is a shape this slice inherited, and splitting it is
+    wider than a review fix); collapsing the two wordings of the unbound-seam message;
+    `gh_factory` and `bind` as "Speculative Generality" (both are the agreed test and dry-run
+    seams — `bind=False` is what lets a target with no PAT preview a push); renaming
+    `applied()` in `TargetCredential.jsx`; and a CHECK constraint on `credential_state` (the
+    enum is app-enforced, matching every other enum column in the schema). The review also
+    listed `DELETE /targets/{id}/pat`, the `_SEALED_CREDENTIAL` redaction and the
+    `CredentialBadge` on `Projects.jsx` as scope creep: kept, the first because a credential
+    you cannot remove is worse than one you can, the second because a reader who finds a
+    sealed blob in a log cannot tell it is harmless, the third because AC4 asks for expiry to
+    be surfaced "before it lapses" and the target row is where an operator looks.
+
+    **What the review did not change:** the fakes. No real KMS, no real GitHub token, no
+    browser — items 21–23 below still stand, and AC1/AC3/AC4 remain proven against
+    `StubKms`, an httpx `MockTransport` and jsdom respectively.
 
 ### Harness hygiene
 
@@ -536,8 +619,8 @@ hygiene.
     `completed`, each with a comment carrying its evidence and its remaining follow-ups.
     #31's comment says in as many words that closing it does **not** upgrade this record's
     refusal to vouch for it — the tracker had simply fallen behind the tree, and that is
-    what the close fixes. Still open: #30 (the parent spec), #33 and #35–#37, all
-    `ready-for-agent`, plus #34 — whose work is in the tree but whose close waits on item 27.
+    what the close fixes. #34 is closed too, its review having been re-run (items 27 and 27b).
+    Still open: #30 (the parent spec), #33 and #35–#37, all `ready-for-agent`.
 14. **The README still says P4's closeout is pending**, in two places — the P4 paragraph
     near the top and the phase list near the bottom both call the real agent run outstanding
     and say "P4 is implemented and not closed". `VERIFICATION-P4.md`'s own banner records

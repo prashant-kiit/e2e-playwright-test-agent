@@ -417,9 +417,20 @@ none of them was obvious from the paragraph above:
   credential" are two halves of one decision, and five entry points each able to do the
   first and forget the second is how the fail-loud rule would quietly stop holding. An
   unbound seam raises a `CredentialError` naming the call that was missed rather than an
-  `AttributeError` from inside a push. `is_bootstrapped` deliberately does **not** bind:
-  that answer is a Postgres query, and needing a credential for it would be needing the
-  network by another name.
+  `AttributeError` from inside a push. Four paths deliberately do **not** bind:
+  `is_bootstrapped`, the already-bootstrapped arm of `ensure_bootstrapped`, and the
+  `--dry-run` arms of bootstrap and push. Those answers are Postgres and blob-store reads,
+  and needing a credential for them would be needing the network by another name. `plan_reset`
+  is the dry run that *does* bind, because it makes two authenticated GitHub calls — the test
+  is whether a path dials out, not whether it writes.
+- **A credential rejection is one outcome, whichever layer refuses us.** The PAT travels in
+  the clone URL as well as in the REST client's header, and `push_artifacts` clones *before*
+  its first REST call — so git's HTTPS transport is where most 401/403s actually land, and it
+  reports them as a failed subprocess rather than a status code. `GitError.is_credential_rejection`
+  classifies git's own stderr, and `for_target` translates a match into the same
+  `CredentialError` the REST client raises: the same sticky `credential_state = invalid`, the
+  same 502. A non-fast-forward push or a missing ref is re-raised untouched — marking a working
+  credential invalid would send a customer to rotate it for nothing (P5-03 review).
 - **A refusal at save time is 422, not 502.** A token missing `workflow`, an empty paste, a
   revoked token: each is the operator's input being refused while they can still fix it, and
   a different paste is the fix. 502 stays for GitHub refusing a credential *at delivery*,
@@ -662,7 +673,7 @@ one hook by the caller. Recorded here because the natural way to write P2 is to 
 | 29 | Another tenant's row is **404, not 403**: a reader who does not own a row must not be able to tell "exists, not yours" from "does not exist", or the small integer ids become an inventory of what other tenants hold (P5) |
 | 30 | Background sweeps **iterate tenants** rather than reading across them. A sweep is not one query (`reap_expired` reads locks, then each lock's run, then frees it), so an unfiltered outer query would need every nested read opted out too — and the opt-out would become the normal case in the one module that touches every tenant's rows. One tenant's failure does not stop the others: the reaper is the only thing that frees an app lock (P5) |
 | 31 | **The envelope wraps a data key, not the PAT.** A random AES-256 key per secret, encrypted locally, with only the 32-byte key sent to the KMS — so the PAT is never in a KMS request or its audit log, key rotation re-wraps keys instead of re-encrypting rows, and no secret can outgrow the KMS payload limit (P5-03) |
-| 32 | **The delivery seam is bound to one target before it can push.** `for_target(tools, app)` resolves that target's credential *and* marks it invalid if GitHub rejects it, because those are two halves of one decision; an unbound seam fails loud naming the call that was missed. `is_bootstrapped` does not bind — its answer is a Postgres query (P5-03) |
+| 32 | **The delivery seam is bound to one target before it can push.** `for_target(tools, app)` resolves that target's credential *and* marks it invalid if GitHub rejects it, because those are two halves of one decision; an unbound seam fails loud naming the call that was missed. Four paths do not bind — `is_bootstrapped`, the already-bootstrapped arm and the two `--dry-run` arms — because their answers are Postgres and blob-store reads; `plan_reset` binds because it dials out. A rejection reaching us as a git transport failure rather than a REST 401/403 is translated to the same `CredentialError`, so it is one outcome with one status and one sticky state (P5-03) |
 | 33 | **A credential refused at save time is 422; one refused at delivery is 502.** Separate exception classes, because one class for both would read to a customer with a scope typo as a GitHub outage — and the two have different remedies (P5-03) |
 | 34 | **`GITHUB_PAT` is retired, not kept as a fallback, and nothing is migrated into the new columns.** One operator token is not any tenant's credential; sealing it per target would give every customer the same identity under a per-tenant name (P5-03) |
 

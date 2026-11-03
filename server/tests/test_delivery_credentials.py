@@ -15,6 +15,7 @@ built is tests/test_envelope.py's business.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -23,7 +24,7 @@ from app import envelope, repo
 from app.delivery import credentials as creds
 from app.delivery import tools as tools_mod
 from app.delivery.git import Git
-from app.delivery.github import TokenInfo
+from app.delivery.github import GitHubClient, TokenInfo
 from app.delivery.tools import Tools
 from app.domain.credentials import CredentialState
 from app.models import Target, Tenant
@@ -462,3 +463,137 @@ def test_a_dry_run_needs_no_credential():
         assert bound.token == ""
 
     assert seam.invalidated == []
+
+
+# --- what a bound seam must not carry into a log -------------------------
+
+def test_the_bound_seam_keeps_the_token_out_of_its_repr():
+    """`Tools` is a dataclass, so `repr()` is generated -- and a generated repr
+    of a bound seam would print the tenant's PAT in every traceback frame dump,
+    every `logger.exception` and every failed pytest assertion that happens to
+    hold one. `errors.redact` cannot save this path, because a repr is not a
+    message anybody built. DESIGN.md §8: the credential never reaches a log.
+    """
+    seam = unbound_tools(StubCredentials({"demo": PAT}))
+    # An opaque client, as production has: `GitHubClient` is a plain class, so
+    # its repr is the default `<object at 0x...>` and the token it was built
+    # from lives in httpx's headers, which httpx does not print either. The
+    # suite's usual `gh_factory` interpolates the token into a string to make
+    # binding observable, which would mask the field under test.
+    bound = replace(seam, gh_factory=lambda token: object()).for_app("demo")
+
+    assert PAT not in repr(bound)
+    assert "ghp_" not in repr(bound)
+    # The bound token is still *there* -- this is about the repr, not the field.
+    assert bound.token == PAT
+
+
+def test_the_production_github_client_does_not_print_its_token_either():
+    """The sibling half of the claim: hiding `Tools.token` is worth nothing if
+    the client built from it prints it instead. `GitHubClient` keeps the token
+    in httpx's headers and carries no generated repr."""
+    client = GitHubClient.from_token(PAT)
+    try:
+        assert PAT not in repr(client)
+        assert PAT not in repr(client.__dict__)
+    finally:
+        client.close()
+
+
+# --- the credential also travels in the clone URL ------------------------
+
+def _git_auth_failure() -> creds.DeliveryError:
+    """A git transport rejection, as git actually reports one.
+
+    The clone URL carries the PAT, so a revoked or under-scoped token is
+    rejected by git's HTTPS transport -- before any REST call -- and arrives as
+    a `GitError`, not as the `CredentialError` the REST client raises.
+    """
+    from app.delivery.errors import GitError
+
+    return GitError(
+        ("clone", "--depth", "1", "https://x-access-token:tok@github.com/o/r.git"),
+        128,
+        "remote: Invalid username or password.\n"
+        "fatal: Authentication failed for 'https://github.com/o/r.git/'",
+    )
+
+
+def test_a_git_transport_rejection_marks_the_credential_invalid():
+    """AC5 is "a 401/403 at delivery", and git's transport is where most of them
+    land: `push_artifacts` clones before it makes a single REST call. A rejection
+    there that left the credential `valid` would tell the customer nothing and
+    let the next delivery fail the same way."""
+    seam = StubCredentials({"demo": PAT})
+
+    with pytest.raises(creds.CredentialError):
+        with tools_mod.for_target(unbound_tools(seam), "demo"):
+            raise _git_auth_failure()
+
+    assert seam.invalidated == ["demo"]
+
+
+def test_a_git_failure_that_is_not_about_the_credential_leaves_it_alone():
+    """Symmetry with the REST path: a push rejected for being behind, or a
+    missing ref, says nothing about the token."""
+    from app.delivery.errors import GitError
+
+    seam = StubCredentials({"demo": PAT})
+
+    with pytest.raises(creds.DeliveryError):
+        with tools_mod.for_target(unbound_tools(seam), "demo"):
+            raise GitError(
+                ("push", "origin", "qa/main"),
+                1,
+                "! [rejected] qa/main -> qa/main (non-fast-forward)",
+            )
+
+    assert seam.invalidated == []
+
+
+def test_a_git_transport_rejection_surfaces_as_a_credential_problem():
+    """The route maps `CredentialError` to 502 and every other `DeliveryError`
+    to 400. A revoked token answering 400 ("your request was bad") instead of
+    502 ("the upstream rejected us") is the operator reading the wrong
+    diagnosis, so the translation happens where the marking happens."""
+    seam = StubCredentials({"demo": PAT})
+
+    with pytest.raises(creds.CredentialError, match="rejected"):
+        with tools_mod.for_target(unbound_tools(seam), "demo"):
+            raise _git_auth_failure()
+
+
+def test_translating_a_git_rejection_keeps_gits_own_diagnosis_and_no_token():
+    """The translated error still has to be worth reading, and still must not
+    carry the credential that was rejected."""
+    seam = StubCredentials({"demo": PAT})
+
+    with pytest.raises(creds.CredentialError) as caught:
+        with tools_mod.for_target(unbound_tools(seam), "demo"):
+            raise _git_auth_failure()
+
+    message = str(caught.value)
+    assert "Authentication failed" in message
+    assert "x-access-token:tok@" not in message
+    assert PAT not in message
+
+
+def test_a_failed_mark_invalid_is_logged_rather_than_swallowed(caplog):
+    """`mark_invalid` must never raise -- it runs on the failure path of a
+    delivery that is already failing, and a second exception there would replace
+    "GitHub rejected your token" with whatever went wrong recording it. But a
+    mark that silently did nothing leaves the row reading `valid`, so the next
+    delivery fails identically with no warning: the silent retry §8 forbids.
+    """
+
+    def broken_sessions():
+        raise RuntimeError("the connection pool is exhausted")
+
+    seam = creds.DbCredentials(broken_sessions, envelope.LocalKeyWrapper(b"k"))
+
+    with caplog.at_level("ERROR", logger="app.delivery.credentials"):
+        seam.mark_invalid("demo")  # must not raise
+
+    assert "demo" in caplog.text
+    assert "next delivery will fail the same way" in caplog.text
+    assert PAT not in caplog.text

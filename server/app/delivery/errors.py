@@ -96,6 +96,25 @@ class ConfirmationMismatch(DeliveryError):
     """
 
 
+# How git's HTTPS transport reports a credential it will not accept. The PAT
+# travels in the clone URL, so a revoked, expired or under-scoped token is
+# rejected *here* -- by git, before any REST call -- and not by the GitHub
+# client that raises `CredentialError` directly. Matched on git's and GitHub's
+# own wording because that is all the transport gives us: there is no status
+# code on a subprocess, only its stderr.
+_GIT_CREDENTIAL_REJECTION = re.compile(
+    r"authentication failed"
+    r"|invalid username or password"
+    r"|could not read username"
+    r"|could not read password"
+    r"|terminal prompts disabled"
+    r"|permission to .* denied"
+    r"|repository not found"          # what GitHub says for a private repo a token cannot see
+    r"|returned error: 40[13]",
+    re.IGNORECASE,
+)
+
+
 class GitError(DeliveryError):
     """A git subprocess failed."""
 
@@ -106,3 +125,18 @@ class GitError(DeliveryError):
         self.args_ = args
         self.rc = rc
         self.err = err
+
+    @property
+    def is_credential_rejection(self) -> bool:
+        """Whether git failed because the credential in the clone URL was refused.
+
+        Read by the delivery seam, which turns a true here into the same
+        `CredentialError` the REST client raises -- so "GitHub rejected this
+        token" is one outcome with one HTTP status and one sticky
+        `credential_state`, however the rejection reached us (DESIGN.md §8).
+
+        A conservative match: a non-fast-forward push, a missing ref or a merge
+        conflict says nothing about the token, and marking a working credential
+        invalid would send a customer off to rotate it for no reason.
+        """
+        return bool(_GIT_CREDENTIAL_REJECTION.search(self.err))
