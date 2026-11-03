@@ -1,14 +1,51 @@
 // Thin fetch wrapper. Same-origin in dev (via the Vite proxy), so the session
-// cookie is sent automatically; `credentials: "include"` keeps prod safe too.
+// cookies are sent automatically; `credentials: "include"` keeps prod safe too.
+//
+// The access cookie lives fifteen minutes now (the refresh cookie, thirty
+// days), so a 401 mid-session is the *expected* case rather than a dead
+// session: anyone who leaves a tab open over lunch comes back to one. This
+// wrapper absorbs it -- 401, POST /auth/refresh, replay the original request --
+// so no caller has to know the session is renewable, and an operator never sees
+// a login form they did not need. A 401 that survives the refresh is a real
+// one and surfaces as AuthError.
 
-async function req(method, path, body) {
+// Endpoints that must never trigger the dance. /auth/refresh would recurse;
+// /auth/login and /auth/logout 401 for reasons a refresh cannot fix -- a wrong
+// password is not an expired session, and refreshing one would replay the bad
+// credentials against a freshly minted cookie.
+const NO_REFRESH = new Set(["/auth/refresh", "/auth/login", "/auth/logout"]);
+
+// In flight refresh, shared by every request that 401s while it runs. Without
+// this, a page that loads three panels at once sends three refreshes.
+let refreshing = null;
+
+function refreshSession() {
+  if (!refreshing) {
+    refreshing = fetch("/auth/refresh", { method: "POST", credentials: "include" })
+      .then((res) => res.ok)
+      .catch(() => false)
+      .finally(() => {
+        refreshing = null;
+      });
+  }
+  return refreshing;
+}
+
+async function req(method, path, body, { allowRefresh = true } = {}) {
   const opts = { method, credentials: "include", headers: {} };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(path, opts);
-  if (res.status === 401) throw new AuthError();
+  if (res.status === 401) {
+    // `allowRefresh: false` on the replay is what bounds this to one retry: a
+    // second 401 is a session that cannot be saved, not a reason to loop.
+    if (allowRefresh && !NO_REFRESH.has(path) && (await refreshSession())) {
+      return req(method, path, body, { allowRefresh: false });
+    }
+    throw new AuthError();
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -43,7 +80,16 @@ export class AuthError extends Error {}
 export const api = {
   // auth
   me: () => req("GET", "/auth/me"),
-  login: (password) => req("POST", "/auth/login", { password }),
+  // Renew the access cookie, reporting success rather than throwing. For the
+  // one caller that cannot go through `req` and so gets no automatic retry:
+  // EventSource, which opens its own connection and, per spec, does *not*
+  // reconnect after an HTTP error status -- so an expired access cookie would
+  // otherwise close the live log for good.
+  renewSession: () => refreshSession(),
+  // The tenant slug goes with the email: an address is unique only within a
+  // tenant now, so it no longer names an account on its own.
+  login: (tenant, email, password) =>
+    req("POST", "/auth/login", { tenant, email, password }),
   logout: () => req("POST", "/auth/logout"),
 
   // projects + targets. A target carries its own configuration now: creating

@@ -35,11 +35,13 @@ from sqlalchemy import (
 from sqlalchemy import (
     Enum as SAEnum,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 
 from .db import Base
+from .domain.roles import UserRole
 from .domain.status import RunStatus
 from .domain.steps import Step
+from .tenancy import install_read_guard
 
 
 def _enum_col(enum_cls: type[_Enum]) -> SAEnum:
@@ -54,36 +56,128 @@ def _enum_col(enum_cls: type[_Enum]) -> SAEnum:
     )
 
 
-def _tenant_col() -> Mapped[int]:
-    """`tenant_id`, non-null, with no server default.
+class TenantOwned:
+    """A row that belongs to one tenant: the mixin that carries `tenant_id`.
 
-    The default lives in the migration (so existing rows backfill) and is
-    dropped there in the same revision: application code must set the column
-    from tenancy.current_tenant_id() rather than letting the database guess.
+    It was a `_tenant_col()` helper returning the column. It is a mixin now
+    because P5-02 needs a **single type naming every tenant-owned entity**:
+    `tenancy.install_read_guard` filters all of this class's mapped subclasses
+    in one `with_loader_criteria`, so one listener covers the whole schema and
+    a table added later is covered by inheriting from here. The column itself
+    is unchanged -- same type, nullability, index and FK -- which
+    `test_migrations.py` holds to by comparing the models against the migrated
+    database.
+
+    Inheriting this is therefore not decoration: it is what makes a table's
+    rows readable only by their owner. A new tenant-owned table that forgets it
+    gets no filter, which is why `test_tenancy.py` asserts every table has the
+    column and `test_tenant_isolation_repo.py` asserts every mapped class that
+    has one inherits this.
+
+    `tenant_id` is non-null with no server default: the backfill default lives
+    in the P2 migration and is dropped there in the same revision, so
+    application code must set the column from `tenancy.current_tenant_id()`
+    rather than letting the database guess.
     """
-    return mapped_column(
-        Integer, ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
+
+    @declared_attr
+    def tenant_id(cls) -> Mapped[int]:
+        # `declared_attr` rather than a plain class attribute: a ForeignKey
+        # object cannot be shared between tables, so each mapped subclass needs
+        # its own column built fresh.
+        return mapped_column(
+            Integer,
+            ForeignKey("tenants.id", ondelete="RESTRICT"),
+            nullable=False,
+            index=True,
+        )
 
 
 class Tenant(Base):
-    """One customer. There is exactly one, seeded by the migration, until P5."""
+    """One customer. The migration seeds one; the tenant-admin surface adds the
+    rest.
+
+    `slug` is the tenant's login handle: the short, stable string a person types
+    at the sign-in form so the portal knows *which* tenant's user table to look
+    their email up in. It exists because `users.email` is only unique per tenant
+    now -- the id is an implementation detail and `name` is prose, so neither is
+    something to type. It is unique globally, or the handle would name two
+    tenants and login would be ambiguous one level up.
+    """
 
     __tablename__ = "tenants"
+    # Named explicitly rather than left inline: an unnamed `unique=True` is
+    # `tenants_slug_key` when the schema is built from the models and
+    # `uq_tenants_slug` when it is built from the chain, and `compare_metadata`
+    # does not compare constraint names -- so the drift test cannot see the
+    # disagreement and the next revision to touch this constraint would guess
+    # the wrong name. Matches `uq_users_tenant_id_email` and `uq_targets_app`.
+    __table_args__ = (UniqueConstraint("slug", name="uq_tenants_slug"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    slug: Mapped[str] = mapped_column(String(63), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 
-class Project(Base):
-    __tablename__ = "projects"
+class User(TenantOwned, Base):
+    """One person who logs into the portal, a member of exactly one tenant.
+
+    P5 replaces the single shared password (QA_ADMIN_PASSWORD) with real
+    per-user auth: a user logs in as themselves, their session carries their
+    tenant, and `tenancy.current_tenant_id()` resolves from it. `role` gates the
+    tenant-admin actions (delivery approval, PAT rotation, quota/user changes).
+
+    `credential` is a password *hash*, never the password (app/auth.py owns the
+    algorithm). The table carries `tenant_id` like every other table -- the
+    membership column P5 was shaped around -- so the structural tenant tests
+    cover it for free.
+
+    **`email` is unique per tenant, not globally.** An address identifies a
+    person *inside* a tenant: two customers who both employ the same contractor
+    can each give them an account, and the first tenant to claim an address does
+    not lock every other tenant out of it. Within one tenant it is still one
+    address, one account, which is what makes "this email, in this tenant" a
+    lookup returning at most one row. The cost is that an email alone no longer
+    names an account, so login takes the tenant's `slug` as well -- see
+    `Tenant.slug` and `repo.get_user_for_login`.
+    """
+
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "email", name="uq_users_tenant_id_email"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    tenant_id: Mapped[int] = _tenant_col()
-    name: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    role: Mapped[UserRole] = mapped_column(_enum_col(UserRole), nullable=False)
+    credential: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class Project(TenantOwned, Base):
+    """A customer's grouping of targets.
+
+    **`name` is unique per tenant, not globally** (P5-02). Globally unique meant
+    the first customer to name a project "Checkout" denied the name to every
+    other customer, with a 409 they could do nothing about. The constraint is
+    named for the same reason `uq_users_tenant_id_email` is: an unnamed
+    `unique=True` gets a different name from the models than from the migration
+    chain, and `compare_metadata` does not compare constraint names, so the
+    drift test cannot see the disagreement.
+    """
+
+    __tablename__ = "projects"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_projects_tenant_id_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -93,7 +187,7 @@ class Project(Base):
     )
 
 
-class Target(Base):
+class Target(TenantOwned, Base):
     """A test-target application under test, and its configuration.
 
     P3 moved the configuration here from apps/<app>/app.json (DESIGN.md §4):
@@ -107,10 +201,17 @@ class Target(Base):
     """
 
     __tablename__ = "targets"
-    __table_args__ = (UniqueConstraint("app", name="uq_targets_app"),)
+    # Unique per tenant, not globally (P5-02). The slug is the application under
+    # test, not a label a customer picks freely: two customers testing the same
+    # public demo site or the same vendor's product collide by nature, and a
+    # global constraint gave the name to whoever registered first. Within one
+    # tenant it still identifies exactly one target, which is what its
+    # revisions, its blob keys and its delivered branch name are keyed on.
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "app", name="uq_targets_tenant_id_app"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    tenant_id: Mapped[int] = _tenant_col()
     project_id: Mapped[int] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
     )
@@ -136,11 +237,10 @@ class Target(Base):
     )
 
 
-class Run(Base):
+class Run(TenantOwned, Base):
     __tablename__ = "runs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    tenant_id: Mapped[int] = _tenant_col()
     run_key: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
     target_id: Mapped[int] = mapped_column(
         ForeignKey("targets.id", ondelete="CASCADE"), nullable=False
@@ -188,12 +288,11 @@ class Run(Base):
     )
 
 
-class RunStep(Base):
+class RunStep(TenantOwned, Base):
     __tablename__ = "run_steps"
     __table_args__ = (UniqueConstraint("run_id", "step", name="uq_run_steps_run_step"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    tenant_id: Mapped[int] = _tenant_col()
     run_id: Mapped[int] = mapped_column(
         ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
     )
@@ -206,11 +305,10 @@ class RunStep(Base):
     run: Mapped[Run] = relationship(back_populates="steps")
 
 
-class Artifact(Base):
+class Artifact(TenantOwned, Base):
     __tablename__ = "artifacts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    tenant_id: Mapped[int] = _tenant_col()
     run_id: Mapped[int] = mapped_column(
         ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
     )
@@ -226,7 +324,7 @@ class Artifact(Base):
     run: Mapped[Run] = relationship(back_populates="artifacts")
 
 
-class RunLog(Base):
+class RunLog(TenantOwned, Base):
     """One live log line of one run: the stream the portal reads by cursor.
 
     P4 moved the run into a container, so the lines have to land somewhere both
@@ -245,14 +343,13 @@ class RunLog(Base):
         ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
     )
     seq: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
-    tenant_id: Mapped[int] = _tenant_col()
     line: Mapped[str] = mapped_column(Text, nullable=False)
     at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
 
 
-class AppLock(Base):
+class AppLock(TenantOwned, Base):
     """One row per app that currently has a live run. The PK enforces the
     'no two live runs per app' rule; the lease lets a reaper free a dead run."""
 
@@ -261,7 +358,6 @@ class AppLock(Base):
     target_id: Mapped[int] = mapped_column(
         ForeignKey("targets.id", ondelete="CASCADE"), primary_key=True
     )
-    tenant_id: Mapped[int] = _tenant_col()
     run_id: Mapped[int] = mapped_column(
         ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
     )
@@ -270,7 +366,7 @@ class AppLock(Base):
     )
 
 
-class Revision(Base):
+class Revision(TenantOwned, Base):
     """An immutable snapshot of one target's tracked tree at a step boundary.
 
     Append-only and content-addressed: `tree_hash` names the tree, `FileIndex`
@@ -291,7 +387,6 @@ class Revision(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    tenant_id: Mapped[int] = _tenant_col()
     target_id: Mapped[int] = mapped_column(
         ForeignKey("targets.id", ondelete="CASCADE"), nullable=False
     )
@@ -319,7 +414,7 @@ class Revision(Base):
     )
 
 
-class FileIndex(Base):
+class FileIndex(TenantOwned, Base):
     """One tracked file inside one revision: its path and the blob holding it.
 
     **Derived data** (DESIGN.md decision 1). It exists so the portal can list
@@ -334,8 +429,18 @@ class FileIndex(Base):
         ForeignKey("revisions.id", ondelete="CASCADE"), primary_key=True
     )
     path: Mapped[str] = mapped_column(String(500), primary_key=True)
-    tenant_id: Mapped[int] = _tenant_col()
     blob_key: Mapped[str] = mapped_column(String(500), nullable=False)
     size: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     revision: Mapped[Revision] = relationship(back_populates="files")
+
+
+# Every tenant-owned entity above inherits `TenantOwned`, so one call covers
+# the whole schema: from here on, every ORM SELECT of one of them is filtered
+# by `tenancy.current_tenant_id()` unless it explicitly opts out through
+# `tenancy.across_tenants`. Installed at import of this module rather than from
+# main.py, so it is in force for the API, the orchestrator, the delivery CLI
+# and the test suite alike -- anything that can query has already imported the
+# models. There is deliberately no way to turn it off: a flag would let the
+# suite prove isolation in a configuration production does not run in.
+install_read_guard(TenantOwned)

@@ -25,10 +25,11 @@ change of *where* they run and not of *what* they do.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from . import config, repo, revisions, storage
@@ -46,6 +47,7 @@ from .sandbox import hydrate
 from .sandbox import session as agent_session
 from .storage import Storage
 from .target_config import config_of
+from .tenancy import tenant_scope
 
 log = logging.getLogger(__name__)
 
@@ -264,6 +266,50 @@ def run_with_worktree(
         emit("=== teardown: worktree removed ===")
 
 
+@contextlib.contextmanager
+def _run_tenant_scope(run_id: int, session_factory: SessionFactory) -> Iterator[None]:
+    """Bind the run's tenant for the duration of the work.
+
+    The thread/CI and sandbox paths have no request behind them, so nothing has
+    set `current_tenant_id()` the way `require_auth` does for a request. This is
+    the background equivalent of that seam: every insert the run makes -- its
+    revisions, its step rows, its log lines -- is written as the run's own
+    tenant rather than the resolver's default.
+
+    If the run cannot be read, the default stands and the work proceeds to fail
+    on its own terms a moment later -- the alternative, raising here, would skip
+    the `finally` in `drive_run` and leave a reader waiting on a stream nobody
+    will close. That is a deliberate trade and the reason it is **logged**: a
+    run that wrote someone else's tenant id must not be something only a
+    database query can discover.
+
+    **The read opts out of the enforced tenant filter** (P5-02), and it is the
+    one place where the reason is the plain chicken-and-egg: the guard filters
+    on `current_tenant_id()`, and establishing what that should answer is
+    precisely what this function is for. Filtered, the lookup would find only
+    tenant 1's runs, every other tenant's run would take the `except` branch
+    above, and the fallback -- deliberately quiet enough to let a run proceed --
+    would execute it as tenant 1. Its revisions, step rows and log lines would
+    be written into another customer's tenant. That is not a read leak but a
+    *write* misattribution, which is worse, and it is why this is a one-row
+    `get` by primary key rather than any wider query.
+    """
+    try:
+        with session_factory() as session:
+            tenant_id = repo.get_run_across_tenants(session, run_id).tenant_id
+    except Exception:
+        log.warning(
+            "could not resolve the tenant of run %s; proceeding as the default "
+            "tenant, which is wrong for any run that is not tenant 1",
+            run_id,
+            exc_info=True,
+        )
+        yield
+        return
+    with tenant_scope(tenant_id):
+        yield
+
+
 def drive_run(
     run_id: int,
     *,
@@ -280,6 +326,11 @@ def drive_run(
     so the entrypoint is testable without a container, exactly as
     `run_with_worktree` already allows.
 
+    The whole of the work runs inside the run's tenant scope, so
+    `current_tenant_id()` answers the run's tenant on the background path the
+    way the request's session answers it on the API path -- one resolver, two
+    ways of binding it.
+
     The heartbeat is taken **here**, inside whichever process does the work, so
     the reaper's crash detection measures the thing that is actually working
     rather than a thread in a process that may be fine while the run is not. It
@@ -290,26 +341,27 @@ def drive_run(
     emit = bus.emitter(run_id)
     runner = runner or make_runner()
     started = time.monotonic()
-    try:
-        # Inside the `try`, so a failure here still closes the stream a reader
-        # is waiting on rather than leaving it open on a run nothing is driving.
-        _restore_session(run_id, emit, session_factory=session_factory, store=store)
-        with heartbeat_during(run_id, session_factory=session_factory):
-            run_with_worktree(
-                run_id,
-                emit,
-                runner,
-                session_factory=session_factory,
-                store=store,
-            )
-    finally:
-        # Both in a `finally`, so every way out of a run records what it cost
-        # and leaves the agent's session where a resume can find it. A pause
-        # does not come through here at all -- its container is killed outright
-        # -- which is why the session is archived at each step boundary too.
-        _persist_session(run_id, emit, session_factory=session_factory, store=store)
-        _record_cost(run_id, runner, started, session_factory=session_factory)
-        bus.close(run_id)
+    with _run_tenant_scope(run_id, session_factory):
+        try:
+            # Inside the `try`, so a failure here still closes the stream a reader
+            # is waiting on rather than leaving it open on a run nothing is driving.
+            _restore_session(run_id, emit, session_factory=session_factory, store=store)
+            with heartbeat_during(run_id, session_factory=session_factory):
+                run_with_worktree(
+                    run_id,
+                    emit,
+                    runner,
+                    session_factory=session_factory,
+                    store=store,
+                )
+        finally:
+            # Both in a `finally`, so every way out of a run records what it cost
+            # and leaves the agent's session where a resume can find it. A pause
+            # does not come through here at all -- its container is killed outright
+            # -- which is why the session is archived at each step boundary too.
+            _persist_session(run_id, emit, session_factory=session_factory, store=store)
+            _record_cost(run_id, runner, started, session_factory=session_factory)
+            bus.close(run_id)
 
 
 def _restore_session(

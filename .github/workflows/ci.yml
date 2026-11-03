@@ -7,8 +7,12 @@
 name: CI
 
 on:
+  # After a merge lands on master (a push to the branch).
   push:
+    branches: [master]
+  # When a PR is raised against master.
   pull_request:
+    branches: [master]
 
 jobs:
   backend:

@@ -25,7 +25,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import apphub, authoring, delivery, repo, revisions, storage, target_config
-from .auth import AuthDep
+from .auth import AdminDep, AuthDep
 from .db import SessionLocal, get_session
 from .domain.status import RunStatus, is_live, is_terminal
 from .models import Artifact
@@ -397,7 +397,7 @@ def target_delivery_state(
     )
 
 
-@router.post("/targets/{target_id}/deliver", response_model=DeliveryOut)
+@router.post("/targets/{target_id}/deliver", response_model=DeliveryOut, dependencies=[AdminDep])
 def deliver_story(
     target_id: int,
     body: DeliverBody,
@@ -408,6 +408,10 @@ def deliver_story(
 
     Bootstrap is folded in under the same action (DESIGN.md decision 16), so an
     operator approving a delivery is approving "set the repo up and deliver".
+
+    Delivery approval is the tenant-admin action P5 cares most about -- it is
+    the write into a customer's repo -- so it is gated on the admin role
+    (DESIGN.md §13). A non-admin is refused before any push happens.
     """
     target = _target_or_404(session, target_id)
     try:
@@ -437,14 +441,17 @@ def deliver_story(
     )
 
 
-@router.post("/targets/{target_id}/reset", response_model=DeliveryOut)
+@router.post("/targets/{target_id}/reset", response_model=DeliveryOut, dependencies=[AdminDep])
 def reset_target_repo(
     target_id: int,
     body: ResetBody,
     session: Session = Depends(get_session),
     tools: delivery.Tools = Depends(get_delivery_tools),
 ):
-    """DESTRUCTIVE: wipe the target repo. Requires the repo name echoed back."""
+    """DESTRUCTIVE: wipe the target repo. Requires the repo name echoed back.
+
+    A write into the customer's repo, so it is gated on the admin role like
+    delivery approval: a non-admin is refused."""
     target = _target_or_404(session, target_id)
     try:
         result = delivery.reset_target(

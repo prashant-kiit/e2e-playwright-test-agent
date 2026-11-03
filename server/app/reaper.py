@@ -49,12 +49,19 @@ import logging
 import threading
 from collections.abc import Callable, Iterator
 
+from sqlalchemy.orm import Session
+
 from . import config, repo
 from .db import SessionLocal
 from .domain import lease
 from .orchestrator.bus import prune_run_logs
+from .tenancy import tenant_scope
 
 log = logging.getLogger(__name__)
+
+# One maintenance sweep, run inside a tenant's scope: it is handed a session
+# and returns the run ids it acted on.
+Sweep = Callable[[Session], list[int]]
 
 REAP_INTERVAL_S = 30.0
 JOIN_TIMEOUT_S = 10.0
@@ -143,16 +150,28 @@ async def reaper_loop(
                 idle = await asyncio.to_thread(_idle_sandboxes, session_factory)
                 for run_id in list(reaped) + overdue + idle:
                     try:
-                        await asyncio.to_thread(reap_sandbox, run_id)
+                        # Both steps run as the run's own tenant: each reads the
+                        # run row, and a filtered read outside its tenant finds
+                        # nothing (see `_tenant_of`). The scope is a ContextVar
+                        # and `asyncio.to_thread` copies the context, so binding
+                        # it here reaches the worker thread.
+                        tenant_id = await asyncio.to_thread(
+                            _tenant_of, session_factory, run_id
+                        )
+                        with tenant_scope(tenant_id):
+                            await asyncio.to_thread(reap_sandbox, run_id)
+                            if run_id in idle:
+                                # A paused or finished run has no sandbox once
+                                # this has run, and the row should say so: the
+                                # stop path reads that column, and a handle left
+                                # on the row would make the next sweep do this
+                                # all over again.
+                                await asyncio.to_thread(
+                                    _forget_sandbox, session_factory, run_id
+                                )
                     except Exception:  # pragma: no cover - best effort by design
                         log.warning("reaping the sandbox of run %s failed", run_id)
                         continue
-                    if run_id in idle:
-                        # A paused or finished run has no sandbox once this has
-                        # run, and the row should say so: the stop path reads
-                        # that column, and a handle left on the row would make
-                        # the next sweep do this all over again.
-                        await asyncio.to_thread(_forget_sandbox, session_factory, run_id)
             try:
                 await asyncio.to_thread(_prune_once, session_factory)
             except Exception:  # pragma: no cover - a failed prune is not an outage
@@ -163,22 +182,88 @@ async def reaper_loop(
             log.exception("reaper pass failed; continuing")
 
 
-def _reap_once(session_factory=SessionLocal) -> list[int]:
+def _for_each_tenant(session_factory, sweep: Sweep) -> list[int]:
+    """Run one sweep once per tenant, each inside that tenant's scope.
+
+    The shape every maintenance pass takes once reads are filtered by tenant
+    (P5-02). The reaper has no request and no run behind it, so
+    `current_tenant_id()` answers the seeded default: a sweep that just queried
+    would maintain tenant 1 and silently leave every other customer's crashed
+    runs holding their apps, reporting a clean pass each time round.
+
+    Binding each tenant in turn is deliberately preferred to reading across
+    tenants once. These sweeps are not single queries -- `reap_expired` reads
+    locks, then each lock's run, then frees it -- so an unfiltered outer query
+    would need every nested read opted out too, and the opt-out would then be
+    the normal case in the one module whose job is to touch every tenant's
+    rows. Here each pass is ordinary scoped work, and the only thing that knows
+    about tenants is this loop.
+
+    **One tenant's failure does not stop the others.** The reaper is what frees
+    an app lock, so a single tenant with a wedged row must not be able to park
+    every other tenant's apps indefinitely -- a noisy neighbour holding a
+    control, not just a resource. Each tenant is logged and skipped on its own.
+    """
     with session_factory() as session:
-        return repo.reap_expired(session)
+        tenant_ids = repo.list_tenant_ids(session)
+    swept: list[int] = []
+    for tenant_id in tenant_ids:
+        try:
+            with tenant_scope(tenant_id), session_factory() as session:
+                swept.extend(sweep(session))
+        except Exception:
+            # Not `pragma: no cover` -- unlike the best-effort handlers below,
+            # this branch is the point of the surrounding docstring and
+            # test_reaper.py drives it.
+            log.warning(
+                "a maintenance sweep failed for tenant %s; continuing with the "
+                "remaining tenants",
+                tenant_id,
+                exc_info=True,
+            )
+    return swept
+
+
+def _reap_once(session_factory=SessionLocal) -> list[int]:
+    return _for_each_tenant(session_factory, repo.reap_expired)
 
 
 def _sweep_overdue(session_factory=SessionLocal) -> list[int]:
-    with session_factory() as session:
-        overdue = repo.fail_overdue_runs(session, max_age_s=config.run_timeout_s())
+    overdue = _for_each_tenant(
+        session_factory,
+        lambda session: repo.fail_overdue_runs(
+            session, max_age_s=config.run_timeout_s()
+        ),
+    )
     if overdue:
         log.warning("failed %d run(s) past the run wall clock: %s", len(overdue), overdue)
     return overdue
 
 
 def _idle_sandboxes(session_factory=SessionLocal) -> list[int]:
+    return _for_each_tenant(session_factory, repo.idle_sandbox_runs)
+
+
+def _tenant_of(session_factory, run_id: int) -> int:
+    """Which tenant owns this run. The reaper's single cross-tenant read.
+
+    The sweeps above collect run ids across every tenant, and what is done with
+    them afterwards -- destroying a sandbox, clearing its handle -- reads the
+    run row again, through code that is right to be filtered
+    (`dispatch.destroy_sandbox` calls `repo.get_run`). Outside a scope those
+    reads would find nothing for any run but tenant 1's, so a reaped run
+    elsewhere would keep its container and its handle: money burning on a
+    container nobody will look for again, which is the one thing P4's limits
+    exist to stop.
+
+    A plain function rather than a context manager wrapping the scope, so the
+    **query** can go through `asyncio.to_thread` like every other database call
+    in `reaper_loop` while the caller holds the scope. A context manager would
+    have had to open its session on the event loop, which is the one thing this
+    loop is careful never to do.
+    """
     with session_factory() as session:
-        return repo.idle_sandbox_runs(session)
+        return repo.get_run_across_tenants(session, run_id).tenant_id
 
 
 def _forget_sandbox(session_factory, run_id: int) -> None:

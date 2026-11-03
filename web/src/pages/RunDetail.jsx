@@ -28,22 +28,54 @@ export default function RunDetail() {
   }
 
   // Initial load + live log stream.
+  //
+  // The stream needs its own session handling: `EventSource` opens its own
+  // connection, so `api.js`'s refresh-on-401 never sees it, and per spec it
+  // does *not* reconnect after an HTTP error status -- it fires `error` once
+  // and stays shut. With a 15-minute access cookie that would leave the log
+  // pane silently and permanently empty (the status beside it keeps polling),
+  // so a failed connection renews the session and reopens once.
   useEffect(() => {
+    let es = null;
+    let done = false; // the effect has been torn down, or the run has ended
+    let retried = false;
+
+    function open() {
+      es = new EventSource(`/runs/${id}/events`, { withCredentials: true });
+      es.onmessage = (ev) => {
+        // A line delivered means the connection works, which earns the stream
+        // a fresh retry: a long run can outlive more than one expiry.
+        retried = false;
+        try {
+          setLog((l) => [...l, JSON.parse(ev.data)]);
+        } catch {
+          setLog((l) => [...l, ev.data]);
+        }
+      };
+      es.addEventListener("end", () => {
+        done = true;
+        es.close();
+        refetch().catch(() => {});
+      });
+      es.onerror = async () => {
+        es.close();
+        // `retried` bounds this: a stream that fails again without having
+        // delivered anything is failing for a reason no cookie can fix, and
+        // reopening on that would spin.
+        if (done || retried) return;
+        retried = true;
+        if (await api.renewSession()) {
+          if (!done) open();
+        }
+      };
+    }
+
     refetch().catch((e) => setError(String(e.message || e)));
-    const es = new EventSource(`/runs/${id}/events`, { withCredentials: true });
-    es.onmessage = (ev) => {
-      try {
-        setLog((l) => [...l, JSON.parse(ev.data)]);
-      } catch {
-        setLog((l) => [...l, ev.data]);
-      }
+    open();
+    return () => {
+      done = true;
+      es?.close();
     };
-    es.addEventListener("end", () => {
-      es.close();
-      refetch().catch(() => {});
-    });
-    es.onerror = () => es.close();
-    return () => es.close();
   }, [id]);
 
   // Poll run/steps while the run is live (SSE covers the log).

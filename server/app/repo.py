@@ -19,9 +19,9 @@ from . import target_config
 from .domain import lease
 from .domain.status import LIVE, TERMINAL, RunStatus, assert_transition, is_live
 from .domain.steps import Step
-from .models import AppLock, Project, Run, RunStep, Target
+from .models import AppLock, Project, Run, RunStep, Target, Tenant, User
 from .sandbox.egress import Resolver
-from .tenancy import current_tenant_id
+from .tenancy import ACROSS_TENANTS_OPTION, across_tenants, current_tenant_id
 
 VALID_MODES = ("changed", "full")
 
@@ -49,6 +49,61 @@ class RunConflict(RepoError):
         )
         self.target_id = target_id
         self.run_id = run_id
+
+
+# --- users ----------------------------------------------------------------
+
+def get_user_for_login(session: Session, tenant_slug: str, email: str) -> User | None:
+    """The user this email names *within the tenant this slug names*.
+
+    The one read that cannot filter on `current_tenant_id()`, because it runs
+    before there is a current tenant: establishing which tenant is acting is its
+    whole job. So it is scoped the only other way it can be -- by the slug the
+    caller supplied -- and the join is what keeps it a single-row lookup now
+    that `users.email` is unique only per tenant (`uq_users_tenant_id_email`).
+
+    None covers both an unknown slug and an unknown email, deliberately: the
+    caller turns either into the same 401 a wrong password gets, so a probe
+    cannot map out which tenants exist any more than which users do.
+
+    **The one read in `repo` that opts out of the enforced tenant filter**
+    (P5-02). It has to: the guard filters on `current_tenant_id()`, which
+    outside a session answers the seeded default, so without the opt-out this
+    query could only ever find users in tenant 1 -- every other tenant locked
+    out of their own portal, and the symptom a bare 401 indistinguishable from
+    a wrong password. The slug in the `where` is what replaces the filter, and
+    it is a *tighter* scope than the guard's, not a looser one: one named
+    tenant rather than whichever one happens to be current.
+    """
+    return session.scalars(
+        across_tenants(
+            select(User)
+            .join(Tenant, Tenant.id == User.tenant_id)
+            .where(Tenant.slug == tenant_slug, User.email == email)
+        )
+    ).one_or_none()
+
+
+# Creating and removing users is the tenant-admin surface, which is its own P5
+# ticket; this phase adds only what it uses, so there is no create_user here
+# yet. The seeded admin comes from the migration.
+
+
+# --- tenants --------------------------------------------------------------
+
+def list_tenant_ids(session: Session) -> list[int]:
+    """Every tenant's id, oldest first. What the background sweeps iterate.
+
+    No tenant filter and no opt-out needed: `tenants` is the one table that
+    does not carry `tenant_id` -- its own id *is* the tenant -- so it is not a
+    `TenantOwned` entity and the read guard never applied to it.
+
+    This is what lets the reaper stay inside the enforced read path rather than
+    around it (P5-02): a sweep binds each tenant in turn and does its ordinary,
+    filtered work, instead of issuing one unfiltered query whose nested reads
+    would each need an opt-out of their own.
+    """
+    return list(session.scalars(select(Tenant.id).order_by(Tenant.id)))
 
 
 # --- projects / targets --------------------------------------------------
@@ -378,6 +433,26 @@ def reap_expired(session: Session, now: datetime | None = None) -> list[int]:
 
 def get_run(session: Session, run_id: int) -> Run:
     run = session.get(Run, run_id)
+    if run is None:
+        raise NotFound(f"no run {run_id}")
+    return run
+
+
+def get_run_across_tenants(session: Session, run_id: int) -> Run:
+    """One run by id, **without** the tenant filter. Two callers, both correct.
+
+    `launcher._run_tenant_scope` reads a run in order to open its tenant scope,
+    so it cannot already be inside one; `reaper`'s sweeps run on a timer with
+    no tenant acting and must see every tenant's runs or they would maintain
+    tenant 1 alone. Both are in the allowlist in
+    tests/test_tenant_isolation_repo.py.
+
+    It is deliberately *not* a flag on `get_run`: an `across_tenants=False`
+    parameter would make the unscoped read reachable from every existing call
+    site by typo, and would not show up in a grep for the bypass. A separate,
+    awkwardly-named function is one a reviewer notices.
+    """
+    run = session.get(Run, run_id, execution_options=ACROSS_TENANTS_OPTION)
     if run is None:
         raise NotFound(f"no run {run_id}")
     return run
