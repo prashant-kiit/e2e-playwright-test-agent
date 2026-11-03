@@ -24,7 +24,7 @@ fakes, and what was deliberately deferred.
 > | #31 P5-01 — users table + session-resolved `current_tenant_id()` | Implemented (`e492a9d`, review fixes `06a3acd`). **Not independently re-verified in this record** — see the note below |
 > | #32 P5-02 — tenant-scoped reads + tenant-scoped uniqueness + fail-closed | **Complete.** The `users.email` half plus token expiry/refresh landed first (`105e9b7`); the enforced read path and the `projects`/`targets` composite uniqueness landed in the slice below, and were exercised against a live stack with a second real tenant |
 > | #34 P5-03 — per-tenant KMS-encrypted PATs, scope/expiry/fail-loud | **Complete, reviewed and closed.** The envelope, the per-target `Tools` binding, the save-time scope check, the portal surface and the structural credential tests. The two-axis review found two real credential leaks (the PAT in `Tools.__repr__`, a data key reachable in a `SealError`) and one half-true acceptance criterion (a git-transport 401/403 did not mark the credential invalid); all fixed — see §Follow-ups 27b. **Still not seen against a real KMS, a real GitHub token or a browser** — see §"What is covered only by fakes" |
-> | #35 P5-04 — per-tenant concurrency cap and monthly run quota at enqueue | **Complete.** The two columns, the typed 429 rejection above the `AppLock` trio, the usage endpoint and the portal gauges. Exercised against the live stack with the real dev database, where both breaches were driven over HTTP and left no run row. The two gaps it first shipped with — an untested portal surface, and caps that bounded only a configured tenant — were both closed in a second pass (follow-ups 28 and 29). Still unseen by a browser |
+> | #35 P5-04 — per-tenant concurrency cap and monthly run quota at enqueue | **Complete, and the first P5 slice seen in a real browser.** The two columns, the typed 429 rejection above the `AppLock` trio, the usage endpoint and the portal gauges. Both breaches driven over HTTP against the live stack, leaving no run row. The three gaps it shipped with were all closed in later passes: an untested portal surface, caps that bounded only a configured tenant (follow-ups 28 and 29), and — found by the browser check itself — `/usage` missing from both proxy lists, which made the panel invisible in the real app while 84 frontend tests passed |
 > | #33 P5-05, #36 P5-06, #37 P5-07 | Not started |
 >
 > **What this record does and does not claim.** The four §"Verified" sections below each
@@ -35,8 +35,10 @@ fakes, and what was deliberately deferred.
 > and then reverted and no second tenant exists in the dev database now. **P5-03's claims
 > rest on the suite, two by-hand migration runs on throwaway databases, and a two-axis
 > review that was re-run and acted on**; it has not met the live stack, a real KMS key or a
-> real GitHub PAT. A real browser has still not
-> been part of any P5 verification.
+> real GitHub PAT. **A real browser has now been part of one P5 slice**:
+> P5-04's usage panel was rendered in Chrome against the live stack, which is what caught
+> `/usage` missing from both proxy lists. P5-01 to P5-03's surfaces have still never been
+> rendered by one.
 
 ---
 
@@ -422,9 +424,44 @@ the platform") true only by luck. Revision `f1a62c90d4e7` gives both columns a *
 default**, the one mechanism both creation paths go through. `NULL` still means no cap; it is
 now asked for rather than inherited.
 
-Still true, and not closed by either: **no browser has rendered this panel.** jsdom executes
-the component, which is a different claim from a person or a headless Chrome seeing it, and no
-P5 slice has had the second kind of evidence.
+**A browser then rendered the panel, and the first thing it found was that the panel did not
+render.** This is the entry that most justifies its own existence, so it is written out in
+full.
+
+`GET /usage` was in **neither proxy list** — not nginx's `location ~ ^/(auth|projects|...)`
+in `docker/nginx.conf`, nor `apiPaths` in `web/vite.config.js`. The API's paths sit at the
+root and collide with the SPA's client routes, so both configs carry an explicit allowlist of
+prefixes to forward. A path missing from it does **not** 404: it falls through to
+`try_files $uri /index.html` and answers **200 with the SPA shell**, `api.js` detects HTML and
+raises, and `Projects.jsx`'s deliberately forgiving `.catch(() => setUsage(null))` swallows it.
+The gauges simply were not there. Every one of the 84 frontend tests passed throughout,
+because **jsdom has no proxy** — there is no configuration between the component and its
+mocked `api`, so this class of bug is structurally invisible to them.
+
+Fixed in both configs, and then covered so the next route cannot repeat it:
+`test_api_proxy_paths.py` extracts every root path `web/src/api.js` requests (plus
+`RunDetail.jsx`'s `EventSource`, which bypasses `api.js` on purpose) and asserts each appears
+in both lists, that the two lists agree with each other, and — guarding the guard — that the
+extraction actually found the known endpoints, since a regex matching nothing would make the
+whole file vacuously green. 20 tests, and it isolated exactly `/usage` while passing for the
+nine prefixes that were already correct.
+
+**What was seen, in Chrome, against the live stack** (screenshots in `.playwright-mcp/`,
+gitignored):
+
+| State | Rendered |
+|---|---|
+| Caps `3`/`500`, nothing running | `RUNNING NOW 0 of 3`, `THIS MONTH 0 of 500` |
+| `max_concurrent_runs` set to `0` | the concurrency gauge amber-bordered and inline-annotated "at your concurrent-run cap — wait for a run to finish, or stop one"; **the monthly gauge unchanged**, which is the two-independent-gauges decision visible |
+| Pressing **Start QA run** at that cap | the row shows the server's own sentence — "this tenant already has 0 of 0 runs going at once; wait for one to finish or stop one, then start this again" — and `runs`/`app_locks` were unchanged afterwards |
+
+The dev database was returned to its seven runs and `3`/`500` caps. The "0 of 0" wording
+noted earlier as reading oddly is confirmed to read oddly on screen; it is still only
+reachable in the degenerate suspension configuration used here as an instrument.
+
+**The honest limit of even this.** A browser rendered it and a person looked at the result;
+that is one viewport, one theme and one data shape. It is not cross-browser, not responsive
+and not accessibility-audited, and nothing in P5 claims otherwise.
 
 ---
 

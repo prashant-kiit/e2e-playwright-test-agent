@@ -14,6 +14,11 @@ const apiPaths = [
   "/apps",
   "/prompts",
   "/settings",
+  // P5-04's quota panel. Adding a route to api.js and forgetting this list does
+  // not 404 -- it answers 200 with the SPA shell, and a caller that degrades
+  // gracefully renders nothing at all. `test_api_proxy_paths.py` asserts this
+  // list and nginx's against api.js so the next one fails a test instead.
+  "/usage",
   "/health",
 ];
 // API paths sit at the root and collide with SPA client routes (/settings,
