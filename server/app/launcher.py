@@ -282,10 +282,21 @@ def _run_tenant_scope(run_id: int, session_factory: SessionFactory) -> Iterator[
     will close. That is a deliberate trade and the reason it is **logged**: a
     run that wrote someone else's tenant id must not be something only a
     database query can discover.
+
+    **The read opts out of the enforced tenant filter** (P5-02), and it is the
+    one place where the reason is the plain chicken-and-egg: the guard filters
+    on `current_tenant_id()`, and establishing what that should answer is
+    precisely what this function is for. Filtered, the lookup would find only
+    tenant 1's runs, every other tenant's run would take the `except` branch
+    above, and the fallback -- deliberately quiet enough to let a run proceed --
+    would execute it as tenant 1. Its revisions, step rows and log lines would
+    be written into another customer's tenant. That is not a read leak but a
+    *write* misattribution, which is worse, and it is why this is a one-row
+    `get` by primary key rather than any wider query.
     """
     try:
         with session_factory() as session:
-            tenant_id = repo.get_run(session, run_id).tenant_id
+            tenant_id = repo.get_run_across_tenants(session, run_id).tenant_id
     except Exception:
         log.warning(
             "could not resolve the tenant of run %s; proceeding as the default "

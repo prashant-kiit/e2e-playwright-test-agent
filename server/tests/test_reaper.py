@@ -18,7 +18,8 @@ from datetime import timedelta
 from app import reaper, repo
 from app.domain import lease
 from app.domain.status import RunStatus
-from app.models import AppLock
+from app.models import AppLock, Tenant
+from app.tenancy import current_tenant_id, tenant_scope
 from tests.target_helpers import create_target
 
 
@@ -113,6 +114,73 @@ def test_reap_once_fails_an_expired_run_and_frees_the_app(session_factory):
     with session_factory() as s:
         fresh = repo.start_run(s, target_id=target_id, story_id="SCRUM-202", mode="full")
         assert fresh.status is RunStatus.PENDING
+
+
+def test_reap_once_frees_a_crashed_run_in_a_tenant_that_is_not_the_default(
+    session_factory,
+):
+    """The reaper maintains every tenant, not whichever one is current.
+
+    It runs on a timer with no request and no run behind it, so
+    `current_tenant_id()` answers the seeded default. Once reads are filtered
+    by tenant (P5-02), a sweep that simply queried would see tenant 1's runs
+    and no others -- so every other customer's crashed run would hold its app
+    for ever, and the portal would keep refusing new runs on it with "this app
+    already has a live run". Nothing would log an error: the sweep would report
+    a clean pass every thirty seconds.
+
+    A behavioural test, not a structural one: the proof is that tenant 2's app
+    accepts a new run afterwards.
+    """
+    with session_factory() as s:
+        s.add(Tenant(id=2, slug="second", name="Second"))
+        s.commit()
+
+    with tenant_scope(2):
+        target_id, run_id = _seed_run(session_factory, app="t2-app")
+        _expire_lease(session_factory, target_id, run_id)
+
+    # Called the way the loop calls it: outside any tenant scope.
+    reaped = reaper._reap_once(session_factory)
+
+    assert run_id in reaped
+    with tenant_scope(2):
+        assert _run_field(session_factory, run_id, "status") is RunStatus.FAILED
+        with session_factory() as s:
+            fresh = repo.start_run(
+                s, target_id=target_id, story_id="SCRUM-202", mode="full"
+            )
+            assert fresh.status is RunStatus.PENDING
+
+
+def test_one_tenants_failing_sweep_does_not_stop_the_others(session_factory):
+    """A noisy neighbour must not be able to park everyone else's apps.
+
+    The reaper is the only thing that frees an app lock, so a sweep that gave
+    up on the first tenant that raised would leave every later tenant's crashed
+    runs holding their targets -- one customer's bad row denying service to the
+    rest. Each tenant is swept on its own and logged on failure.
+
+    The failure is injected by tenant, which is the axis that matters here; the
+    run it leaves behind for tenant 2 is the evidence the sweep carried on.
+    """
+    with session_factory() as s:
+        s.add(Tenant(id=2, slug="second", name="Second"))
+        s.commit()
+    with tenant_scope(2):
+        target_id, run_id = _seed_run(session_factory, app="t2-app")
+        _expire_lease(session_factory, target_id, run_id)
+
+    def sweep(session):
+        if current_tenant_id() == 1:
+            raise RuntimeError("tenant 1's sweep is wedged")
+        return repo.reap_expired(session)
+
+    swept = reaper._for_each_tenant(session_factory, sweep)
+
+    assert swept == [run_id]  # tenant 1 raised; tenant 2 was still swept
+    with tenant_scope(2):
+        assert _run_field(session_factory, run_id, "status") is RunStatus.FAILED
 
 
 def test_reap_once_leaves_a_paused_run_alone(session_factory):

@@ -14,8 +14,13 @@ import app.models  # noqa: F401  (register the ORM tables on Base.metadata)
 from app import repo
 from app.db import Base
 from app.domain.roles import UserRole
-from app.models import Revision, Tenant, User
-from app.tenancy import DEFAULT_TENANT_ID, current_tenant_id, tenant_scope
+from app.models import Project, Revision, Target, Tenant, User
+from app.tenancy import (
+    DEFAULT_TENANT_ID,
+    across_tenants,
+    current_tenant_id,
+    tenant_scope,
+)
 from tests.target_helpers import create_target
 
 
@@ -222,8 +227,12 @@ def test_two_tenants_can_hold_the_same_user_email(session):
         )
     session.commit()  # no IntegrityError
 
+    # Read across tenants deliberately: the claim is about what the *database*
+    # holds, and no tenant is allowed to see both of these rows. The enforced
+    # read path (P5-02) would otherwise show this test only tenant 1's, which
+    # is the filter working rather than the constraint failing.
     rows = session.scalars(
-        repo.select(User).where(User.email == "ops@contractor.com")
+        across_tenants(repo.select(User).where(User.email == "ops@contractor.com"))
     ).all()
     assert sorted(u.tenant_id for u in rows) == [DEFAULT_TENANT_ID, 2]
 
@@ -243,3 +252,70 @@ def test_one_tenant_cannot_hold_the_same_email_twice(session):
         )
     with pytest.raises(IntegrityError):
         session.commit()
+
+
+# --- a project name and an app slug are unique per tenant ---------------
+
+def test_two_tenants_can_register_the_same_app_slug(session):
+    """The constraint flip P5-02 exists for.
+
+    `uq_targets_app` was global, so the first tenant to register `saucedemo`
+    took the name from every other customer -- and the slug is not a label they
+    chose freely: it is the app they are testing, so two customers testing the
+    same public demo site, or the same vendor's product, collided by nature.
+    The refusal would have arrived as a 409 on target creation with nothing the
+    operator could do about it.
+    """
+    session.add(Tenant(id=2, slug="second", name="second"))
+    session.commit()
+
+    project_ids = {}
+    for tenant_id in (DEFAULT_TENANT_ID, 2):
+        with tenant_scope(tenant_id):
+            project = repo.create_project(session, name="shared-name")
+            project_ids[tenant_id] = project.id
+            create_target(session, project.id, app="saucedemo", name="Sauce")
+
+    # Both exist, each owned by its own tenant -- read across tenants because
+    # by design no single tenant may see both.
+    rows = session.scalars(
+        across_tenants(repo.select(Target).where(Target.app == "saucedemo"))
+    ).all()
+    assert sorted(t.tenant_id for t in rows) == [DEFAULT_TENANT_ID, 2]
+    assert len({t.project_id for t in rows}) == 2  # and under its own project
+
+
+def test_two_tenants_can_use_the_same_project_name(session):
+    """`projects.name` was globally unique for the same reason and with the
+    same consequence: a customer naming a project "Checkout" denied the name to
+    everyone else."""
+    session.add(Tenant(id=2, slug="second", name="second"))
+    session.commit()
+
+    for tenant_id in (DEFAULT_TENANT_ID, 2):
+        with tenant_scope(tenant_id):
+            repo.create_project(session, name="Checkout")
+
+    rows = session.scalars(
+        across_tenants(repo.select(Project).where(Project.name == "Checkout"))
+    ).all()
+    assert sorted(p.tenant_id for p in rows) == [DEFAULT_TENANT_ID, 2]
+
+
+def test_one_tenant_cannot_register_the_same_app_slug_twice(session):
+    """Composite, not absent. Within a tenant the slug still identifies one
+    target: it is what the target's revisions, blobs and delivered branch names
+    are keyed on, so two targets sharing it inside one tenant would make those
+    ambiguous."""
+    project = repo.create_project(session, name="demo")
+    create_target(session, project.id, app="saucedemo", name="Sauce")
+    with pytest.raises(IntegrityError):
+        create_target(session, project.id, app="saucedemo", name="Sauce again")
+    session.rollback()
+
+
+def test_one_tenant_cannot_use_the_same_project_name_twice(session):
+    repo.create_project(session, name="Checkout")
+    with pytest.raises(IntegrityError):
+        repo.create_project(session, name="Checkout")
+    session.rollback()

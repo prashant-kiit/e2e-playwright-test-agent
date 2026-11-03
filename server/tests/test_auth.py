@@ -21,6 +21,7 @@ from app.db import get_session
 from app.domain.roles import UserRole
 from app.main import app
 from app.models import Project, Tenant, User
+from app.tenancy import across_tenants
 
 # The migration seeds this operator; see the P5 users migration.
 SEED_ADMIN_EMAIL = "admin@example.com"
@@ -191,7 +192,15 @@ def test_an_insert_in_a_session_uses_that_users_tenant(client):
     r = client.post("/projects", json={"name": "owned-by-t2"})
     assert r.status_code == 201
 
-    project = s.scalars(select(Project).where(Project.name == "owned-by-t2")).one()
+    # The assertion reads across tenants on purpose: this test is standing
+    # outside both of them, checking which tenant the row was written to. From
+    # inside tenant 1 -- which is what `current_tenant_id()` answers here, with
+    # no request scope around the test body -- the enforced read path (P5-02)
+    # correctly hides a tenant-2 row, and the test would be unable to see the
+    # very thing it is asserting about.
+    project = s.scalars(
+        across_tenants(select(Project).where(Project.name == "owned-by-t2"))
+    ).one()
     assert project.tenant_id == 2
 
 

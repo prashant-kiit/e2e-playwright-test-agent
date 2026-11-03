@@ -27,8 +27,12 @@ through them. The indirection is the point.
 from __future__ import annotations
 
 import contextvars
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from types import MappingProxyType
+
+from sqlalchemy import event
+from sqlalchemy.orm import Session, with_loader_criteria
 
 # Seeded by the migration that introduces the tenants table.
 DEFAULT_TENANT_ID = 1
@@ -78,3 +82,121 @@ def tenant_scope(tenant_id: int) -> Iterator[None]:
         yield
     finally:
         _current_tenant.reset(token)
+
+
+# --- the enforced read path -----------------------------------------------
+#
+# The write side of tenancy was always one line at each insert
+# (`tenant_id=current_tenant_id()`), visible in review and asserted
+# structurally by tests/test_tenancy.py. The read side was not: a `select()`
+# that forgot `.where(tenant_id == ...)` looked exactly like one that did not
+# need it, and three modules filtered by hand while `repo.py` -- the module
+# every route goes through -- did not filter at all. That is how
+# `/artifacts/{id}/content` came to stream any tenant's bytes to any logged-in
+# user: nothing was wrong with the route, and nothing could have been seen to
+# be missing from it.
+#
+# So the filter stops being something a query remembers. One listener adds it
+# to every ORM SELECT, and forgetting is no longer possible -- what is possible
+# is *bypassing*, which takes an explicit execution option and is therefore
+# something a reviewer and a test can both find. #32's criterion, in one
+# sentence: a query that bypasses the filter is the detectable exception, not
+# the silent default.
+
+# The execution option that opts a statement out. Named, rather than a bare
+# string at each call site, so the allowlist test can find every user of it.
+ACROSS_TENANTS = "qa_across_tenants"
+
+# The same option as a mapping, for `Session.get()`, which takes
+# `execution_options=` as a mapping rather than as keywords. Read-only: it is
+# module-level and shared, and a caller that mutated it would silently change
+# what every other bypass means.
+ACROSS_TENANTS_OPTION: Mapping[str, bool] = MappingProxyType({ACROSS_TENANTS: True})
+
+
+def across_tenants(statement):
+    """Opt this statement out of the tenant filter. **Read the list first.**
+
+    There are exactly three legitimate reasons, all of them "no tenant is
+    acting yet, or every tenant is":
+
+    1. **Login.** `repo.get_user_for_login` runs before a current tenant
+       exists -- deciding which tenant is acting is its job. It is scoped by
+       the slug the caller typed instead.
+    2. **Resolving a run's own tenant.** `launcher._run_tenant_scope` reads the
+       run row in order to *open* the scope, so it cannot already be inside it.
+    3. **The background sweeps.** The reaper and the log prune run on a timer
+       with no request and no run behind them, so `current_tenant_id()` would
+       answer the seeded default and they would quietly maintain tenant 1
+       alone -- every other tenant's crashed runs holding their apps for ever.
+
+    Anything else is a bug. A new call site must be added to the allowlist in
+    tests/test_tenant_isolation_repo.py, which is the test that makes this
+    function an exception rather than an escape hatch.
+    """
+    return statement.execution_options(**ACROSS_TENANTS_OPTION)
+
+
+def install_read_guard(tenant_owned: type) -> None:
+    """Filter every ORM SELECT of a tenant-owned entity by the current tenant.
+
+    `tenant_owned` is the mixin every table with a `tenant_id` inherits
+    (`models.TenantOwned`); `with_loader_criteria` applies the criteria to all
+    of its mapped subclasses at once, which is what makes this one listener
+    cover the whole schema instead of one entity.
+
+    **What it covers**, each confirmed against a real session rather than
+    assumed: entity selects, `Session.get()` (so a direct-id read of someone
+    else's row answers `None`, and every `repo.get_*` raises `NotFound`),
+    column and aggregate selects, and lazy relationship loads -- the criteria
+    propagates from the originating query, so `run.steps` cannot walk into
+    another tenant.
+
+    **What it does not cover**, and must not be mistaken for covering:
+
+    * **ORM UPDATE and DELETE.** `is_select` is false for them, so a bulk
+      `delete(RunLog)` is unfiltered. Writes are reached through a guarded read
+      first everywhere in `repo.py` (every mutator calls `get_run`/`get_target`
+      before touching a row), and the one bulk delete there is --
+      `bus.prune_run_logs` -- is a retention sweep that *should* span tenants.
+      A future bulk write that must not span tenants has to say so itself.
+    * **Raw SQL.** `session.execute(text(...))` is not an ORM statement.
+      The test fixtures' TRUNCATE is the only such thing in the tree.
+    * **The identity map.** A row already loaded in a session is returned by
+      `get()` without a SELECT, so a session that bypassed the filter once can
+      hand that object back afterwards. No request does: the bypass is used by
+      login and by background sweeps, which open their own sessions.
+
+    Installed once, at import of app/models.py, so it is in force for the API,
+    the orchestrator, the CLI and the tests alike. There is no "guard off"
+    mode: a flag would mean the suite could prove isolation in a configuration
+    production does not run in.
+    """
+    @event.listens_for(Session, "do_orm_execute")
+    def _filter_by_tenant(state) -> None:
+        if not state.is_select or state.is_column_load or state.is_relationship_load:
+            # A column load is a refresh of an already-loaded row, and a
+            # relationship load inherits the criteria from the query that
+            # loaded its parent; re-applying to either is at best redundant.
+            return
+        if state.execution_options.get(ACROSS_TENANTS):
+            return
+        # Resolved *outside* the lambda, and this is load-bearing rather than
+        # stylistic. `with_loader_criteria`'s criteria is lambda SQL: the
+        # lambda is analysed once and thereafter its *closure variables* are
+        # re-extracted as bound parameters without the body being re-invoked.
+        # A `current_tenant_id()` call inside the lambda would therefore be
+        # evaluated once and baked in -- every later request reading the first
+        # one's tenant, which is the exact bug this guard exists to prevent,
+        # introduced by the guard itself. SQLAlchemy refuses that form outright
+        # ("Can't invoke Python callable ... inside of lambda expression"),
+        # which is how this was found; the local keeps it a tracked closure
+        # variable, re-bound on every execution.
+        tenant_id = current_tenant_id()
+        state.statement = state.statement.options(
+            with_loader_criteria(
+                tenant_owned,
+                lambda cls: cls.tenant_id == tenant_id,
+                include_aliases=True,
+            )
+        )

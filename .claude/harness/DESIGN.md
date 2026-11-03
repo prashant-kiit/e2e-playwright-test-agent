@@ -58,11 +58,15 @@ Postgres stores **no file content** — only pointers, metadata and state.
 ```
 tenants(id, name, created_at)
 users(id, tenant_id, email, role, …)
+        UNIQUE(tenant_id, email)                  -- an address identifies a
+                                                  -- person *inside* a tenant (P5)
 projects(id, tenant_id, name)
+        UNIQUE(tenant_id, name)                   -- per tenant, not global (P5)
 targets(id, tenant_id, project_id, app, name,
         baseURL, locators, agentNotes,            -- config, versioned
         targetRepo, targetBranch,
         github_pat_ciphertext, pat_expires_at, credential_state)
+        UNIQUE(tenant_id, app)                    -- per tenant, not global (P5)
 
 revision(id, tenant_id, target_id, rev, parent_rev,
          tree_hash, produced_by_run, delivered_sha,
@@ -617,6 +621,9 @@ one hook by the caller. Recorded here because the natural way to write P2 is to 
 | 25 | Egress enforced at the network layer: an internal network plus a per-run allowlisting proxy that resolves (P4) |
 | 26 | The live log is a Postgres table read by cursor; `session.jsonl` is still the durable record (P4) |
 | 27 | Pause reaps immediately — the route that pauses destroys the container, not the next step boundary; the **agent session** is a run artifact archived at every boundary, and a failed restore loses context rather than the run (P4) |
+| 28 | **Tenant-scoped reads are enforced, not remembered**: one `do_orm_execute` listener adds the filter to every ORM SELECT of a `TenantOwned` row, so a query cannot forget it — only explicitly opt out, and the opt-outs are a pinned allowlist. Installed at import with no off switch, because a flag would let the suite prove isolation in a configuration production does not run in (P5) |
+| 29 | Another tenant's row is **404, not 403**: a reader who does not own a row must not be able to tell "exists, not yours" from "does not exist", or the small integer ids become an inventory of what other tenants hold (P5) |
+| 30 | Background sweeps **iterate tenants** rather than reading across them. A sweep is not one query (`reap_expired` reads locks, then each lock's run, then frees it), so an unfiltered outer query would need every nested read opted out too — and the opt-out would become the normal case in the one module that touches every tenant's rows. One tenant's failure does not stop the others: the reaper is the only thing that frees an app lock (P5) |
 
 ---
 
