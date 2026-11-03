@@ -133,3 +133,109 @@ describe("the authoring surface", () => {
     expect(api.bootstrapApp).toBeUndefined();
   });
 });
+
+describe("the expired-access-token dance", () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  function mockSequence(responses) {
+    const calls = [];
+    global.fetch = vi.fn().mockImplementation((path, opts) => {
+      calls.push([path, opts]);
+      const r = responses.shift();
+      return Promise.resolve({
+        status: r.status,
+        ok: r.status >= 200 && r.status < 300,
+        statusText: "err",
+        headers: { get: () => "application/json" },
+        json: async () => r.body ?? {},
+        text: async () => JSON.stringify(r.body ?? {}),
+      });
+    });
+    return calls;
+  }
+
+  it("refreshes once on 401 and replays the original request", async () => {
+    // The access cookie has expired mid-session: the call 401s, /auth/refresh
+    // mints a new one, and the retry succeeds -- so the operator never sees it.
+    const calls = mockSequence([
+      { status: 401 },
+      { status: 200, body: { ok: true } },
+      { status: 200, body: [{ id: 1, name: "p" }] },
+    ]);
+    expect(await api.listProjects()).toEqual([{ id: 1, name: "p" }]);
+    expect(calls.map(([p]) => p)).toEqual(["/projects", "/auth/refresh", "/projects"]);
+    expect(calls[1][1].method).toBe("POST");
+  });
+
+  it("gives up with AuthError when the refresh also fails", async () => {
+    // The refresh token has aged out too: there is nothing left to trade, so
+    // this has to surface as AuthError and send the operator to the login form.
+    const calls = mockSequence([{ status: 401 }, { status: 401 }]);
+    await expect(api.listProjects()).rejects.toBeInstanceOf(AuthError);
+    expect(calls.map(([p]) => p)).toEqual(["/projects", "/auth/refresh"]);
+  });
+
+  it("retries only once, so a 401 cannot loop", async () => {
+    const calls = mockSequence([
+      { status: 401 },
+      { status: 200, body: { ok: true } },
+      { status: 401 },
+    ]);
+    await expect(api.listProjects()).rejects.toBeInstanceOf(AuthError);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("does not try to refresh a failed login", async () => {
+    // A wrong password is not an expired session; refreshing here would be a
+    // wasted round trip, and on a live session it would replay the bad
+    // credentials against a freshly minted cookie.
+    const calls = mockSequence([{ status: 401 }]);
+    await expect(api.login("default", "dev@example.com", "wrong")).rejects.toBeInstanceOf(
+      AuthError,
+    );
+    expect(calls.map(([p]) => p)).toEqual(["/auth/login"]);
+  });
+
+  it("shares one refresh between concurrent 401s", async () => {
+    // Three panels load at once and all three 401. One /auth/refresh, not
+    // three -- each extra one would be minting a cookie that invalidates
+    // nothing but costs a round trip.
+    const calls = mockSequence([
+      { status: 401 },
+      { status: 401 },
+      { status: 401 },
+      { status: 200, body: { ok: true } },
+      { status: 200, body: [] },
+      { status: 200, body: [] },
+      { status: 200, body: [] },
+    ]);
+    await Promise.all([api.listProjects(), api.listProjects(), api.listProjects()]);
+    expect(calls.filter(([p]) => p === "/auth/refresh")).toHaveLength(1);
+  });
+});
+
+describe("renewSession", () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it("reports whether the session was renewed, and never throws", async () => {
+    // For callers outside the fetch wrapper -- EventSource, which bypasses
+    // `req` entirely and cannot be retried by it.
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    expect(await api.renewSession()).toBe(true);
+
+    global.fetch = vi.fn().mockResolvedValue({ ok: false, status: 401 });
+    expect(await api.renewSession()).toBe(false);
+
+    global.fetch = vi.fn().mockRejectedValue(new Error("offline"));
+    expect(await api.renewSession()).toBe(false);
+  });
+
+  it("posts to /auth/refresh with credentials", async () => {
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    await api.renewSession();
+    const [path, opts] = global.fetch.mock.calls[0];
+    expect(path).toBe("/auth/refresh");
+    expect(opts.method).toBe("POST");
+    expect(opts.credentials).toBe("include");
+  });
+});

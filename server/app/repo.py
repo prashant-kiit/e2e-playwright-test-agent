@@ -19,7 +19,7 @@ from . import target_config
 from .domain import lease
 from .domain.status import LIVE, TERMINAL, RunStatus, assert_transition, is_live
 from .domain.steps import Step
-from .models import AppLock, Project, Run, RunStep, Target, User
+from .models import AppLock, Project, Run, RunStep, Target, Tenant, User
 from .sandbox.egress import Resolver
 from .tenancy import current_tenant_id
 
@@ -53,15 +53,24 @@ class RunConflict(RepoError):
 
 # --- users ----------------------------------------------------------------
 
-def get_user_by_email(session: Session, email: str) -> User | None:
-    """The user with this login handle, across tenants.
+def get_user_for_login(session: Session, tenant_slug: str, email: str) -> User | None:
+    """The user this email names *within the tenant this slug names*.
 
-    Login is by email alone -- the handle is globally unique -- so this is not
-    tenant-scoped: the whole point is to discover which tenant the caller
-    belongs to. Every *other* read is tenant-scoped; this is the one that
-    establishes the tenant.
+    The one read that cannot filter on `current_tenant_id()`, because it runs
+    before there is a current tenant: establishing which tenant is acting is its
+    whole job. So it is scoped the only other way it can be -- by the slug the
+    caller supplied -- and the join is what keeps it a single-row lookup now
+    that `users.email` is unique only per tenant (`uq_users_tenant_id_email`).
+
+    None covers both an unknown slug and an unknown email, deliberately: the
+    caller turns either into the same 401 a wrong password gets, so a probe
+    cannot map out which tenants exist any more than which users do.
     """
-    return session.scalars(select(User).where(User.email == email)).one_or_none()
+    return session.scalars(
+        select(User)
+        .join(Tenant, Tenant.id == User.tenant_id)
+        .where(Tenant.slug == tenant_slug, User.email == email)
+    ).one_or_none()
 
 
 # Creating and removing users is the tenant-admin surface, which is its own P5

@@ -100,7 +100,7 @@ def test_the_thread_path_binds_the_runs_tenant(session):
 
     from app.launcher import _run_tenant_scope
 
-    session.add(Tenant(id=2, name="second"))
+    session.add(Tenant(id=2, slug="second", name="second"))
     session.commit()
     with tenant_scope(2):
         project = repo.create_project(session, name="t2")
@@ -181,3 +181,65 @@ def test_delivered_sha_exists_and_is_never_written_in_p2(session):
     session.add(rev)
     session.commit()
     assert rev.delivered_sha is None
+
+
+# --- the tenant's login slug ---------------------------------------------
+
+def test_the_seeded_tenant_has_a_slug(session):
+    """A tenant needs a stable handle a person can type at the login form: the
+    id is an implementation detail and the name is prose. The migration gives
+    the seeded tenant `default`."""
+    (tenant,) = list(session.scalars(repo.select(Tenant)))
+    assert tenant.slug == "default"
+
+
+def test_two_tenants_cannot_share_a_slug(session):
+    """The slug is what login resolves a tenant *by*, so it has to be unique
+    globally -- otherwise the handle names two tenants and login is ambiguous
+    again, one level up."""
+    session.add(Tenant(id=2, slug="default", name="impostor"))
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+
+# --- a user's email is unique per tenant, not globally -------------------
+
+def test_two_tenants_can_hold_the_same_user_email(session):
+    """The point of the composite constraint: an address is an identity *inside*
+    a tenant. Two customers who both employ the same contractor can both give
+    them an account, and the first tenant to claim an address no longer locks
+    every other tenant out of it."""
+    session.add(Tenant(id=2, slug="second", name="second"))
+    session.commit()
+    for tenant_id in (DEFAULT_TENANT_ID, 2):
+        session.add(
+            User(
+                tenant_id=tenant_id,
+                email="ops@contractor.com",
+                role=UserRole.MEMBER,
+                credential="x",
+            )
+        )
+    session.commit()  # no IntegrityError
+
+    rows = session.scalars(
+        repo.select(User).where(User.email == "ops@contractor.com")
+    ).all()
+    assert sorted(u.tenant_id for u in rows) == [DEFAULT_TENANT_ID, 2]
+
+
+def test_one_tenant_cannot_hold_the_same_email_twice(session):
+    """Composite, not absent: within a tenant an address is still one account,
+    which is what makes "the user with this email, in this tenant" a lookup that
+    can return at most one row."""
+    for _ in range(2):
+        session.add(
+            User(
+                tenant_id=DEFAULT_TENANT_ID,
+                email="dup@example.com",
+                role=UserRole.MEMBER,
+                credential="x",
+            )
+        )
+    with pytest.raises(IntegrityError):
+        session.commit()

@@ -68,11 +68,28 @@ def _tenant_col() -> Mapped[int]:
 
 
 class Tenant(Base):
-    """One customer. There is exactly one, seeded by the migration, until P5."""
+    """One customer. The migration seeds one; the tenant-admin surface adds the
+    rest.
+
+    `slug` is the tenant's login handle: the short, stable string a person types
+    at the sign-in form so the portal knows *which* tenant's user table to look
+    their email up in. It exists because `users.email` is only unique per tenant
+    now -- the id is an implementation detail and `name` is prose, so neither is
+    something to type. It is unique globally, or the handle would name two
+    tenants and login would be ambiguous one level up.
+    """
 
     __tablename__ = "tenants"
+    # Named explicitly rather than left inline: an unnamed `unique=True` is
+    # `tenants_slug_key` when the schema is built from the models and
+    # `uq_tenants_slug` when it is built from the chain, and `compare_metadata`
+    # does not compare constraint names -- so the drift test cannot see the
+    # disagreement and the next revision to touch this constraint would guess
+    # the wrong name. Matches `uq_users_tenant_id_email` and `uq_targets_app`.
+    __table_args__ = (UniqueConstraint("slug", name="uq_tenants_slug"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    slug: Mapped[str] = mapped_column(String(63), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -88,17 +105,28 @@ class User(Base):
     tenant-admin actions (delivery approval, PAT rotation, quota/user changes).
 
     `credential` is a password *hash*, never the password (app/auth.py owns the
-    algorithm). `email` is globally unique: it is the login handle, so one
-    address is one account in one tenant. The table carries `tenant_id` like
-    every other table -- the membership column P5 was shaped around -- so the
-    structural tenant tests cover it for free.
+    algorithm). The table carries `tenant_id` like every other table -- the
+    membership column P5 was shaped around -- so the structural tenant tests
+    cover it for free.
+
+    **`email` is unique per tenant, not globally.** An address identifies a
+    person *inside* a tenant: two customers who both employ the same contractor
+    can each give them an account, and the first tenant to claim an address does
+    not lock every other tenant out of it. Within one tenant it is still one
+    address, one account, which is what makes "this email, in this tenant" a
+    lookup returning at most one row. The cost is that an email alone no longer
+    names an account, so login takes the tenant's `slug` as well -- see
+    `Tenant.slug` and `repo.get_user_for_login`.
     """
 
     __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "email", name="uq_users_tenant_id_email"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tenant_id: Mapped[int] = _tenant_col()
-    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
     role: Mapped[UserRole] = mapped_column(_enum_col(UserRole), nullable=False)
     credential: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at: Mapped[datetime] = mapped_column(

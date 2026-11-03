@@ -175,7 +175,7 @@ def test_a_file_route_on_a_missing_revision_is_404(client):
 
 def test_another_tenants_revision_is_not_readable(client, target, session):
     """Asserted with a second tenant row, so the filter is doing real work."""
-    session.add(Tenant(id=2, name="other"))
+    session.add(Tenant(id=2, slug="other", name="other"))
     session.commit()
     rev = client.get(f"/targets/{target}/revisions").json()[0]
 
