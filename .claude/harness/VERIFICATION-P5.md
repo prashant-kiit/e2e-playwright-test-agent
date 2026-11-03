@@ -12,9 +12,10 @@ fakes, and what was deliberately deferred.
 
 > ## P5 is OPEN. This record is partial.
 >
-> Two of seven tickets are complete **in the tree**; five are not started. Whether they are
-> closed **on the tracker** is a separate fact and the tracker is the source of it
-> (`docs/agents/issue-tracker.md`) — see §Follow-ups item 13, which is still open.
+> Two of seven tickets are complete **in the tree** and closed on the tracker; five are not
+> started. Those are two separate facts and the tracker is the source of the second one
+> (`docs/agents/issue-tracker.md`): #31 and #32 are closed `completed`, #30 and #33–#37 are
+> open.
 >
 > | Ticket | State in the tree |
 > |---|---|
@@ -25,9 +26,10 @@ fakes, and what was deliberately deferred.
 > **What this record does and does not claim.** The two §"Verified" sections below each cover
 > one slice, and every line in them was observed. P5-01's own evidence lives in its two
 > commit messages; it has not been re-run here, so this record does not vouch for it.
-> **A second real tenant now exists**, and P5-02's isolation claims were checked against it
-> over HTTP against the live stack; a real browser has still not been part of any P5
-> verification.
+> **P5-02's isolation claims were checked against a second real tenant** over HTTP against
+> the live stack. That tenant was deleted again afterwards, so the evidence was observed
+> and then reverted and no second tenant exists in the dev database now. A real browser
+> has still not been part of any P5 verification.
 
 ---
 
@@ -126,11 +128,20 @@ names tenant 1 already holds** — and got 201 for each, where the global constr
 have given it a 409 it could do nothing about. A *second* `saucedemo` inside `acme` was still
 refused, 409 "a target named 'saucedemo' already exists".
 
-**What was left in the dev database.** Tenant 2 (`acme`), its user `ops@acme.test`, project 2
-and target 2, plus the blobs target 2's revision 1 committed to SeaweedFS under `tenant/2/`.
-Left deliberately rather than cleaned up: it is the only second tenant that has ever existed
-here, and the tickets after this one want one. A `DELETE` of tenant 2's rows in FK order
-removes it if a pristine dev database matters more.
+**The second tenant was then removed.** Tenant 2 (`acme`), its user `ops@acme.test`, its
+project, its target, its revision and its 6 `file_index` rows were deleted in FK order, and
+the 6 blobs under `tenant/2/blobs/` were deleted from SeaweedFS. Checked before deleting:
+those blob keys were referenced by **tenant 2 alone** (— tenant blob keys are namespaced by
+tenant, so a shared blob is not possible across tenants by construction, and the query
+confirmed it). Checked after: no tenant-2 row remains anywhere, `tenant/2/` holds 0 objects,
+`tenant/1/blobs/` still holds 124, tenant 1 still has its project, target, 4 revisions and 7
+runs, and over HTTP it still logs in and reads its own rows and artifact bytes — while
+`acme`'s login is now a 401.
+
+So the evidence above was **observed and then reverted**, and the dev database is back to one
+tenant. This matters for how the table above should be read: it records what a second tenant
+*did*, not a second tenant you can go and look at. The next ticket that needs one creates it
+the same way, with SQL, until follow-up 6 lands.
 
 ---
 
@@ -164,11 +175,14 @@ removes it if a pristine dev database matters more.
 Named here as P1–P4 each named theirs, so the next ticket inherits a list rather than an
 impression.
 
-- ~~**A second real tenant.**~~ **Retired by P5-02.** Tenant `acme` exists in the dev
-  database, was logged into over HTTP against the live stack, and has a project and a target
-  of its own with revision 1 in blob storage. It was created with SQL and has never been
-  *logged into in a browser*, and it has no run of its own — so "a second tenant with a real
-  run" is still unproven, and the UI half still waits on follow-up 6.
+- ~~**A second real tenant.**~~ **Retired by P5-02, for the duration of the check.** Tenant
+  `acme` was created in the dev database, logged into over HTTP against the live stack, given
+  a project and a target of its own with revision 1 in blob storage, observed to see none of
+  tenant 1's rows and none of its own hidden — and then **deleted again**, so no second
+  tenant exists right now. It was created with SQL, was never *logged into in a browser*, and
+  never had a run, so "a second tenant with a real run" remains unproven and the UI half
+  still waits on follow-up 6. What is no longer a fake is the isolation itself: it has been
+  observed against two real sessions rather than only against two rows in a test.
 - **The expiry, at its real length.** Proven at a 1-second lifetime. Nothing has observed a
   session actually lasting 15 minutes and then renewing, or a refresh cookie reaching 30 days.
 - **The stream reopen.** `RunDetail.stream.test.jsx` drives a stub `EventSource`. A real
@@ -320,8 +334,12 @@ hygiene.
     zero-byte files**, committed empty in `82542c6` ("add initial multi-tenancy
     specifications and README for P5"). Every prior phase has a real spec file; P5's
     spec lives only in issue #30. Either write them or stop referring to them.
-13. **No P5 ticket has been closed on the tracker**, including #31, whose code shipped two
-    commits ago. The triage labels still read `ready-for-agent`.
+13. ~~**No P5 ticket has been closed on the tracker.**~~ **Done.** #31 and #32 are closed as
+    `completed`, each with a comment carrying its evidence and its remaining follow-ups.
+    #31's comment says in as many words that closing it does **not** upgrade this record's
+    refusal to vouch for it — the tracker had simply fallen behind the tree, and that is
+    what the close fixes. Still open: #30 (the parent spec) and #33–#37, all
+    `ready-for-agent`.
 14. **The README still says P4's closeout is pending**, in two places — the P4 paragraph
     near the top and the phase list near the bottom both call the real agent run outstanding
     and say "P4 is implemented and not closed". `VERIFICATION-P4.md`'s own banner records
