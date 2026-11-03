@@ -138,6 +138,11 @@ def test_a_thread_run_records_no_handle(client, session):
     target_id = _target(client)
 
     with pytest.MonkeyPatch.context() as mp:
+        # Both halves of `launch_run` are stubbed: it mints a gateway (which
+        # would reach for the real blob store, and the suite refuses that) and
+        # then hands it to a thread. Neither is what this test is about -- the
+        # subject is the column, and a thread run has no handle to put in it.
+        mp.setattr(launcher.factory, "local_for_run", lambda *a, **kw: None)
         mp.setattr(launcher, "drive_run", lambda *a, **kw: None)
         run = _start(client, target_id)
 

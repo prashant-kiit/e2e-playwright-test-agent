@@ -1,26 +1,36 @@
 """The pipeline driver: runs steps in order, one at a time, checkpointing after
 each so a run can resume at a step boundary.
 
-It is deliberately synchronous and takes a session *factory* (not a session):
-each DB touch is a short transaction, which keeps the lease fresh and avoids
-holding a transaction open across a long-running step. The API runs it on a
-background thread (M2 wiring); tests call it directly with a FakeRunner.
+It is deliberately synchronous and talks to the control plane through one
+gateway (app/control/gateway.py). Each operation is its own short transaction on
+the other side, which keeps the lease fresh and avoids holding a transaction open
+across a long-running step.
+
+**P5-05 replaced `session_factory` with `control`.** The driver used to take a
+SQLAlchemy session factory and call `repo` functions itself; a run in a sandbox
+has no database to open a session against any more, so it is handed a gateway
+that performs those operations through the internal control-plane API instead.
+The shape did not change: still one object in, still exactly one step-boundary
+callable (DESIGN.md §13), and `LocalGateway` makes the thread path the same code.
+
+What the rename bought, beyond removing the credential: the operations this
+module performs are now a readable list -- `begin_run`, `start_step`,
+`complete_step`, `fail_run` and four more -- rather than ninety `repo` functions
+of which it happens to use eight.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
-from .. import config, repo
+from .. import config
+from ..control.gateway import RunGateway
 from ..domain.steps import STEP_ORDER, resume_step, step_index
-from ..target_config import config_of
 from .runner import Emit, Runner, StepContext
-
-SessionFactory = Callable[[], "object"]  # a callable returning a SQLAlchemy Session
 
 
 def run_pipeline(
-    session_factory: SessionFactory,
+    control: RunGateway,
     run_id: int,
     runner: Runner,
     emit: Emit | None = None,
@@ -34,20 +44,30 @@ def run_pipeline(
     -- uploading blobs and committing revision N+1 -- is composed into this
     callable by the caller, not added as a second parameter. Hydrate and
     teardown run in the launcher *around* this function for the same reason.
+
+    `run_id` is also on `control.scope`, and it is still a parameter because it
+    is what `emit` and `collect` are given: the two are checked against each
+    other below rather than one being derived from the other, so a gateway built
+    for the wrong run fails here instead of driving the wrong row.
     """
     emit = emit or (lambda line: None)
     collect = collect or (lambda run_id, step: None)
 
-    # Read the run's immutable facts and resume point.
-    with session_factory() as s:
-        run = repo.get_run(s, run_id)
-        run_key, app, story_id, mode = run.run_key, run.target.app, run.story_id, run.mode
-        last_completed = run.last_completed_step
-        # Read once, here, where the run's other immutable facts are read: a
-        # Runner must not need a session, least of all a sandboxed one.
-        target_cfg = config_of(run.target)
+    if control.scope.run_id != run_id:
+        raise ValueError(
+            f"the gateway is scoped to run {control.scope.run_id}, not {run_id}"
+        )
 
-    start = resume_step(last_completed)
+    # The run's immutable facts and resume point, in one read. The fields that
+    # change under a running run are read again at each boundary (`run_state`).
+    facts = control.run_facts()
+    run_key, app, story_id, mode = facts.run_key, facts.app, facts.story_id, facts.mode
+    # Read once, here, where the run's other immutable facts are read: a Runner
+    # must not need a session, least of all a sandboxed one -- and after P5-05
+    # there is no session in a sandbox to need.
+    target_cfg = facts.target
+
+    start = resume_step(facts.last_completed_step)
     rd = config.run_dir(run_key)
     # The worktree the launcher hydrated, named by the same function it used.
     # Derived rather than passed in, so the driver keeps exactly one injected
@@ -55,32 +75,31 @@ def run_pipeline(
     worktree = config.worktree_dir(run_key)
 
     if start is None:  # every step already done; just finalize
-        with session_factory() as s:
-            repo.complete_run(s, run_id)
+        control.complete_run()
         emit(f"=== run {run_key} already complete ===")
         return
 
-    with session_factory() as s:
-        repo.begin_run(s, run_id)
+    control.begin_run()
     emit(f"=== run {run_key} started (begin at {start.value}) ===")
 
     for step in STEP_ORDER[step_index(start):]:
         # Honour pause/stop requests at the step boundary (step-level granularity).
-        with session_factory() as s:
-            run = repo.get_run(s, run_id)
-            if run.stop_requested:
-                repo.stop_run(s, run_id)
-                emit(f"=== run {run_key} stopped ===")
-                return
-            if run.pause_requested:
-                repo.pause_run(s, run_id)
-                emit(f"=== run {run_key} paused (resume to continue at {step.value}) ===")
-                return
+        state = control.run_state()
+        if state.stop_requested:
+            control.stop_run()
+            emit(f"=== run {run_key} stopped ===")
+            return
+        if state.pause_requested:
+            control.pause_run()
+            emit(f"=== run {run_key} paused (resume to continue at {step.value}) ===")
+            return
 
         emit(f"=== step: {step.value} ===")
-        with session_factory() as s:
-            repo.start_step(s, run_id, step)
-            prev_sid = repo.get_run(s, run_id).claude_session_id
+        control.start_step(step)
+        # Taken from the boundary read above rather than re-read after
+        # `start_step`: nothing between the two writes the session id, and on
+        # the container path every read is a round trip.
+        prev_sid = state.claude_session_id
 
         ctx = StepContext(
             run_id=run_id,
@@ -98,25 +117,21 @@ def run_pipeline(
         try:
             result = runner.run_step(ctx, emit)
         except Exception as exc:  # a runner blew up; fail the run, free the app
-            with session_factory() as s:
-                repo.fail_step(s, run_id, step)
-                repo.fail_run(s, run_id, f"{step.value} crashed: {exc}")
+            control.fail_step(step)
+            control.fail_run(f"{step.value} crashed: {exc}")
             emit(f"=== step {step.value} crashed: {exc} ===")
             return
 
         if result.session_id:
-            with session_factory() as s:
-                repo.set_session_id(s, run_id, result.session_id)
+            control.set_session_id(result.session_id)
 
         if not result.ok:
-            with session_factory() as s:
-                repo.fail_step(s, run_id, step)
-                repo.fail_run(s, run_id, result.error or f"{step.value} failed")
+            control.fail_step(step)
+            control.fail_run(result.error or f"{step.value} failed")
             emit(f"=== step {step.value} FAILED: {result.error} ===")
             return
 
-        with session_factory() as s:
-            repo.complete_step(s, run_id, step)
+        control.complete_step(step)
 
         # The step-boundary hook is NOT best-effort. Its ingest half is what
         # records the step's work, so a hook that raises means the work was
@@ -128,13 +143,11 @@ def run_pipeline(
         try:
             collect(run_id, step)
         except Exception as exc:
-            with session_factory() as s:
-                repo.fail_step(s, run_id, step)
-                repo.fail_run(s, run_id, f"{step.value} step boundary failed: {exc}")
+            control.fail_step(step)
+            control.fail_run(f"{step.value} step boundary failed: {exc}")
             emit(f"=== step {step.value}: step boundary FAILED: {exc} ===")
             return
         emit(f"=== step {step.value} done ===")
 
-    with session_factory() as s:
-        repo.complete_run(s, run_id)
+    control.complete_run()
     emit(f"=== run {run_key} completed ===")

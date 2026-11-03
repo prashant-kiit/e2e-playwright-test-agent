@@ -23,13 +23,14 @@ hash does not depend on when it was taken.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from .control.model import HeadRevision, RevisionFile
 from .delivery.render import tracked_tree
 from .models import FileIndex, Revision, Target
 from .storage import Storage
@@ -167,16 +168,36 @@ def commit_revision(
     Raises whatever the blob store raises. Who catches that is the caller's
     decision and it changed in P3: a failed ingest now fails the run.
     """
-    tenant_id = current_tenant_id()
     scan = scan_tracked_tree(root)
-    digest = scan.tree_hash
+    upload_blobs(store, scan, current_tenant_id())
+    return record_revision(
+        session,
+        target,
+        [(f.path, f.sha256, f.size) for f in scan.files],
+        author=author,
+        produced_by_run_id=produced_by_run_id,
+    )
 
-    head = head_revision(session, target.id)
-    if head is not None and head.tree_hash == digest:
-        return None
 
-    # Blob before row. Identical bytes at two paths upload once, and a blob the
-    # store already holds is not uploaded at all -- that is what `exists` buys.
+def upload_blobs(store: Storage, scan: TreeScan, tenant_id: int) -> None:
+    """Put every blob of `scan` in the store, skipping the ones already there.
+
+    Split out of `commit_revision` by P5-05, which is the point at which the two
+    halves stopped happening in the same process: a sandbox uploads its blobs
+    through the internal API and then asks the control plane to record the row
+    (app/control/service.py). Keeping this a named function is what makes those
+    two paths the same upload rather than two that agree today.
+
+    `tenant_id` is a parameter rather than `current_tenant_id()` precisely
+    because of that split: the control plane's callers are inside a tenant scope
+    and a sandbox is not -- it has no resolver, no session and no ambient tenant,
+    only the one its token names. Taking it explicitly is what makes the key a
+    sandbox builds and the key the control plane authorizes the same key.
+
+    Blob before row, always. Identical bytes at two paths upload once, and a
+    blob the store already holds is not uploaded at all -- that is what `exists`
+    buys.
+    """
     uploaded: set[str] = set()
     for file in scan.files:
         key = blob_key(tenant_id, file.sha256)
@@ -185,6 +206,37 @@ def commit_revision(
         uploaded.add(key)
         if not store.exists(key):
             store.put_file(key, file.on_disk, BLOB_CONTENT_TYPE)
+
+
+def record_revision(
+    session: Session,
+    target: Target,
+    manifest: Sequence[tuple[str, str, int]],
+    *,
+    author: str,
+    produced_by_run_id: int | None = None,
+) -> Revision | None:
+    """Record revision N+1 from a manifest of (path, sha256, size). No store.
+
+    The database half of `commit_revision`, and the half the internal control
+    plane performs on a sandbox's behalf: the blobs are already up by the time
+    this runs, so all that is left is deriving the tree hash, comparing it to
+    the head, and writing the rows.
+
+    **The tree hash is derived here rather than passed in.** That is what makes
+    it a fact about the file list rather than a claim about it -- the property
+    delivery's "we pushed the revision we recorded" rests on -- and it is why
+    there is no `tree_hash` parameter for a caller to get wrong.
+
+    Returns None when the tree is unchanged, for the reason `commit_revision`
+    states.
+    """
+    tenant_id = current_tenant_id()
+    digest = tree_hash({path: sha for path, sha, _size in manifest})
+
+    head = head_revision(session, target.id)
+    if head is not None and head.tree_hash == digest:
+        return None
 
     revision = Revision(
         tenant_id=tenant_id,
@@ -203,12 +255,12 @@ def commit_revision(
     session.add_all(
         FileIndex(
             revision_id=revision.id,
-            path=file.path,
+            path=path,
             tenant_id=tenant_id,
-            blob_key=blob_key(tenant_id, file.sha256),
-            size=file.size,
+            blob_key=blob_key(tenant_id, sha),
+            size=size,
         )
-        for file in scan.files
+        for path, sha, size in manifest
     )
     session.commit()
     session.refresh(revision)
@@ -261,6 +313,52 @@ def get_revision(session: Session, revision_id: int) -> Revision | None:
             Revision.tenant_id == current_tenant_id(),
         )
     ).one_or_none()
+
+
+def blob_is_referenced_by_target(
+    session: Session, target_id: int, blob_key: str
+) -> bool:
+    """Whether any revision of `target_id` references `blob_key`.
+
+    The row that authorizes a blob read (#30: "every blob read authorized
+    through a Postgres row belonging to the requesting tenant -- no
+    serve-by-key-alone"). A blob key is a content hash, so it is guessable and
+    shareable; the tenant prefix alone would let one target's run read another
+    target's tree, which is a smaller leak than a cross-tenant one and still not
+    one the token is supposed to permit.
+
+    Tenant-filtered by the read guard like every other ORM select, so this
+    answers within the acting tenant and a key belonging to another tenant's
+    target is simply not found.
+    """
+    found = session.scalar(
+        select(FileIndex.revision_id)
+        .join(Revision, Revision.id == FileIndex.revision_id)
+        .where(Revision.target_id == target_id, FileIndex.blob_key == blob_key)
+        .limit(1)
+    )
+    return found is not None
+
+
+def revision_view(session: Session, revision: Revision) -> HeadRevision:
+    """One revision as the value `hydrate.materialize` takes.
+
+    P5-05 gave `materialize` a single signature for two worlds. A run in a
+    sandbox is handed a `HeadRevision` over the internal API because it has no
+    session and no row; the control plane's own callers -- authoring's temporary
+    tree and delivery's materialized head -- have both, and this is how they
+    reach the same function rather than a second copy of it that happens to
+    agree. "We pushed the revision we recorded" is provable precisely because
+    delivery and hydrate materialize the same way.
+    """
+    return HeadRevision(
+        rev=revision.rev,
+        tree_hash=revision.tree_hash,
+        files=tuple(
+            RevisionFile(path=row.path, blob_key=row.blob_key, size=row.size)
+            for row in list_files(session, revision.id)
+        ),
+    )
 
 
 def list_files(session: Session, revision_id: int) -> list[FileIndex]:

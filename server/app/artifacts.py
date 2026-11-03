@@ -6,8 +6,19 @@ with a kind (screenshot/video/trace/report/log/other) and a version. Version is
 per (run, key): re-storing the same path in a later attempt bumps it, so history
 is kept without a bespoke version graph.
 
-Playwright *code* is NOT collected here — it is delivered to the target repo by
+Playwright *code* is NOT collected here -- it is delivered to the target repo by
 app/delivery. This indexes evidence/reports/logs only.
+
+**P5-05 split the sweep from the index.** The collector used to take a session
+and write `Artifact` rows itself; a run in a sandbox has no database, so it
+uploads through the run's gateway and asks the control plane to record each row
+(`index_artifact`). The versioning rule moved with the row -- it is in
+app/control/service.py now, in one place, shared with the session archive that
+follows the same rule for its own reserved name.
+
+What stayed here is what belongs to the sweep: which files are worth uploading,
+what to call them, how to classify them, and the dedup that stops an unchanged
+file being re-uploaded at every one of the five step boundaries.
 """
 
 from __future__ import annotations
@@ -15,13 +26,9 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
+from .control.gateway import RunGateway
 from .domain.steps import Step
-from .models import Artifact, Run
 from .storage import Storage, content_type_for
-from .tenancy import current_tenant_id
 
 # Files that are never useful as artifacts.
 _SKIP = {".DS_Store"}
@@ -51,52 +58,49 @@ def classify(rel_path: str) -> str:
 
 
 class ArtifactCollector:
-    def __init__(self, storage: Storage) -> None:
-        self.storage = storage
+    """Sweep a run's directory into the store and the index, through a gateway."""
 
-    def collect(self, session: Session, run: Run, run_dir: Path, step: Step) -> list[Artifact]:
+    def __init__(self, storage: Storage, control: RunGateway) -> None:
+        self.storage = storage
+        self.control = control
+
+    def collect(self, run_key: str, run_dir: Path, step: Step) -> list[str]:
+        """Upload and index everything new under `run_dir`. Returns the keys.
+
+        The dedup is read once per sweep rather than per file: the index is one
+        round trip on the container path, and a sweep after a late step is
+        comparing against dozens of keys it is about to skip.
+
+        **Blob before row, as everywhere else.** A row naming a blob that is not
+        there would make the artifact unreadable from the portal with no way to
+        tell it from a store outage; a blob with no row is invisible and is
+        collected by the next sweep.
+        """
         if not run_dir.exists():
             return []
 
-        existing = {
-            a.s3_key: a
-            for a in session.scalars(select(Artifact).where(Artifact.run_id == run.id))
-        }
-        stored: list[Artifact] = []
+        existing = {row.key: row.sha256 for row in self.control.artifacts()}
+        stored: list[str] = []
         for path in sorted(run_dir.rglob("*")):
             if not path.is_file() or path.name in _SKIP:
                 continue
             rel = path.relative_to(run_dir).as_posix()
-            key = f"{run.run_key}/{rel}"
+            key = f"{run_key}/{rel}"
             digest = _sha256(path)
-            prior = existing.get(key)
 
-            if prior is not None and prior.sha256 == digest:
+            if existing.get(key) == digest:
                 continue  # unchanged since last sweep: don't re-upload or bump
 
             self.storage.put_file(key, path, content_type_for(key))
-            if prior is not None:  # content changed (e.g. a retried step): new version
-                prior.version += 1
-                prior.sha256 = digest
-                prior.step = step.value
-                stored.append(prior)
-            else:
-                row = Artifact(
-                    tenant_id=current_tenant_id(),
-                    run_id=run.id, step=step.value, kind=classify(rel),
-                    s3_key=key, sha256=digest, version=1,
-                )
-                session.add(row)
-                stored.append(row)
-
-        session.commit()
-        for row in stored:
-            session.refresh(row)
+            self.control.index_artifact(
+                key=key, sha256=digest, kind=classify(rel), step=step
+            )
+            stored.append(key)
         return stored
 
 
 class NullCollector:
     """Default no-op (driver tests and runs without storage configured)."""
 
-    def collect(self, session: Session, run: Run, run_dir: Path, step: Step) -> list[Artifact]:
+    def collect(self, run_key: str, run_dir: Path, step: Step) -> list[str]:
         return []

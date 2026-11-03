@@ -85,13 +85,21 @@ def sandbox_kind() -> str:
 
 
 def log_bus_kind() -> str:
-    """Where live log lines go: 'postgres' (a table) or 'memory' (this process).
+    """Where live log lines go: 'postgres', 'memory', or 'gateway' in a sandbox.
 
     It **follows the dispatch kind** rather than being a second thing to
     configure: a run in a container cannot publish into the API's memory, and a
     run on a thread has no reason to need a database for a log line. The
     override exists for the sandbox entrypoint, which sets it explicitly because
     it is not the process that chose the dispatch.
+
+    P5-05 added the third value. A sandbox has no database, so it cannot append
+    to `run_log` itself: it publishes through its run's gateway and the control
+    plane appends on its behalf (`GatewayLogBus`). The value is informational
+    for that process -- the entrypoint builds its own bus, because a gateway is
+    not something `bus_from_env` could conjure -- and `bus_from_env` refuses it
+    rather than silently handing back an in-process dictionary whose lines
+    nobody would ever read.
     """
     explicit = os.environ.get("QA_LOG_BUS", "").strip().lower()
     if explicit:

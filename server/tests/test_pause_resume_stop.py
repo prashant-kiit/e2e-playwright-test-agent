@@ -1,4 +1,9 @@
-"""M3: pause / resume / stop at step boundaries, and the reaper vs. paused runs."""
+"""M3: pause / resume / stop at step boundaries, and the reaper vs. paused runs.
+
+The driver reads the pause/stop request through its gateway now (P5-05), so what
+these assert is unchanged: an operator's request is honoured at the next step
+boundary, and a paused run keeps its lock.
+"""
 
 from datetime import timedelta
 
@@ -11,6 +16,8 @@ from app.domain.steps import Step
 from app.models import AppLock
 from app.orchestrator.driver import run_pipeline
 from app.orchestrator.fake import FakeRunner
+from tests.control_helpers import control_for
+from tests.storage_helpers import FakeStorage
 from tests.target_helpers import create_target
 
 
@@ -22,6 +29,16 @@ def run_env(session_factory, tmp_path, monkeypatch):
         t = create_target(s, p.id, app="practice-target", name="Practice")
         run = repo.start_run(s, target_id=t.id, story_id="SCRUM-201", mode="full")
         return run.id, run.run_key, tmp_path, t.id
+
+
+@pytest.fixture()
+def control(run_env, session_factory, monkeypatch):
+    """The run's gateway: what the driver takes instead of a session factory.
+
+    A `LocalGateway` carrying a real run-scoped token, so these tests drive the
+    same authorization the container path goes through (tests/control_helpers.py).
+    """
+    return control_for(run_env[0], session_factory, FakeStorage(), monkeypatch)
 
 
 class _HookRunner:
@@ -42,7 +59,7 @@ def _artifacts(runs_dir, run_key):
     return {p.stem for p in (runs_dir / run_key).glob("*.txt")}
 
 
-def test_pause_halts_after_current_step_and_keeps_lock(run_env, session_factory):
+def test_pause_halts_after_current_step_and_keeps_lock(run_env, session_factory, control):
     run_id, run_key, runs_dir, target_id = run_env
 
     def hook(step):
@@ -50,7 +67,7 @@ def test_pause_halts_after_current_step_and_keeps_lock(run_env, session_factory)
             with session_factory() as s:
                 repo.request_pause(s, run_id)
 
-    run_pipeline(session_factory, run_id, _HookRunner(hook))
+    run_pipeline(control, run_id, _HookRunner(hook))
 
     with session_factory() as s:
         run = repo.get_run(s, run_id)
@@ -65,7 +82,7 @@ def test_pause_halts_after_current_step_and_keeps_lock(run_env, session_factory)
     }
 
 
-def test_resume_continues_from_checkpoint_to_completion(run_env, session_factory):
+def test_resume_continues_from_checkpoint_to_completion(run_env, session_factory, control):
     run_id, run_key, runs_dir, target_id = run_env
 
     def pause_hook(step):
@@ -73,14 +90,14 @@ def test_resume_continues_from_checkpoint_to_completion(run_env, session_factory
             with session_factory() as s:
                 repo.request_pause(s, run_id)
 
-    run_pipeline(session_factory, run_id, _HookRunner(pause_hook))
+    run_pipeline(control, run_id, _HookRunner(pause_hook))
     with session_factory() as s:
         assert repo.get_run(s, run_id).status is RunStatus.PAUSED
 
     # Resume: clear flags, re-run; it should begin at EXPLORE and finish.
     with session_factory() as s:
         repo.resume_run(s, run_id)
-    run_pipeline(session_factory, run_id, FakeRunner())
+    run_pipeline(control, run_id, FakeRunner())
 
     with session_factory() as s:
         run = repo.get_run(s, run_id)
@@ -90,7 +107,7 @@ def test_resume_continues_from_checkpoint_to_completion(run_env, session_factory
     assert _artifacts(runs_dir, run_key) == {s.value for s in Step}
 
 
-def test_stop_at_boundary_stops_and_releases_lock(run_env, session_factory):
+def test_stop_at_boundary_stops_and_releases_lock(run_env, session_factory, control):
     run_id, run_key, runs_dir, target_id = run_env
 
     def hook(step):
@@ -98,7 +115,7 @@ def test_stop_at_boundary_stops_and_releases_lock(run_env, session_factory):
             with session_factory() as s:
                 repo.request_stop(s, run_id)
 
-    run_pipeline(session_factory, run_id, _HookRunner(hook))
+    run_pipeline(control, run_id, _HookRunner(hook))
 
     with session_factory() as s:
         run = repo.get_run(s, run_id)

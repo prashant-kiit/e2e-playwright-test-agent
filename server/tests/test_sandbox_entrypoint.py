@@ -11,6 +11,15 @@ rows) and half are **structural**, in the style of test_no_repo_mount.py. The
 structural half is the one that matters longest: a second pipeline is the
 failure mode this phase most tempts, and a second pipeline is invisible to every
 behavioural test as long as it happens to behave the same.
+
+P5-05 changed what a container is given -- a run-scoped gateway rather than a
+database and an object store -- and these tests are where that claim is checked
+the same way: the same composition, invoked by a module with a `__main__`, still
+produces the same rows. The gateway here is a `LocalGateway` against the
+fixtures, because what is under test is the entrypoint rather than the
+transport; the transport has tests/test_control_gateway.py and
+tests/test_internal_api.py, and the real container path has
+tests/test_docker_sandbox.py.
 """
 
 from __future__ import annotations
@@ -30,6 +39,7 @@ from app.models import AppLock, Artifact
 from app.orchestrator.bus import InMemoryLogBus
 from app.orchestrator.fake import FakeRunner
 from app.sandbox import run as entrypoint
+from tests.control_helpers import control_for
 from tests.delivery_helpers import make_worktree
 from tests.storage_helpers import FakeStorage
 from tests.target_helpers import create_target
@@ -68,12 +78,17 @@ class _ChangesTheTree(FakeRunner):
 
 
 def _out_of_process(session_factory, run_id, store, **kwargs) -> int:
-    """The entrypoint, with the two things a container gets from its environment
-    -- a database and an object store -- passed in rather than read from env."""
+    """The entrypoint, with the one thing a container gets from its environment
+    -- its run-scoped gateway -- passed in rather than built from env.
+
+    Before P5-05 the two things passed in here were a database and an object
+    store. That they have collapsed into one object is the ticket: a container's
+    whole authority is a token, and `factory.from_env` is what builds this from
+    the two variables a real sandbox is given.
+    """
     return entrypoint.main(
         [str(run_id)],
-        session_factory=session_factory,
-        store=store,
+        control=control_for(run_id, session_factory, store),
         bus=InMemoryLogBus(),
         **kwargs,
     )
@@ -120,7 +135,7 @@ def test_the_log_of_an_out_of_process_run_is_readable_by_cursor(
     bus = InMemoryLogBus()
 
     entrypoint.main(
-        [str(run_id)], session_factory=session_factory, store=store, bus=bus
+        [str(run_id)], control=control_for(run_id, session_factory, store), bus=bus
     )
 
     lines, _cursor = bus.read_from(run_id, 0)
@@ -195,9 +210,9 @@ def test_the_heartbeat_is_taken_inside_the_process_that_runs_the_pipeline(
     beating: list[int] = []
     real = launcher.heartbeat_during
 
-    def recording(rid, **kwargs):
+    def recording(rid, beat, **kwargs):
         beating.append(rid)
-        return real(rid, **kwargs)
+        return real(rid, beat, **kwargs)
 
     monkeypatch.setattr(launcher, "heartbeat_during", recording)
 
@@ -287,11 +302,16 @@ def test_hydrate_ingest_and_teardown_are_still_plain_composed_functions():
 
 def test_the_driver_still_takes_exactly_one_step_boundary_callable():
     """DESIGN.md §13, re-asserted here because this is the phase that tempts a
-    second one: a container needs no extra driver parameter."""
+    second one: a container needs no extra driver parameter.
+
+    P5-05 renamed the first one from `session_factory` to `control` -- a
+    sandbox has no database to open a session against -- and deliberately did
+    not add a sixth. Five parameters, one step-boundary callable.
+    """
     from app.orchestrator.driver import run_pipeline
 
     params = inspect.signature(run_pipeline).parameters
-    assert list(params) == ["session_factory", "run_id", "runner", "emit", "collect"]
+    assert list(params) == ["control", "run_id", "runner", "emit", "collect"]
 
 
 def test_the_module_is_runnable_as_python_m_app_sandbox_run():

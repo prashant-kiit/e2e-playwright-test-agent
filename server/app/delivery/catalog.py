@@ -155,7 +155,7 @@ class DbCatalog:
                         f"target {app!r} has no head revision, so there is nothing to deliver"
                     )
                 try:
-                    hyd.materialize(session, head, self._store, root)
+                    hyd.materialize(revisions.revision_view(session, head), self._store, root)
                 except hyd.HydrateError as exc:
                     raise DeliveryError(f"could not materialize {app!r}: {exc}") from exc
                 hyd.render_generated(root, config_of(target))

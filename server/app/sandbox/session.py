@@ -20,6 +20,13 @@ by run, already streams them back through the API, and is already garbage
 collected with the run. Its own reserved name, so the artifact sweep's
 classification and an operator's eye both have one thing to recognise.
 
+**P5-05 moved the row-writing out of here.** The archive is uploaded through the
+run's gateway and indexed by the control plane, which also owns the versioning
+rule -- the same rule the artifact collector needs, now stated once
+(app/control/service.py). What is left in this module is the archive itself:
+what to tar, where to put it, and the two no-ops that keep it from ever failing
+a run.
+
 **Only where a sandbox put the session.** `CLAUDE_CONFIG_DIR` is set by
 app/sandbox/env.py and by nothing else, so an unset one means there is no
 per-run session store -- and a developer's own `~/.claude` is emphatically not
@@ -41,13 +48,9 @@ import tarfile
 import tempfile
 from pathlib import Path
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
-
-from ..models import Artifact, Run
+from ..control.gateway import RunGateway
 from ..orchestrator.runner import Emit
 from ..storage import Storage
-from ..tenancy import current_tenant_id
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +72,9 @@ def archive_key(run_key: str) -> str:
     return f"{run_key}/{ARCHIVE_NAME}"
 
 
-def save(session: Session, run: Run, store: Storage, *, emit: Emit) -> bool:
+def save(
+    control: RunGateway, run_key: str, store: Storage, *, emit: Emit
+) -> bool:
     """Archive the agent's session as this run's reserved artifact.
 
     Best effort, and silent about the ordinary cases: a run on the thread path
@@ -80,7 +85,7 @@ def save(session: Session, run: Run, store: Storage, *, emit: Emit) -> bool:
     if source is None or not source.is_dir() or not any(source.iterdir()):
         return False
 
-    key = archive_key(run.run_key)
+    key = archive_key(run_key)
     try:
         with tempfile.TemporaryDirectory(prefix="qa-session-") as tmp:
             # Built outside the run directory on purpose: anything in there is
@@ -92,17 +97,21 @@ def save(session: Session, run: Run, store: Storage, *, emit: Emit) -> bool:
                 tar.add(source, arcname=".")
             digest = _sha256(path)
             store.put_file(key, path, "application/gzip")
-        _index(session, run, key, digest)
+        control.index_artifact(
+            key=key, sha256=digest, kind=ARCHIVE_KIND, step=None
+        )
     except Exception:
         emit("=== session: could not be saved; a resume will start without it ===")
-        log.warning("archiving the session of run %s failed", run.id, exc_info=True)
+        log.warning("archiving the session of run %s failed", run_key, exc_info=True)
         return False
     emit("=== session: saved for a resume ===")
     return True
 
 
-def restore(session: Session, run: Run, store: Storage, *, emit: Emit) -> bool:
-    """Put this run's archived session back, before the CLI is invoked.
+def restore(
+    control: RunGateway, run_key: str, store: Storage, *, emit: Emit
+) -> bool:
+    """Put this run's archived session back, before the pipeline starts.
 
     Returns whether the session is there. A false answer is the caller's cue to
     continue without continuity -- and to stop telling the CLI to `--resume` a
@@ -112,14 +121,14 @@ def restore(session: Session, run: Run, store: Storage, *, emit: Emit) -> bool:
     dest = config_dir()
     if dest is None:
         return False
-    row = _existing(session, run, archive_key(run.run_key))
-    if row is None:
+    key = archive_key(run_key)
+    if not any(row.key == key for row in control.artifacts()):
         return False
 
     try:
         with tempfile.TemporaryDirectory(prefix="qa-session-") as tmp:
             path = Path(tmp) / ARCHIVE_NAME
-            chunks, _ct = store.get_stream(row.s3_key)
+            chunks, _ct = store.get_stream(key)
             with path.open("wb") as fh:
                 for chunk in chunks:
                     fh.write(chunk)
@@ -135,42 +144,10 @@ def restore(session: Session, run: Run, store: Storage, *, emit: Emit) -> bool:
             "=== session: restore failed, continuing without session continuity "
             f"({exc}) ==="
         )
-        log.warning("restoring the session of run %s failed", run.id, exc_info=True)
+        log.warning("restoring the session of run %s failed", run_key, exc_info=True)
         return False
     emit("=== session: restored; the agent remembers what it explored ===")
     return True
-
-
-def _index(session: Session, run: Run, key: str, digest: str) -> None:
-    """Record the archive in the artifacts table, versioning the reserved name.
-
-    The same rule the artifact collector uses: one row per (run, key), its
-    version bumped when the content changes. A paused run resumed three times
-    has one session artifact at version three, not three artifacts.
-    """
-    row = _existing(session, run, key)
-    if row is None:
-        session.add(
-            Artifact(
-                tenant_id=current_tenant_id(),
-                run_id=run.id,
-                step=None,
-                kind=ARCHIVE_KIND,
-                s3_key=key,
-                sha256=digest,
-                version=1,
-            )
-        )
-    elif row.sha256 != digest:
-        row.version += 1
-        row.sha256 = digest
-    session.commit()
-
-
-def _existing(session: Session, run: Run, key: str) -> Artifact | None:
-    return session.scalars(
-        select(Artifact).where(Artifact.run_id == run.id, Artifact.s3_key == key)
-    ).one_or_none()
 
 
 def _sha256(path: Path) -> str:

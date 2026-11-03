@@ -37,9 +37,8 @@ from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
 from .. import config, repo
-from ..db import SessionLocal
+from ..db import SessionFactory, SessionLocal
 from ..launcher import launch_run
-from ..orchestrator.driver import SessionFactory
 
 log = logging.getLogger(__name__)
 

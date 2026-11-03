@@ -1,6 +1,10 @@
 """FastAPI entrypoint for the QA admin portal backend.
 
-Mounts the projects/targets/runs API on top of the health endpoint.
+Mounts the projects/targets/runs API on top of the health endpoint, plus the
+internal control-plane API a sandbox talks to (app/internal_api.py). The two are
+separate routers because they are separate authorities: a portal session cookie
+authorizes nothing under `/internal`, and a run-scoped token authorizes nothing
+outside it.
 
 The schema is owned by Alembic: the container entrypoint runs
 `alembic upgrade head` before uvicorn, and nothing here creates tables. The
@@ -22,6 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import models  # noqa: F401  (register ORM tables on Base.metadata)
 from .api import router
 from .auth_api import auth_router
+from .internal_api import internal_router
 from .reaper import reaper_loop
 from .sandbox.dispatch import destroy_sandbox
 
@@ -66,6 +71,10 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(router)
+# The run-facing control plane (P5-05). Mounted beside the portal's router
+# rather than on it: these routes take a run-scoped bearer token and no cookie,
+# so `require_auth` -- which guards every route on `router` -- must not apply.
+app.include_router(internal_router)
 
 
 @app.get("/health")

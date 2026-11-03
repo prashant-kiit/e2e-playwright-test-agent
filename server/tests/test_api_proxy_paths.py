@@ -102,3 +102,32 @@ def test_the_extraction_actually_found_the_endpoints():
     assert len(found) > 5
     for known in ("/auth", "/projects", "/targets", "/runs", "/usage"):
         assert known in found, f"{known} should have been extracted from api.js"
+
+
+# --- the inverse guarantee: the internal control plane is not published ---
+
+def test_the_internal_control_plane_is_not_proxied_to_the_public_origin():
+    """`/internal/*` is the run-facing API (P5-05) and no browser calls it.
+
+    It is absent from both proxy lists above because nothing in the frontend
+    requests it -- which makes its absence an accident of how those lists are
+    derived rather than a decision. This is the decision.
+
+    A sandbox reaches these routes by the API's name on the internal Docker
+    network, which has no default route; publishing them through the portal's
+    origin would put the run-facing surface on the public internet with a
+    bearer check as the only thing in front of it. The bearer check is real and
+    the routes would still refuse a cookie -- but the reason this is safe today
+    is that the surface is not reachable, and that is worth keeping as the
+    reason rather than demoting it to defence in depth.
+    """
+    for name, prefixes in (
+        ("docker/nginx.conf", _nginx_prefixes()),
+        ("web/vite.config.js", _vite_prefixes()),
+    ):
+        offenders = [p for p in prefixes if p.startswith("/internal")]
+        assert offenders == [], (
+            f"{name} proxies {offenders} to the API: the internal control-plane "
+            f"routes are for a sandbox on the internal network, not for the "
+            f"portal's public origin"
+        )

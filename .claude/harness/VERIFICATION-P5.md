@@ -12,12 +12,14 @@ fakes, and what was deliberately deferred.
 
 > ## P5 is OPEN. This record is partial.
 >
-> Four of seven tickets are complete **in the tree**; three are not started. Tree state and
+> Five of seven tickets are complete **in the tree**; two are not started. Tree state and
 > tracker state are two separate facts and the tracker is the source of the second one
 > (`docs/agents/issue-tracker.md`): #31, #32 and #34 are closed `completed` — #34's
 > two-axis review was re-run and acted on (§Follow-ups items 27 and 27b), which is what its
-> close was waiting on. **#35 is closed `completed` too.** Of the seven tickets, three are
-> open: #33, #36 and #37. #30 is the parent spec issue and stays open until they are.
+> close was waiting on. **#35 is closed `completed` too.** **#33 is complete in the tree and
+> its two-axis review has not yet run**, so it is not closed here. Of the seven tickets,
+> three are open: #33, #36 and #37. #30 is the parent spec issue and stays open until they
+> are.
 >
 > | Ticket | State in the tree |
 > |---|---|
@@ -25,7 +27,12 @@ fakes, and what was deliberately deferred.
 > | #32 P5-02 — tenant-scoped reads + tenant-scoped uniqueness + fail-closed | **Complete.** The `users.email` half plus token expiry/refresh landed first (`105e9b7`); the enforced read path and the `projects`/`targets` composite uniqueness landed in the slice below, and were exercised against a live stack with a second real tenant |
 > | #34 P5-03 — per-tenant KMS-encrypted PATs, scope/expiry/fail-loud | **Complete, reviewed and closed.** The envelope, the per-target `Tools` binding, the save-time scope check, the portal surface and the structural credential tests. The two-axis review found two real credential leaks (the PAT in `Tools.__repr__`, a data key reachable in a `SealError`) and one half-true acceptance criterion (a git-transport 401/403 did not mark the credential invalid); all fixed — see §Follow-ups 27b. **Still not seen against a real KMS, a real GitHub token or a browser** — see §"What is covered only by fakes" |
 > | #35 P5-04 — per-tenant concurrency cap and monthly run quota at enqueue | **Complete, and the first P5 slice seen in a real browser.** The two columns, the typed 429 rejection above the `AppLock` trio, the usage endpoint and the portal gauges. Both breaches driven over HTTP against the live stack, leaving no run row. The three gaps it shipped with were all closed in later passes: an untested portal surface, caps that bounded only a configured tenant (follow-ups 28 and 29), and — found by the browser check itself — `/usage` missing from both proxy lists, which made the panel invisible in the real app while 84 frontend tests passed |
-> | #33 P5-05, #36 P5-06, #37 P5-07 | Not started |
+> | #33 P5-05 — run-scoped internal control-plane API | **Complete in the tree, review not run.** The token, the service, the routes, both gateways, and the whole run path rewired onto them. `DATABASE_URL` and `S3_*` are gone from a sandbox and the stores are off its network. Proven in a **real container** holding no store credentials — the only slice of P5 so far whose central claim is checked end to end against the deployed arrangement. Three real bugs were found by that test rather than by the suite; see the section below |
+> | #36 P5-06, #37 P5-07 | Not started |
+>
+> **P5-05's claims were checked against a real container**, which is a stronger kind of
+> evidence than the four slices before it had, and the section below says plainly which three
+> bugs only that container found.
 >
 > **What this record does and does not claim.** The four §"Verified" sections below each
 > cover one slice, and every line in them was observed. P5-01's own evidence lives in its two
@@ -465,6 +472,191 @@ and not accessibility-audited, and nothing in P5 claims otherwise.
 
 ---
 
+## Verified on 2026-11-03 — P5-05 / #33 (the run-scoped internal control-plane API)
+
+The change, and it is the largest of the phase: a sandbox stops holding `DATABASE_URL` and
+the `S3_*` credentials. In their place the control plane mints a short-lived, run-scoped
+bearer token (`app/run_token.py`) and exposes a narrow internal API (`app/internal_api.py`)
+over one set of operations (`app/control/service.py`). Everything a run does to Postgres and
+to blob storage goes through that, as one run of one target of one tenant.
+
+**What the exposure was, and what it is now.** P4 recorded the store credentials as accepted
+exposure with a stated plan, and this is the other end of that note. Before: a process
+running a model that writes and executes TypeScript against a web page an attacker may
+control held the control plane's own database credential — read and write access to every
+tenant's rows — and the object store's keys, and was trusted not to use them. The envelope
+(P5-03) made the sealed PATs it could *read* harmless, which was the right mitigation and not
+a fix. After: it holds a token naming one run, one target and one tenant, refused the moment
+that run stops being live, and the stores are not on its network at all.
+
+### The scope of the work, because it is bigger than the ticket's acceptance criteria say
+
+The ticket enumerates the operations "hydrate and ingest perform today". That list is
+necessary and **not sufficient**, and the gap is worth recording rather than discovering
+later: the sandbox runs the *whole* pipeline (`drive_run`), so it also wrote run status, step
+rows, the heartbeat lease, the cost columns and the agent session id. Acceptance criterion 1
+says a sandbox carries no `DATABASE_URL`, which cannot be true while any of those go direct.
+So the API covers the run lifecycle too — about twenty operations, which is now a readable
+list (`app/control/gateway.py`) rather than the eight of ninety `repo` functions the driver
+happened to use.
+
+### What was observed
+
+**Suite, run as CI runs it** (`QA_REQUIRE_DB=1 make ci-test`, exit 0): ruff clean,
+**1063 backend tests** (up from 932 at `dd6ad79`), **84 frontend tests** (unchanged; this
+slice has no portal surface). Also run in the default **random order** and in a fixed order,
+because this change moved what every run-driving test is wired to.
+
+**+131, and all of it accounted for:**
+
+| Where | Δ | What |
+|---|---|---|
+| `test_control_gateway.py` (new) | +46 | One suite run twice — once against `LocalGateway`, once against `HttpGateway` over the real routes — so the two transports cannot drift |
+| `test_internal_api.py` (new) | +23 | The HTTP framing: bearer header, 401 vs 403 vs 409 vs 422, streaming, and the two authorities not overlapping |
+| `test_run_token.py` (new) | +11 | Forgery, tampering, expiry, cross-salt replay, and the read-vs-verify asymmetry below |
+| `test_control_service.py` (new) | +11 | The authorization boundary itself, against two real tenants *and* two targets of one tenant |
+| `test_no_repo_mount.py` | +27 | Three tests parametrized over every module under `app/`, and this slice adds nine |
+| `test_sandbox_credentials.py` | +9 | The store credentials' absence, the token's presence, and the proxy-bypass host becoming the control plane |
+| `test_compose_stack.py` | +2 | The stores off the sandbox network, the API on it, and nothing else on it |
+| `test_api_proxy_paths.py` | +1 | `/internal` is absent from both proxy allowlists *by assertion* rather than by accident of how those lists are derived |
+| `test_tenancy.py` | +1 | Replaced one test with two: the token carries the tenant, and it cannot be minted for another tenant's run |
+
+**The container path, against a real container** (`make ci-test-docker`, 6 Docker-backed
+tests, exit 0). This is the evidence that matters most, because it is the only thing that
+exercises the deployed arrangement end to end: a real container holding **no** store
+credentials, a real token, real HTTP, a real `uvicorn` control plane, real rows. It hydrated
+its head revision, ran five steps, committed revisions whose `author`, `produced_by_run_id`
+and `parent_rev` are indistinguishable from a thread run's, indexed artifacts, and streamed a
+log the API read back by cursor. `tests/test_docker_sandbox.py` grew a `control_plane`
+fixture to make that possible — the container cannot reach the test's database any more, so
+something has to be at the URL it is given.
+
+**Three real bugs were found by running it, not by the suite**, and each is now pinned:
+
+1. **`HttpGateway` verified its own token.** A sandbox holds no signing key — it must not,
+   since a key that verifies also *mints* — so this raised on every real run while every
+   in-process test passed, because the test environment has the key. The client now
+   `read_unverified`s the claims it needs for addressing (the run id in every URL, the tenant
+   id in every blob key) and the server remains the only verifier. A structural test asserts
+   `read_unverified` appears in exactly two files.
+2. **The liveness gate ate the end of every log.** `=== run <key> completed ===`, the
+   teardown line and the cost line are all emitted from `drive_run`'s `finally`, *after* the
+   final status transition — so gating `publish_log` on liveness dropped precisely the lines
+   an operator reads first. The symptom was a container log that was complete except for how
+   the run ended. Four operations are now deliberately exempt and enumerated in one place
+   (`service.scoped_run`): status, cost, log, and nothing that touches a run's work.
+3. **`GatewayLogBus.close` raced its own flusher.** It set the stop flag and flushed, while
+   the background thread already held the batch and was waiting on its request; the process
+   then exited and killed the daemon thread mid-request. It joins first now, for the reason
+   `reaper.heartbeat_during` joins.
+
+**A fourth bug was in the tests, and is worth recording because it presents as a hang.** A
+test that uses both the `session` and `session_factory` fixtures gets two teardowns, and the
+second one's `TRUNCATE` waits for ever on the first one's open transaction. Two of the
+rewired files hit it. `tests/control_helpers.BorrowedSessionFactory` is the fix: lend the
+test's own session rather than taking a second connection.
+
+### The acceptance criteria, one at a time
+
+| Criterion | Evidence |
+|---|---|
+| A sandbox carries neither `DATABASE_URL` nor `S3_*`; it carries a run-scoped token | `test_sandbox_credentials.py`: the control plane's environment holds all five, none comes out, and no *value* comes out under another name either. The token is minted and verified in the test, not faked |
+| Hydrate, fetch/upload blobs, commit N+1, artifacts and log lines all work through the API | `test_control_gateway.py` for each operation on both transports; the Docker test for all of them at once, in a container |
+| The token authorizes only that run's target and tenant | `test_control_service.py` (two real tenants; a same-tenant inconsistent scope so the tenant filter cannot be what refuses it; and **a second target of the same tenant**, which is where the first attempt at this was wrong — see below) and `test_internal_api.py` (403s, including a blob key and an artifact prefix) |
+| The token is rejected once the run is no longer live | `test_control_service.py` over all three terminal statuses; `test_control_gateway.py` on both transports; and the four exemptions are themselves tested, including that a finished run still cannot commit a revision or drive its status |
+| The stores are unreachable from a sandbox; the internal API takes their place on the egress bypass | Two halves, both structural: the sandbox is given no endpoint (`test_sandbox_credentials.py`, including that no value in its environment mentions `postgres` or `seaweedfs`), and they are off its network (`test_compose_stack.py`, which also asserts the API is the *only* thing on it) |
+| Both thread and docker paths use the API; the existing structural tests still hold | `LocalGateway` and `HttpGateway` are two transports over one `service.py`, and `test_control_gateway.py` runs one suite against both. `build_allowlist` is untouched. The no-second-pipeline, no-repo-mount and no-GitHub-credential tests all still pass |
+
+### What the two-axis review found, and what changed
+
+The review ran after the suite was green and found one thing the suite could not,
+plus several the prose standard asks for. All are fixed in this slice rather than
+deferred.
+
+**The real one: blob authorization was by prefix, and a prefix is the wrong
+authority.** `authorize_blob_key` checked only `tenant/<id>/`, so a run could
+read *or overwrite* any blob of its own tenant — including another target's
+revision blobs — from a guessed or learned content hash. #30 is explicit about
+this ("every blob read authorized through a Postgres row belonging to the
+requesting tenant — **no serve-by-key-alone**") and #33's own criterion 3 says
+"exactly that run's target", so this was a gap against both. The overwrite half
+was worse than the read half: `commit_revision` confirms blobs *exist*, not what
+is in them, so chosen bytes under a sibling's key would have been materialized
+into that target's next hydrate. The three operations are now authorized
+differently, because they leak differently:
+
+| | Authority | Why not the others |
+|---|---|---|
+| read | a `file_index` row of a revision of **this run's target** | the row is what pins the read to the target the token names |
+| write | the bytes must hash to the key | content addressing makes an overwrite a no-op; a prefix rule cannot see the bytes at all |
+| exists | the tenant prefix | it is ingest's dedup check, asked about a key derived from content the run already holds, so the answer is not a side channel — and a row check would break dedup, whose whole job is blobs no revision references yet |
+
+Two tests pin it at the service, both with a **second target of the same tenant**
+so neither the tenant filter nor the prefix can be what refuses them. Writing
+them surfaced something worth recording: a sibling target with an *identical*
+tree shares every blob, because content addressing dedups per tenant — so the
+fixture has to give the sibling a file only it has. Dedup is not a leak, and a
+test that did not notice the difference would have been asserting the wrong
+thing.
+
+**`authorized_run` had grown a second copy of its own three checks**, which is
+precisely what that module's docstring argues against ("five operations each
+doing their own three checks is how one of them ends up doing two"). It is
+`scoped_run` plus the liveness gate now.
+
+**Smaller, all fixed:** `control` was unannotated at ~15 call sites while
+`RunGateway` existed and was used as a type only by a test; `SessionFactory` was
+still exported from the pipeline *driver*, so `control/local.py` imported a
+session-factory type from it (moved to `app/db.py`, which owns the session);
+`GatewayLogBus` took a `run_id` it silently discarded in favour of the gateway's
+scope, where `run_pipeline` guards the same mismatch two modules away; the
+ingest closure re-read `run_facts()` at every step boundary — five HTTP round
+trips per run for a target config that cannot change under a live run; and the
+test suite had its own copy of the service's borrow-don't-close shim.
+
+**Two findings were accepted rather than fixed, and both are below:** the
+`record_cost` exemption, and the API surface a sandbox can now reach.
+
+### What this slice does **not** claim
+
+- **The thread path does not exercise HTTP framing.** It reaches `service.py` in-process. That
+  was a deliberate choice (one authorization decision, no event loop inside a daemon thread),
+  and the mitigation is that `test_control_gateway.py` runs its whole suite through both
+  transports and `test_internal_api.py` drives the routes directly. What no in-process test
+  can cover is what the Docker test is for — and two of the three bugs above were found
+  there, which is the honest measure of that gap's size.
+- **A paused run's token stays valid.** `is_live` includes `PAUSED`, deliberately: it is the
+  definition the whole repository already uses (`repo.live_run_holding` turns on it) and a
+  second definition of "live" would be a second thing that can be wrong. Pause destroys the
+  container at once and a resume mints a new token, so the token of a paused run belongs to a
+  sandbox that no longer exists — but a copy taken before the pause works until the run ends
+  or the signature expires. Closing that needs a token table, which is the cost `app/auth.py`
+  already declined to pay for sessions, for the same reason.
+- **The run-scoped token is not revocable.** Expiry is the backstop and liveness is the gate;
+  between them there is no way to cut a specific token short while its run continues.
+- **No real agent run.** The container test uses `QA_RUNNER=fake`, so what is proven is the
+  control-plane path, not that a real agent works through it. The P4 real-agent run remains
+  the only thing that proves the full image, and it predates this change.
+- **A token leaked from a finished run can still forge log lines and rewrite two
+  cost columns** for that run, until its signature expires. Of the three
+  liveness exemptions, `record_cost` is the one that is *not* forced by
+  ordering — it could be recorded control-plane-side at teardown instead of by
+  the sandbox in its `finally`. It is where it is so that `drive_run`'s "every
+  way out of a run records what it cost" stays in one process, and what is
+  traded away is two accounting columns on a run that is already over. A
+  deliberate trade, recorded as one.
+- **The whole API is now reachable from a sandbox, not just `/internal`.**
+  Serving the internal routes means the API sits on the sandbox network, so a
+  compromised agent can reach `/auth/login` over the network — where before, the
+  only things it could reach were Postgres and the object store. It has no
+  credentials, its token authorizes nothing on those routes (asserted in
+  `test_internal_api.py`), and there is no rate limiting in front of them. This
+  is a smaller surface than a database credential and a wider one than these
+  routes alone. The clean fix is a second listener — `/internal` on its own
+  port, and only that port on the sandbox network — which is a deployment
+  change, not a code one. **Follow-up, not done here.**
+- **Not seen in a browser**, and nothing in this slice has a portal surface to see.
+
 ## Decisions recorded during this phase
 
 | Decision | Why |
@@ -867,6 +1059,39 @@ hygiene.
     skew worth knowing: `month_start` comes from the application clock while `runs.created_at`
     comes from the database's `now()`. Neither matters at the current scale and both would
     matter to a customer reading an invoice.
+
+### Introduced by the run-scoped control-plane API
+
+32. **Serving `/internal` from the main listener puts the whole API on the sandbox network.**
+    The routes need to be reachable from a run, so the API joined `qa-sandbox` — and a
+    container on that network can therefore reach every other route the API serves,
+    `/auth/login` included. Before P5-05 the only things it could reach were Postgres and
+    the object store, so this is a *narrower* surface than a database credential and a
+    *wider* one than the internal routes alone. What stands in front of it today: a run
+    token authorizes nothing on the portal's routes (distinct signing salts, asserted in
+    `test_internal_api.py`), a sandbox holds no user credential, and `/internal` is absent
+    from both proxy allowlists so none of it is published to the public origin
+    (`test_api_proxy_paths.py`). What does *not* stand in front of it: any rate limiting.
+    The clean fix is a second listener — `/internal` on its own port, with only that port
+    attached to the sandbox network — which is a deployment change rather than a code one,
+    and the service layer is already indifferent to which listener reaches it. **Worth
+    doing before a real customer's agent runs on this.**
+
+33. **`record_cost` is exempt from the liveness gate and did not have to be.** Three of the
+    four exemptions are forced by ordering — a run's last log lines and its exit-code read
+    both happen after its final status transition. `record_cost` is a *write*, done by the
+    sandbox in `drive_run`'s `finally`, and could have been recorded control-plane-side at
+    teardown instead. It is where it is so that "every way out of a run records what it
+    cost" stays one statement in one process; the cost is that a token leaked from a
+    finished run can rewrite two accounting columns until its signature expires. Recorded
+    because it is the one exemption that is a trade rather than a necessity.
+
+34. **The internal API has no request budget of any kind.** A wedged or hostile agent can
+    call the control plane as fast as it likes for the length of the run wall clock. Each
+    call is cheap and authorized, so the failure mode is noisy-neighbour load on the API and
+    on Postgres rather than a data leak — but there is nothing bounding it, and the
+    per-tenant quotas P5-04 added count *runs*, not requests. The natural home is the same
+    second listener item 32 wants.
 
 ### Harness hygiene
 

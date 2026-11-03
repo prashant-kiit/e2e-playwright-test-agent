@@ -52,6 +52,7 @@ from collections.abc import Callable, Iterator
 from sqlalchemy.orm import Session
 
 from . import config, repo
+from .control.service import ControlPlaneError
 from .db import SessionLocal
 from .domain import lease
 from .orchestrator.bus import prune_run_logs
@@ -69,12 +70,28 @@ JOIN_TIMEOUT_S = 10.0
 
 @contextlib.contextmanager
 def heartbeat_during(
-    run_id: int, *, interval_s: float | None = None, session_factory=SessionLocal
+    run_id: int,
+    beat: Callable[[], None],
+    *,
+    interval_s: float | None = None,
 ) -> Iterator[None]:
-    """Refresh run_id's lease every interval_s for the duration of the block.
+    """Call `beat` every interval_s for the duration of the block.
 
     Stops quietly once the run is no longer live -- a completed, paused or
     stopped run has no lease to keep, and that is not an error.
+
+    **P5-05 made the beat a callable rather than a session factory.** The thing
+    doing the work may be a sandbox with no database, so what refreshes the
+    lease is one of its gateway's operations (`control.heartbeat`); on the thread
+    path that is the same `repo.heartbeat` as before, reached through the same
+    gateway. `run_id` stays a parameter because every log line in here names it,
+    and a heartbeat thread that cannot say which run it failed for is the one
+    that caused the outage this function's comments are about.
+
+    `ControlPlaneError` is what "no longer live" arrives as now -- the gateway's
+    translation of the service's refusal -- and `repo.RepoError` is what it was.
+    Both are treated as "nothing to keep alive", because on the thread path a
+    `LocalGateway` raises the first wrapping the second.
     """
     # DEFAULT_HEARTBEAT is a timedelta (the lease module is time arithmetic);
     # Event.wait takes seconds. Passing the timedelta straight through raised
@@ -93,9 +110,8 @@ def heartbeat_during(
         try:
             while not done.wait(period):
                 try:
-                    with session_factory() as session:
-                        repo.heartbeat(session, run_id)
-                except repo.RepoError:
+                    beat()
+                except (repo.RepoError, ControlPlaneError):
                     return  # no longer live: nothing to keep alive
                 except Exception:  # pragma: no cover - never kill a run over a heartbeat
                     log.warning("heartbeat failed for run %s", run_id, exc_info=True)

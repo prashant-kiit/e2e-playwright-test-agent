@@ -36,6 +36,22 @@ def _run_field(session_factory, run_id, field):
         return getattr(repo.get_run(s, run_id), field)
 
 
+def _beat(session_factory, run_id):
+    """What refreshes the lease, as `heartbeat_during` now takes it.
+
+    P5-05 made the beat a callable rather than a session factory, because the
+    process doing the work may be a sandbox with no database: in production this
+    is `control.heartbeat`. Here it is the `repo.heartbeat` it wraps, which is
+    what these tests were always really about.
+    """
+
+    def beat() -> None:
+        with session_factory() as s:
+            repo.heartbeat(s, run_id)
+
+    return beat
+
+
 def _expire_lease(session_factory, target_id, run_id):
     """Leave the lease in the past, the way a crashed process would."""
     past = lease.utcnow() - lease.DEFAULT_LEASE_TTL
@@ -53,7 +69,7 @@ def test_heartbeat_during_extends_a_live_runs_lease(session_factory):
         repo.begin_run(s, run_id)
     before = _run_field(session_factory, run_id, "lease_expires_at")
 
-    with reaper.heartbeat_during(run_id, interval_s=0.01, session_factory=session_factory):
+    with reaper.heartbeat_during(run_id, _beat(session_factory, run_id), interval_s=0.01):
         _wait_until(
             lambda: _run_field(session_factory, run_id, "lease_expires_at") > before
         )
@@ -82,7 +98,7 @@ def test_heartbeat_uses_the_default_interval_when_none_is_given(session_factory,
         repo.begin_run(s, run_id)
     before = _run_field(session_factory, run_id, "lease_expires_at")
 
-    with reaper.heartbeat_during(run_id, session_factory=session_factory):
+    with reaper.heartbeat_during(run_id, _beat(session_factory, run_id)):
         _wait_until(lambda: _run_field(session_factory, run_id, "lease_expires_at") > before)
 
     assert _run_field(session_factory, run_id, "lease_expires_at") > before
@@ -95,7 +111,7 @@ def test_heartbeat_stops_quietly_once_the_run_is_no_longer_live(session_factory)
         repo.begin_run(s, run_id)
         repo.complete_run(s, run_id)
 
-    with reaper.heartbeat_during(run_id, interval_s=0.01, session_factory=session_factory):
+    with reaper.heartbeat_during(run_id, _beat(session_factory, run_id), interval_s=0.01):
         time.sleep(0.05)  # must not raise
 
     assert _run_field(session_factory, run_id, "status") is RunStatus.COMPLETED

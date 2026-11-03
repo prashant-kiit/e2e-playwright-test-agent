@@ -24,6 +24,13 @@ per-run rather than shared -- a shared tunnel cannot answer "which run is
 asking?" honestly. The handle is the sandbox's container name, and the proxy's
 name is derived from it by the same rule, so one opaque string reaps both and an
 SRE can still type it into `docker logs`.
+
+**What the container is given changed in P5-05 and nothing else did.** It used
+to carry `DATABASE_URL` and the `S3_*` credentials; it now carries a run-scoped
+token and the internal API's URL, minted here at dispatch. The networks, the
+proxy, the handle and the reaping are untouched -- the sandbox network still
+carries the control plane, because that is now the only thing on it a run needs
+to reach.
 """
 
 from __future__ import annotations
@@ -35,8 +42,8 @@ from dataclasses import dataclass
 import httpx
 
 from .. import repo
-from ..db import SessionLocal
-from ..orchestrator.driver import SessionFactory
+from ..control import factory
+from ..db import SessionFactory, SessionLocal
 from ..target_config import config_of
 from . import egress
 from .env import sandbox_environment
@@ -137,6 +144,15 @@ class DockerScheduler:
             run = repo.get_run(session, run_id)
             run_key = run.run_key
             cfg = config_of(run.target)
+        # Minted here, on the request thread, where `require_auth` has made this
+        # run's own tenant the acting one -- the read above is tenant-filtered
+        # and so is this one. The token is the sandbox's entire authority
+        # (P5-05): it replaces the `DATABASE_URL` and `S3_*` credentials this
+        # function used to hand a container, and it stops working when the run
+        # stops being live.
+        run_token = factory.mint_for_run(
+            run_id, session_factory=self._session_factory
+        )
 
         allowlist = egress.build_allowlist(cfg)
         # The run-time half of the public-address rule. The name was checked
@@ -156,7 +172,7 @@ class DockerScheduler:
         if self.settings.with_proxy:
             proxy_url = self._start_proxy(run_key, allowlist)
 
-        env = sandbox_environment(run_id, cfg, proxy_url=proxy_url)
+        env = sandbox_environment(run_id, cfg, run_token, proxy_url=proxy_url)
         try:
             self._create_and_start(
                 name,

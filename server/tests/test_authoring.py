@@ -23,6 +23,7 @@ import pytest
 from app import authoring, repo, revisions
 from app.delivery import render
 from app.sandbox import hydrate
+from tests.control_helpers import control_for_session
 from tests.storage_helpers import FakeStorage
 from tests.target_helpers import BASE_URL, TARGET_REPO, public_resolver
 
@@ -68,7 +69,7 @@ def _seed_suite_file(session, store, target, path, content):
     tmp = Path(tempfile.mkdtemp(prefix="qa-test-seed-"))
     try:
         root = tmp / "tree"
-        hydrate.materialize(session, head, store, root)
+        hydrate.materialize(revisions.revision_view(session, head), store, root)
         file = root / path
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_text(content)
@@ -137,12 +138,22 @@ def test_revision_one_carries_the_generated_config_rendered_from_the_row(
     assert "name: 'chromium'" in config
 
 
-def test_a_new_target_can_be_hydrated_immediately(session, store, target, tmp_path):
-    """Revision 1 is the whole point: there is no disk to baseline from."""
+def test_a_new_target_can_be_hydrated_immediately(
+    session, store, target, tmp_path, monkeypatch
+):
+    """Revision 1 is the whole point: there is no disk to baseline from.
+
+    Hydrate takes a run's gateway now (P5-05), so this needs a run on the new
+    target to hydrate *as* -- which is what the real path has too: nothing
+    hydrates a target except a run of it.
+    """
     from app.sandbox import hydrate as hyd
 
+    run = repo.start_run(session, target_id=target.id, story_id="SCRUM-1", mode="full")
+    control = control_for_session(run.id, session, store, monkeypatch)
+
     result = hyd.hydrate(
-        session, target, store, tmp_path / "wt", emit=lambda line: None, install=False
+        control, store, tmp_path / "wt", emit=lambda line: None, install=False
     )
 
     assert result.rev == 1

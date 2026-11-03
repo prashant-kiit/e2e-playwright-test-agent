@@ -10,14 +10,25 @@ asserts that this module composes nothing of its own
 (tests/test_sandbox_entrypoint.py).
 
 What the process gets from its environment is what the environment builder put
-there (app/sandbox/env.py): `DATABASE_URL`, the `S3_*` credentials hydrate and
-ingest need, `ANTHROPIC_API_KEY`, the scratch paths and the runner kind. Never a
-GitHub credential, never a portal credential, and no mounted repo.
+there (app/sandbox/env.py). After P5-05 that is: a **run-scoped token** and the
+URL of the internal control-plane API, `ANTHROPIC_API_KEY`, the scratch paths and
+the runner kind. Never `DATABASE_URL`, never the `S3_*` credentials, never a
+GitHub credential, never a portal credential, and no mounted repo. The stores are
+not reachable from a sandbox at all; everything this process needs from Postgres
+and from the blob store it asks the control plane for, as the one run its token
+names.
+
+**The run id is on the command line *and* in the token**, and the gateway refuses
+a mismatch. Two spellings because the argument is what makes `docker ps` and a
+crash log readable, and the token is what makes the request authorized; the
+refusal is what stops them ever meaning different things.
 
 **The exit code is read off the run row, not inferred.** A run that ends
 `failed` for any reason -- a hydrate that could not build a tree, a step that
 crashed, an ingest that dropped its work -- exits non-zero, so the scheduler and
 an operator reading `docker ps -a` agree with the database about what happened.
+It is the one thing this process asks about a run that has already finished, and
+the control plane answers it for exactly that reason.
 """
 
 from __future__ import annotations
@@ -25,14 +36,12 @@ from __future__ import annotations
 import logging
 import sys
 
-from .. import repo
-from ..db import SessionLocal
+from ..control import factory
+from ..control.gateway import RunGateway
 from ..domain.status import RunStatus
 from ..launcher import drive_run
-from ..orchestrator.bus import LogBus
-from ..orchestrator.driver import SessionFactory
+from ..orchestrator.bus import GatewayLogBus, LogBus
 from ..orchestrator.runner import Runner
-from ..storage import Storage
 
 USAGE = "usage: python -m app.sandbox.run <run_id>"
 
@@ -46,8 +55,7 @@ def main(
     *,
     runner: Runner | None = None,
     bus: LogBus | None = None,
-    session_factory: SessionFactory = SessionLocal,
-    store: Storage | None = None,
+    control: RunGateway | None = None,
 ) -> int:
     """Drive one run to its end. Returns the process's exit code."""
     args = sys.argv[1:] if argv is None else argv
@@ -63,17 +71,19 @@ def main(
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
-    drive_run(
-        run_id,
-        runner=runner,
-        bus=bus,
-        session_factory=session_factory,
-        store=store,
-    )
+    control = control or factory.from_env()
+    if control.scope.run_id != run_id:
+        print(
+            f"{USAGE}\nthis sandbox's token is for run {control.scope.run_id}, "
+            f"not {run_id}",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
 
-    with session_factory() as session:
-        status = repo.get_run(session, run_id).status
-    return EXIT_RUN_FAILED if status is RunStatus.FAILED else EXIT_OK
+    drive_run(control, runner=runner, bus=bus or GatewayLogBus(control))
+
+    status = control.run_status()
+    return EXIT_RUN_FAILED if RunStatus(status) is RunStatus.FAILED else EXIT_OK
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess

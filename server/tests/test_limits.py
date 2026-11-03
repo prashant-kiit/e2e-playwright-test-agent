@@ -34,6 +34,7 @@ from app.orchestrator import limits as limits_module
 from app.orchestrator.bus import InMemoryLogBus
 from app.orchestrator.fake import FakeRunner
 from app.orchestrator.runner import StepResult
+from tests.control_helpers import control_for
 from tests.delivery_helpers import make_worktree
 from tests.storage_helpers import FakeStorage
 from tests.target_helpers import create_target
@@ -77,11 +78,7 @@ def run_env(session_factory, tmp_path, monkeypatch):
 def _drive(session_factory, run_id, store, runner):
     bus = InMemoryLogBus()
     launcher.drive_run(
-        run_id,
-        runner=runner,
-        bus=bus,
-        session_factory=session_factory,
-        store=store,
+        control_for(run_id, session_factory, store), runner=runner, bus=bus
     )
     return bus.read_from(run_id, 0)[0]
 

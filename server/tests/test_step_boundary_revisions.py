@@ -9,6 +9,14 @@ Prior art: test_artifacts.py, which does the same for the artifact half.
 The driver still takes exactly one step-boundary callable; that is asserted in
 test_run_worktree.py, because adding a second parameter is the thing
 DESIGN.md §13 names as not to do.
+
+P5-05 split ingest in two without changing what it means: the worktree is
+scanned and its blobs uploaded on the run's side, and the control plane
+recomputes the tree hash from the manifest and writes the row. These tests still
+drive the whole thing and still assert on the revisions that come out, which is
+the point -- the behaviour is what must not have moved. Each one builds its
+gateway around its *own* store, because several of them are about a store that
+misbehaves.
 """
 
 from __future__ import annotations
@@ -20,6 +28,7 @@ from app.domain.status import RunStatus
 from app.domain.steps import STEP_ORDER, Step
 from app.models import AppLock, FileIndex
 from app.orchestrator.fake import FakeRunner
+from tests.control_helpers import control_for
 from tests.delivery_helpers import make_worktree
 from tests.storage_helpers import FakeStorage
 from tests.target_helpers import create_target
@@ -39,18 +48,25 @@ def run_env(session_factory, tmp_path, monkeypatch):
             s, target, store, make_worktree(tmp_path / "source"), author="operator"
         )
         run = repo.start_run(s, target_id=target.id, story_id="SCRUM-1", mode="full")
-        return run.id, target.id, store
+        return run.id, run.run_key, target.id, store
 
 
-def _drive(session_factory, run_id, store, runner=None, *, collect_override=None):
-    """Hydrate, run the whole pipeline with the real composed hook, tear down."""
+def _drive(
+    session_factory, run_id, run_key, store, runner=None, *, collect_override=None
+):
+    """Hydrate, run the whole pipeline with the real composed hook, tear down.
+
+    Builds the run's gateway around `store`, because the store is what several
+    of these tests vary: after P5-05 a run reaches a blob only through its
+    gateway, so "the store is down" has to be expressed as a gateway holding a
+    store that is down.
+    """
     lines: list[str] = []
     launcher.run_with_worktree(
-        run_id,
+        control_for(run_id, session_factory, store),
+        run_key,
         lines.append,
         runner or FakeRunner(),
-        session_factory=session_factory,
-        store=store,
         collect=collect_override,
     )
     return lines
@@ -95,9 +111,9 @@ class _ChangesOn(FakeRunner):
 def test_a_run_that_changes_nothing_commits_no_revision(run_env, session_factory):
     """Revision 1 came with the target, so a run that changes nothing leaves
     the head where it was -- there is no baseline-from-disk to add a second."""
-    run_id, target_id, store = run_env
+    run_id, run_key, target_id, store = run_env
 
-    _drive(session_factory, run_id, store)
+    _drive(session_factory, run_id, run_key, store)
 
     assert [r.rev for r in _revs(session_factory, target_id)] == [1]
     with session_factory() as s:
@@ -109,9 +125,9 @@ def test_a_five_step_run_over_a_tree_that_changes_once_commits_one_revision(
 ):
     """Three of the five steps routinely change no tracked file, so `rev` must
     count real changes rather than counting steps."""
-    run_id, target_id, store = run_env
+    run_id, run_key, target_id, store = run_env
 
-    _drive(session_factory, run_id, store, _ChangesOn({Step.GENERATE: "// one\n"}))
+    _drive(session_factory, run_id, run_key, store, _ChangesOn({Step.GENERATE: "// one\n"}))
 
     assert len(STEP_ORDER) == 5
     revs = _revs(session_factory, target_id)
@@ -123,11 +139,12 @@ def test_a_five_step_run_over_a_tree_that_changes_once_commits_one_revision(
 def test_a_run_that_changes_the_tree_twice_commits_two_chained_revisions(
     run_env, session_factory
 ):
-    run_id, target_id, store = run_env
+    run_id, run_key, target_id, store = run_env
 
     _drive(
         session_factory,
         run_id,
+        run_key,
         store,
         _ChangesOn({Step.GENERATE: "// generated\n", Step.HEAL: "// healed\n"}),
     )
@@ -143,9 +160,9 @@ def test_a_run_that_changes_the_tree_twice_commits_two_chained_revisions(
 
 
 def test_the_committed_revision_contains_the_file_the_run_wrote(run_env, session_factory):
-    run_id, target_id, store = run_env
+    run_id, run_key, target_id, store = run_env
 
-    _drive(session_factory, run_id, store, _ChangesOn({Step.GENERATE: "// gen\n"}))
+    _drive(session_factory, run_id, run_key, store, _ChangesOn({Step.GENERATE: "// gen\n"}))
 
     head = _revs(session_factory, target_id)[0]
     with session_factory() as s:
@@ -155,12 +172,12 @@ def test_the_committed_revision_contains_the_file_the_run_wrote(run_env, session
 
 def test_a_second_run_starts_from_the_first_runs_revision(run_env, session_factory):
     """The worktree is thrown away; the revision is what carries forward."""
-    run_id, target_id, store = run_env
-    _drive(session_factory, run_id, store, _ChangesOn({Step.GENERATE: "// first\n"}))
+    run_id, run_key, target_id, store = run_env
+    _drive(session_factory, run_id, run_key, store, _ChangesOn({Step.GENERATE: "// first\n"}))
 
     with session_factory() as s:
         second = repo.start_run(s, target_id=target_id, story_id="SCRUM-1", mode="full")
-        second_id = second.id
+        second_id, second_key = second.id, second.run_key
     inherited: list[str] = []
 
     class ReadsWhatItInherited(FakeRunner):
@@ -171,7 +188,7 @@ def test_a_second_run_starts_from_the_first_runs_revision(run_env, session_facto
                 )
             return super().run_step(ctx, emit)
 
-    _drive(session_factory, second_id, store, ReadsWhatItInherited())
+    _drive(session_factory, second_id, second_key, store, ReadsWhatItInherited())
 
     assert inherited == ["// first\n"]
 
@@ -186,7 +203,7 @@ def test_a_second_run_starts_from_the_first_runs_revision(run_env, session_facto
 
 def test_artifacts_are_collected_before_the_revision_snapshot(run_env, session_factory):
     """Existing behavior runs first and is never delayed by new work."""
-    run_id, _target_id, store = run_env
+    run_id, run_key, _target_id, store = run_env
     order: list[str] = []
 
     class RecordingStorage(_SharesBlobs):
@@ -197,6 +214,7 @@ def test_artifacts_are_collected_before_the_revision_snapshot(run_env, session_f
     _drive(
         session_factory,
         run_id,
+        run_key,
         RecordingStorage(store),
         _ChangesOn({Step.GENERATE: "// changed\n"}),
         collect_override=lambda run_id, step: order.append("artifacts"),
@@ -209,7 +227,7 @@ def test_artifacts_are_collected_before_the_revision_snapshot(run_env, session_f
 def test_an_ingest_that_raises_fails_the_run(run_env, session_factory):
     """The inversion. A run reported as succeeded must never mean "the work it
     did was dropped"."""
-    run_id, target_id, store = run_env
+    run_id, run_key, target_id, store = run_env
 
     class Exploding(_SharesBlobs):
         def put_file(self, key, path, content_type=None):
@@ -218,6 +236,7 @@ def test_an_ingest_that_raises_fails_the_run(run_env, session_factory):
     lines = _drive(
         session_factory,
         run_id,
+        run_key,
         Exploding(store),
         _ChangesOn({Step.GENERATE: "// gen\n"}),
     )
@@ -231,14 +250,18 @@ def test_an_ingest_that_raises_fails_the_run(run_env, session_factory):
 
 def test_a_failed_ingest_frees_the_lock(run_env, session_factory):
     """Exactly as a crashed runner does: the target is not held by a dead run."""
-    run_id, target_id, store = run_env
+    run_id, run_key, target_id, store = run_env
 
     class Exploding(_SharesBlobs):
         def put_file(self, key, path, content_type=None):
             raise RuntimeError("object store is down")
 
     _drive(
-        session_factory, run_id, Exploding(store), _ChangesOn({Step.GENERATE: "// g\n"})
+        session_factory,
+        run_id,
+        run_key,
+        Exploding(store),
+        _ChangesOn({Step.GENERATE: "// g\n"}),
     )
 
     with session_factory() as s:
@@ -251,7 +274,7 @@ def test_a_failed_ingest_frees_the_lock(run_env, session_factory):
 def test_a_failed_ingest_stops_the_run_at_that_step(run_env, session_factory):
     """It fails the step and the run, so no later step runs on work that was
     never recorded."""
-    run_id, _target_id, store = run_env
+    run_id, run_key, _target_id, store = run_env
     attempted: list[Step] = []
 
     class Exploding(_SharesBlobs):
@@ -266,6 +289,7 @@ def test_a_failed_ingest_stops_the_run_at_that_step(run_env, session_factory):
     _drive(
         session_factory,
         run_id,
+        run_key,
         Exploding(store),
         Recording({Step.READ_STORY: "// first step changes the tree\n"}),
     )
@@ -277,7 +301,7 @@ def test_an_artifact_collector_that_raises_still_does_not_fail_the_run(
     run_env, session_factory
 ):
     """Artifact collection stays best-effort: evidence is not the work."""
-    run_id, target_id, store = run_env
+    run_id, run_key, target_id, store = run_env
     ingested: list[int] = []
 
     class Counting(_SharesBlobs):
@@ -291,6 +315,7 @@ def test_an_artifact_collector_that_raises_still_does_not_fail_the_run(
     lines = _drive(
         session_factory,
         run_id,
+        run_key,
         Counting(store),
         _ChangesOn({Step.GENERATE: "// gen\n"}),
         collect_override=exploding_collect,
@@ -308,7 +333,7 @@ def test_both_halves_report_their_failures_to_the_runs_log_stream(
 ):
     """The ingest half propagates *and* reports: the operator reading the log
     should not have to infer the reason from the run's status."""
-    run_id, _target_id, store = run_env
+    run_id, run_key, _target_id, store = run_env
 
     class Exploding(_SharesBlobs):
         def put_file(self, key, path, content_type=None):
@@ -320,6 +345,7 @@ def test_both_halves_report_their_failures_to_the_runs_log_stream(
     lines = _drive(
         session_factory,
         run_id,
+        run_key,
         Exploding(store),
         _ChangesOn({Step.GENERATE: "// gen\n"}),
         collect_override=exploding_collect,
@@ -336,7 +362,7 @@ def test_a_failed_ingest_leaves_the_previous_head_intact(
 ):
     """Blob before row (invariant 3): a failure may leave an unreferenced blob,
     never a revision pointing at bytes that are not there."""
-    run_id, target_id, store = run_env
+    run_id, run_key, target_id, store = run_env
 
     class Exploding(_SharesBlobs):
         def put_file(self, key, path, content_type=None):
@@ -345,6 +371,7 @@ def test_a_failed_ingest_leaves_the_previous_head_intact(
     _drive(
         session_factory,
         run_id,
+        run_key,
         Exploding(store),
         _ChangesOn({Step.GENERATE: "// gen\n"}),
     )
@@ -365,7 +392,7 @@ def test_an_agent_edit_to_a_generated_file_is_discarded_at_ingest(
 ):
     """Ingest re-renders the generated entries before it scans, so an agent's
     edit to the config never reaches a revision."""
-    run_id, target_id, store = run_env
+    run_id, run_key, target_id, store = run_env
 
     class EditsTheConfig(FakeRunner):
         def run_step(self, ctx, emit):
@@ -375,7 +402,7 @@ def test_an_agent_edit_to_a_generated_file_is_discarded_at_ingest(
                 )
             return super().run_step(ctx, emit)
 
-    _drive(session_factory, run_id, store, EditsTheConfig())
+    _drive(session_factory, run_id, run_key, store, EditsTheConfig())
 
     assert [r.rev for r in _revs(session_factory, target_id)] == [1], (
         "an edit to a generated file is not a tree change"
@@ -390,7 +417,7 @@ def test_an_agent_edit_to_a_generated_file_is_discarded_at_ingest(
 def test_an_agent_edit_to_a_generated_file_does_not_mask_a_real_change(
     run_env, session_factory
 ):
-    run_id, target_id, store = run_env
+    run_id, run_key, target_id, store = run_env
 
     class EditsBoth(FakeRunner):
         def run_step(self, ctx, emit):
@@ -399,7 +426,7 @@ def test_an_agent_edit_to_a_generated_file_does_not_mask_a_real_change(
                 (ctx.worktree / "tests" / "checkout" / "new.spec.ts").write_text("// new\n")
             return super().run_step(ctx, emit)
 
-    _drive(session_factory, run_id, store, EditsBoth())
+    _drive(session_factory, run_id, run_key, store, EditsBoth())
 
     assert [r.rev for r in _revs(session_factory, target_id)] == [2, 1]
     with session_factory() as s:
@@ -415,7 +442,7 @@ def test_an_agent_edit_to_a_generated_file_does_not_mask_a_real_change(
 
 def test_blob_before_row_still_holds(run_env, session_factory):
     """A revision never names bytes that are not in the store yet."""
-    run_id, target_id, store = run_env
+    run_id, run_key, target_id, store = run_env
     order: list[str] = []
 
     class Watching(_SharesBlobs):
@@ -426,6 +453,7 @@ def test_blob_before_row_still_holds(run_env, session_factory):
     _drive(
         session_factory,
         run_id,
+        run_key,
         Watching(store),
         _ChangesOn({Step.GENERATE: "// gen\n"}),
     )

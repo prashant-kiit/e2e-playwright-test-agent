@@ -97,13 +97,23 @@ def test_the_migration_seeds_the_single_operator_as_a_tenant_admin(session):
     assert admin.credential != "admin"
 
 
-def test_the_thread_path_binds_the_runs_tenant(session):
-    """The background equivalent of `require_auth`: `drive_run` resolves the
-    run's tenant and binds it, so a run's inserts are written as its own tenant
-    and not the resolver's default."""
+def test_the_background_path_binds_the_runs_tenant_from_its_token(session):
+    """The background equivalent of `require_auth`, as P5-05 left it.
+
+    It used to be `launcher._run_tenant_scope`, which read the run across
+    tenants in order to discover whose it was -- a chicken-and-egg that needed a
+    hole in the read guard, and the reason `launcher` was on the bypass
+    allowlist. The token carries the tenant now: it is minted by the control
+    plane while the run's own tenant is acting, and every operation the run
+    performs is bound to it by `service.acting_as`. So the run's inserts are
+    still written as the run's tenant, and nothing on that path reads a row
+    without a scope -- because nothing on that path reads a row at all.
+    """
     from sqlalchemy.orm import sessionmaker
 
-    from app.launcher import _run_tenant_scope
+    from app.control import factory as control_factory
+    from app.control import service
+    from app.run_token import verify
 
     session.add(Tenant(id=2, slug="second", name="second"))
     session.commit()
@@ -111,16 +121,54 @@ def test_the_thread_path_binds_the_runs_tenant(session):
         project = repo.create_project(session, name="t2")
         target = create_target(session, project.id, app="a2", name="A2")
         run = repo.start_run(session, target_id=target.id, story_id="SCRUM-1", mode="full")
+    # A throwaway factory on the same engine, for the reason the deleted
+    # `_run_tenant_scope` test used one: minting opens its own session, and a
+    # session that already created the run would answer `session.get` from its
+    # identity map without ever querying -- so the read guard would not run and
+    # the test would prove nothing about it.
+    factory = sessionmaker(bind=session.get_bind(), expire_on_commit=False, future=True)
+    with tenant_scope(2):
+        # Minted inside the acting tenant's scope, exactly as the two production
+        # call sites do it -- on a request thread, under `require_auth`.
+        token = control_factory.mint_for_run(run.id, session_factory=factory)
     assert run.tenant_id == 2
 
-    # A throwaway factory on the same engine: `_run_tenant_scope` opens and
-    # closes its own session, so it must not be handed the fixture's shared one.
-    factory = sessionmaker(bind=session.get_bind(), expire_on_commit=False, future=True)
+    scope = verify(token)
+    assert scope.tenant_id == 2
+    assert scope.run_id == run.id
+    assert scope.target_id == target.id
 
     assert current_tenant_id() == DEFAULT_TENANT_ID  # outside the scope
-    with _run_tenant_scope(run.id, factory):
+    with service.acting_as(scope):
         assert current_tenant_id() == 2
     assert current_tenant_id() == DEFAULT_TENANT_ID  # restored after
+
+
+def test_a_token_cannot_be_minted_for_another_tenants_run(session):
+    """Minting is a tenant-filtered read, which is why it needs no bypass.
+
+    A control plane acting as tenant 1 cannot mint a token for tenant 2's run:
+    the read simply does not find it. That is the property that let
+    `_run_tenant_scope` -- and `launcher`'s entry in the bypass allowlist -- be
+    deleted rather than replaced.
+    """
+    from sqlalchemy.orm import sessionmaker
+
+    from app.control import factory as control_factory
+
+    session.add(Tenant(id=2, slug="second", name="second"))
+    session.commit()
+    with tenant_scope(2):
+        project = repo.create_project(session, name="t2")
+        target = create_target(session, project.id, app="a2", name="A2")
+        run = repo.start_run(session, target_id=target.id, story_id="SCRUM-1", mode="full")
+
+    # A fresh session, so the read really goes to the database: see the note in
+    # the test above about the identity map.
+    factory = sessionmaker(bind=session.get_bind(), expire_on_commit=False, future=True)
+
+    with pytest.raises(repo.NotFound):
+        control_factory.mint_for_run(run.id, session_factory=factory)
 
 
 def test_insert_paths_set_tenant_id_explicitly(session):
