@@ -12,11 +12,11 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from . import target_config
-from .domain import lease
+from .domain import lease, quotas
 from .domain.status import LIVE, TERMINAL, RunStatus, assert_transition, is_live
 from .domain.steps import Step
 from .models import AppLock, Project, Run, RunStep, Target, Tenant, User
@@ -49,6 +49,66 @@ class RunConflict(RepoError):
         )
         self.target_id = target_id
         self.run_id = run_id
+
+
+class QuotaExceeded(RepoError):
+    """This tenant's plan will not fit another run right now (P5-04).
+
+    Deliberately **not** a `RunConflict` and deliberately not a failed run.
+    Three different things an operator can be told, with three different
+    remedies, and collapsing any two of them loses the remedy:
+
+    * `RunConflict` -- *this app* is busy. Wait for that run, or use another app.
+    * `QuotaExceeded` -- *this tenant* is over an allowance. Wait, stop a run,
+      or buy more -- depending on which cap, which `kind` carries.
+    * a `failed` run -- the work was accepted, started, and went wrong. A breach
+      must never look like this: nothing was dispatched and no run row exists,
+      so a `failed` row would be a report of work that never happened, and it
+      would consume monthly quota on the way.
+
+    `limit` and `used` travel with it because the portal has to say "3 of 3"
+    rather than "too many", and the route has no second chance to count.
+    """
+
+    def __init__(self, kind: quotas.QuotaKind, limit: int, used: int, reason: str) -> None:
+        super().__init__(reason)
+        self.kind = kind
+        self.limit = limit
+        self.used = used
+
+
+class ConcurrencyLimitReached(QuotaExceeded):
+    """The tenant's live runs are at its concurrent-run cap. Self-clearing: a
+    running run will finish, and then the next start succeeds."""
+
+    def __init__(self, limit: int, used: int) -> None:
+        super().__init__(
+            quotas.QuotaKind.CONCURRENCY,
+            limit,
+            used,
+            f"this tenant already has {used} of {limit} runs going at once; "
+            f"wait for one to finish or stop one, then start this again",
+        )
+
+
+class MonthlyQuotaExhausted(QuotaExceeded):
+    """The tenant has started its month's allowance of runs. Not self-clearing:
+    nothing the customer does to their running work frees any."""
+
+    def __init__(self, limit: int, used: int) -> None:
+        super().__init__(
+            quotas.QuotaKind.MONTHLY,
+            limit,
+            used,
+            f"this tenant has started {used} of its {limit} runs for this "
+            f"calendar month; the quota resets at the start of next month",
+        )
+
+
+_BREACHES: dict[quotas.QuotaKind, type[QuotaExceeded]] = {
+    quotas.QuotaKind.CONCURRENCY: ConcurrencyLimitReached,
+    quotas.QuotaKind.MONTHLY: MonthlyQuotaExhausted,
+}
 
 
 # --- users ----------------------------------------------------------------
@@ -288,6 +348,136 @@ def _fail_and_release(session: Session, run: Run, reason: str) -> None:
         session.delete(lock)
 
 
+class _Unset:
+    """The "you did not mention this cap" marker for `set_tenant_caps`.
+
+    A sentinel is needed because `None` is already a *value* on these columns --
+    it means unmetered -- so it cannot double as the "not specified" default.
+    Its own class rather than `object()` so a repr in a traceback says what it
+    is.
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "<unset>"
+
+
+UNSET = _Unset()
+
+
+def set_tenant_caps(
+    session: Session,
+    *,
+    max_concurrent_runs: int | None | _Unset = UNSET,
+    monthly_run_quota: int | None | _Unset = UNSET,
+) -> Tenant:
+    """Set the current tenant's plan limits. Only the caps you pass are changed.
+
+    `None` means **no cap**, and is therefore a value you can pass on purpose;
+    a cap you leave out is left exactly as it was. Those have to be two
+    different things: when `None` was both the default and the way to say
+    "unmetered", raising a concurrency cap silently deleted the monthly quota,
+    which the only caller this docstring names -- a console operator -- would
+    have no reason to expect (found in review).
+
+    The write half of P5-04, and for now the *only* way a cap gets set: there
+    is still no tenant-admin surface (`VERIFICATION-P5.md` follow-up 6), so
+    this is reached from the tests and from a console rather than from a route.
+    Deliberately not exposed as an API endpoint by this ticket -- a tenant that
+    could raise its own caps would not have caps.
+    """
+    tenant = session.get(Tenant, current_tenant_id())
+    if tenant is None:  # pragma: no cover - a session always has its tenant
+        raise NotFound(f"no such tenant {current_tenant_id()}")
+    for name, value in (
+        ("max_concurrent_runs", max_concurrent_runs),
+        ("monthly_run_quota", monthly_run_quota),
+    ):
+        if isinstance(value, _Unset):
+            continue
+        if value is not None and value < 0:
+            raise ValueError(f"{name} cannot be negative, got {value}")
+        setattr(tenant, name, value)
+    session.commit()
+    session.refresh(tenant)
+    return tenant
+
+
+def tenant_usage(session: Session, *, now: datetime | None = None) -> quotas.Usage:
+    """What the current tenant has spent: live runs, and runs started this month.
+
+    Both counts are the tenant's across every one of its apps, and both are
+    ordinary ORM selects, so `tenancy.install_read_guard` adds the `tenant_id`
+    filter -- the same mechanism as every other read. A quota that counted
+    another tenant's runs would be worse than no quota at all, so
+    `test_quotas.py` proves the scoping rather than trusting it.
+
+    `created_at` is the month boundary, not `updated_at`: the question is how
+    many runs this tenant *started*, and a run that failed still spent a
+    sandbox. A quota that only counted successes would make "retry until it
+    works" free.
+
+    **"Live" here means what `live_run_holding` means, not `status IN LIVE`**,
+    and the difference is a regression this nearly shipped with. A run whose
+    lease has lapsed and that is not paused is *crashed*: `start_run`'s own lock
+    trio reaps it in place, a few lines below the quota check. Counting it would
+    let a tenant at its cap with one dead run be refused by the check above the
+    trio that was about to free it -- so the restart that worked before this
+    slice would stop working until the reaper came round, and that is a
+    30-second loop which may not be running at all. A **paused** run is the
+    other way: it cleared its lease deliberately, `reap_expired` skips it, and
+    it still owns its target, so it is live and it counts.
+    """
+    now = now or lease.utcnow()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    live = session.scalar(
+        select(func.count())
+        .select_from(Run)
+        .where(
+            Run.status.in_(LIVE),
+            or_(
+                # Paused: lease cleared on purpose, still holding the target.
+                Run.status == RunStatus.PAUSED,
+                # No lease recorded: not reapable, so not provably crashed.
+                Run.lease_expires_at.is_(None),
+                # `lease.is_expired` is `now >= expires_at`, so "still live"
+                # is strictly greater -- the same boundary, stated once.
+                Run.lease_expires_at > now,
+            ),
+        )
+    )
+    this_month = session.scalar(
+        select(func.count()).select_from(Run).where(Run.created_at >= month_start)
+    )
+    return quotas.Usage(live_runs=live or 0, runs_this_month=this_month or 0)
+
+
+def tenant_caps(session: Session) -> quotas.Caps:
+    """The current tenant's plan limits. `None` on either is no cap."""
+    tenant = session.get(Tenant, current_tenant_id())
+    if tenant is None:  # pragma: no cover - a session always has its tenant
+        raise NotFound(f"no such tenant {current_tenant_id()}")
+    return quotas.Caps(
+        max_concurrent_runs=tenant.max_concurrent_runs,
+        monthly_run_quota=tenant.monthly_run_quota,
+    )
+
+
+def _enforce_tenant_quotas(session: Session, *, now: datetime) -> None:
+    """Refuse the enqueue if the tenant is at either cap.
+
+    Counting is skipped entirely for an unmetered tenant: two aggregate queries
+    per run start are not free, and a tenant with no caps has no answer they
+    could change.
+    """
+    caps = tenant_caps(session)
+    if caps.unmetered:
+        return
+    breach = quotas.breach(caps, tenant_usage(session, now=now))
+    if breach is None:
+        return
+    raise _BREACHES[breach.kind](breach.limit, breach.used)
+
+
 def start_run(
     session: Session,
     target_id: int,
@@ -299,6 +489,16 @@ def start_run(
         raise ValueError(f"mode must be one of {VALID_MODES}, got {mode!r}")
     now = now or lease.utcnow()
     target = get_target(session, target_id)
+
+    # The tenant's allowance, checked *above* the lock trio and before any row
+    # is written. Above, because the trio answers "is this app busy?" and this
+    # answers "is this tenant over its plan?" -- different questions, and
+    # DESIGN.md §5 is explicit that a scheduler goes above the trio rather than
+    # inside it. Before any write, because a refusal must leave nothing behind:
+    # a run row created and then rolled back would still have burned a
+    # `run_key` and, worse, would have counted against the monthly quota it
+    # was refused for.
+    _enforce_tenant_quotas(session, now=now)
 
     # Take the app's lock row FOR UPDATE so two concurrent starts serialise here.
     existing = session.scalars(

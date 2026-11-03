@@ -285,3 +285,26 @@ class DeliveryOut(BaseModel):
     pr_url: str = ""
     pr_number: int | None = None
     detail: dict = {}
+
+
+class UsageOut(BaseModel):
+    """What this tenant has spent against what its plan allows (P5-04).
+
+    One request rather than two, because the portal always wants both halves:
+    a count with no denominator cannot be rendered as "2 of 3", and a cap with
+    no count cannot be rendered at all.
+
+    `max_concurrent_runs` and `monthly_run_quota` are `None` for an unmetered
+    tenant -- no cap, rather than a cap of zero -- and the two `at_*` flags are
+    then always false. They are computed here rather than left to the browser
+    so "is this tenant at its cap?" has exactly one implementation: the portal
+    disabling a button on one rule while the enqueue refuses on another is how
+    a Start button that looks available starts answering 429.
+    """
+
+    live_runs: int
+    runs_this_month: int
+    max_concurrent_runs: int | None
+    monthly_run_quota: int | None
+    at_concurrency_cap: bool
+    at_monthly_quota: bool

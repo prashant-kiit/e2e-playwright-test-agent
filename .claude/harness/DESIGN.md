@@ -281,6 +281,13 @@ actually matters.
 > keeps the lock while clearing the lease, and the reaper skips `PAUSED` runs so a deliberate
 > pause is never mistaken for a crash. Leave that trio alone; adding the queue means adding a
 > scheduler *above* it, not changing it.
+>
+> **P5-04 is the first thing to take that advice**: the per-tenant quota check runs in
+> `repo.start_run` before the lock row is touched, and the trio is byte-for-byte what it was.
+> It is the shape a queue would go in too. One consequence is worth stating because it is a
+> deliberate ordering and not an accident: a tenant that is over its allowance *and* asking
+> for a busy app is told about the allowance, since "wait for this app" is advice that cannot
+> help when nothing could be started anyway.
 
 ---
 
@@ -341,11 +348,31 @@ Bundling that into P4 would have been building P5's tenant scoping early and wor
 
 ### Quotas and timeouts
 
-Enforced at enqueue: per-tenant **concurrent-run cap** and **monthly run quota**.
+Enforced at enqueue: per-tenant **concurrent-run cap** and **monthly run quota**
+(`tenants.max_concurrent_runs`, `tenants.monthly_run_quota`; P5-04).
 Enforced at runtime: **per-step and per-run wall-clock timeouts** that reap the sandbox,
-plus a **per-run token budget**. Any breach → run `failed` with an explicit reason, last
-good revision intact. The wall-clock timeout is the one that matters — a wedged agent
-holding a browser open is the most expensive failure mode in the system.
+plus a **per-run token budget**. The wall-clock timeout is the one that matters — a wedged
+agent holding a browser open is the most expensive failure mode in the system.
+
+**The two kinds of breach do not end the same way, and this section used to say they did.**
+A *runtime* breach → run `failed` with an explicit reason, last good revision intact: the
+work was accepted and started, and the run is the record of it. An *enqueue* breach → a
+typed **rejection** (`repo.QuotaExceeded` → HTTP **429**), and **no run row at all**. A
+refused start that wrote a `failed` run would be reporting work that never happened, and it
+would have spent the monthly quota it was just refused for — so the next attempt would be
+refused for the sake of a run nobody ran. 429 rather than the 409 a busy app gets, because
+"your tenant is out of allowance" and "this app already has a live run" have different
+remedies and an operator who cannot tell them apart can act on neither.
+
+`NULL` on either column means **no cap**, not a cap of zero: a tenant nobody has configured
+is unmetered, which is the safe direction while there is still no tenant-admin surface to
+configure one with. The enqueue skips counting entirely for such a tenant.
+
+Both caps are the **tenant's**, counted across all of its apps, and the monthly one counts
+runs *started* in the calendar month — a failed run still spent its sandbox, and a quota
+that only counted successes would make "retry until it works" free. A rejection names one
+cap (it is one sentence to one person), while the portal's usage panel asks about each cap
+independently, because both can be full at once.
 
 ---
 
@@ -676,6 +703,8 @@ one hook by the caller. Recorded here because the natural way to write P2 is to 
 | 32 | **The delivery seam is bound to one target before it can push.** `for_target(tools, app)` resolves that target's credential *and* marks it invalid if GitHub rejects it, because those are two halves of one decision; an unbound seam fails loud naming the call that was missed. Four paths do not bind — `is_bootstrapped`, the already-bootstrapped arm and the two `--dry-run` arms — because their answers are Postgres and blob-store reads; `plan_reset` binds because it dials out. A rejection reaching us as a git transport failure rather than a REST 401/403 is translated to the same `CredentialError`, so it is one outcome with one status and one sticky state (P5-03) |
 | 33 | **A credential refused at save time is 422; one refused at delivery is 502.** Separate exception classes, because one class for both would read to a customer with a scope typo as a GitHub outage — and the two have different remedies (P5-03) |
 | 34 | **`GITHUB_PAT` is retired, not kept as a fallback, and nothing is migrated into the new columns.** One operator token is not any tenant's credential; sealing it per target would give every customer the same identity under a per-tenant name (P5-03) |
+| 35 | **An enqueue quota breach is a rejection, not a run.** Checked in `repo.start_run` *above* the `AppLock` trio and before any row is written, so a refusal leaves no run and no lock: a `failed` row would report work that never happened and would spend the monthly quota it was just refused for. 429, distinct from the 409 a busy app gets, because the remedies differ. `NULL` on either cap means unmetered, so a tenant nobody has configured is never locked out (P5-04) |
+| 36 | **A rejection names one cap; the usage panel asks about each.** `quotas.breach` returns the single kind to refuse with, monthly first, because a tenant that is both out of quota and at its concurrency cap must hear the one that is true for longer — telling them to wait cannot help. Both caps can be full at once, so the portal reads two independent predicates rather than deriving its gauges from the rejection (P5-04) |
 
 ---
 
@@ -687,7 +716,7 @@ does not have to reconstruct which were considered.
 | Deferred | To | Why |
 |---|---|---|
 | **Git bundles and `bundle_key`** | not scheduled | Nothing reads a bundle. Revisions reconstruct from deduped content blobs, a crash commits nothing by design, and a resumed run needs the *agent session* — which P4 persists as a run artifact — rather than mid-step git history. The worktree is a plain directory; a bundle would mean a second history nobody reads (§3) |
-| **Per-tenant concurrency caps and monthly run quotas** | P5 | They are enforced at enqueue, for tenants, and there is one tenant. What bounds a wedged agent is the per-run limits, and P4 added those (§6) |
+| ~~**Per-tenant concurrency caps and monthly run quotas**~~ | ~~P5~~ | **Done (P5-04).** Enforced in `repo.start_run` above the `AppLock` trio, as a typed 429 rejection that writes no run row; `NULL` means unmetered. See §6 |
 | **The run queue and batch runs** | not scheduled | A second run on a busy target is refused with a 409, not queued. The queue is a scheduler *above* the lock trio, and §5 says to leave that trio alone |
 | **A K8s or Fargate scheduler** | when there is a cluster | The dispatch seam exists for them; Docker is the one implementation P4 ships, and the dev stack's socket mount is what the seam exists to replace (§6) |
 | **The run-scoped internal control-plane API** | P5 | It would remove `DATABASE_URL` and the `S3_*` credentials from a sandbox. It is the same mechanism as P5's tenant-scoped reads, and building it earlier would have meant building that worse (§6) |

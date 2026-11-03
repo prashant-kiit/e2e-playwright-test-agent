@@ -183,6 +183,19 @@ _PRESERVED_TABLES = frozenset({"tenants", "users"})
 # the P5 users migration's _SEED_ADMIN_ID.
 _SEED_ADMIN_ID = 1
 
+# The caps the P5-04 quota migration gives an already-existing tenant. Kept in
+# step with `e9c41a7d3f28`'s two constants, the same way `_SEED_ADMIN_ID` is
+# kept in step with the users migration.
+#
+# These have to be *restored* rather than just left alone, and that is the
+# whole reason this exists: `tenants` is preserved rather than truncated, so a
+# test that lowers a cap to breach it would otherwise leave every later test
+# running under that cap. The promise this file makes -- "the next test starts
+# from exactly the state the migration left" -- is false for a mutable column
+# on a preserved row unless something puts it back.
+_SEED_TENANT_CONCURRENCY = 3
+_SEED_TENANT_MONTHLY_QUOTA = 500
+
 
 def _truncate_all(engine):
     tables = ", ".join(
@@ -202,6 +215,17 @@ def _truncate_all(engine):
         conn.execute(
             text("DELETE FROM tenants WHERE id <> :seeded").bindparams(
                 seeded=DEFAULT_TENANT_ID
+            )
+        )
+        # Put the seeded tenant's quota caps back (see the constants above).
+        conn.execute(
+            text(
+                "UPDATE tenants SET max_concurrent_runs = :concurrency, "
+                "monthly_run_quota = :monthly WHERE id = :seeded"
+            ).bindparams(
+                concurrency=_SEED_TENANT_CONCURRENCY,
+                monthly=_SEED_TENANT_MONTHLY_QUOTA,
+                seeded=DEFAULT_TENANT_ID,
             )
         )
 

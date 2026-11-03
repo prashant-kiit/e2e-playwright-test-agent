@@ -28,6 +28,7 @@ from . import apphub, authoring, delivery, envelope, repo, revisions, storage, t
 from .auth import AdminDep, AuthDep
 from .db import SessionLocal, get_session
 from .delivery import credentials as pats
+from .domain import quotas
 from .domain.status import RunStatus, is_live, is_terminal
 from .models import Artifact
 from .orchestrator.bus import LogBus, bus_from_env
@@ -55,6 +56,7 @@ from .schemas import (
     TargetCreate,
     TargetCreatedOut,
     TargetOut,
+    UsageOut,
     WriteOut,
 )
 from .storage import Storage
@@ -713,12 +715,49 @@ def start_run(
         )
     except repo.NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except repo.QuotaExceeded as exc:
+        # 429, and deliberately not the 409 a busy app gets: "your tenant is
+        # out of allowance" and "this app is busy" are different problems with
+        # different remedies, and an operator who cannot tell them apart cannot
+        # act on either. The detail carries the numbers, so the portal can say
+        # "3 of 3" without a second request.
+        #
+        # Order against the `RunConflict` arm below does not matter: both are
+        # siblings under `RepoError` and neither catches the other. It would
+        # start mattering the day something caught `RepoError` here, so the
+        # narrow arms stay above the broad ones out of habit rather than need.
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except repo.RunConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     launcher(run.id)  # kick off the orchestrator in the background
     return run
+
+
+@router.get("/usage", response_model=UsageOut)
+def get_usage(session: Session = Depends(get_session)):
+    """This tenant's usage against its plan caps (P5-04).
+
+    Not per target and not per project: both caps are the tenant's, so this
+    reads the same two counts the enqueue checks. Tenant-scoped by the ordinary
+    read guard, like every other read -- there is no tenant id in the path
+    because there is no tenant to name but your own.
+    """
+    caps = repo.tenant_caps(session)
+    usage = repo.tenant_usage(session)
+    return UsageOut(
+        live_runs=usage.live_runs,
+        runs_this_month=usage.runs_this_month,
+        max_concurrent_runs=caps.max_concurrent_runs,
+        monthly_run_quota=caps.monthly_run_quota,
+        # The two caps asked about **independently**, and from the same
+        # predicates `quotas.breach` is built on. Both can be full at once --
+        # `breach` picks one to refuse with, which is the right answer for a
+        # rejection message and the wrong one for a pair of gauges.
+        at_concurrency_cap=quotas.at_concurrency_cap(caps, usage),
+        at_monthly_quota=quotas.at_monthly_quota(caps, usage),
+    )
 
 
 @router.get("/runs", response_model=list[RunOut])

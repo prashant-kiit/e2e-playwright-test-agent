@@ -118,6 +118,14 @@ class Tenant(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     slug: Mapped[str] = mapped_column(String(63), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # This tenant's plan limits, enforced at enqueue (P5-04, DESIGN.md §6).
+    # `None` is **no cap**, not "nothing allowed": a genuinely unmetered plan,
+    # said explicitly rather than spelled as a sentinel some later reader has
+    # to recognise. A tenant nobody has configured is unmetered, which is the
+    # safe direction while there is still no tenant-admin surface to configure
+    # one with.
+    max_concurrent_runs: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    monthly_run_quota: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

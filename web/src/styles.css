@@ -186,3 +186,12 @@ input:focus, select:focus { border-color: var(--accent); }
 @media (max-width: 720px) {
   .rev-files-split { grid-template-columns: 1fr; }
 }
+
+/* The tenant's usage against its plan caps (P5-04). Two gauges rather than one
+   bar: both caps can be full at once, and they have different remedies. */
+.usage-meter { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.usage-gauge { display: flex; align-items: baseline; gap: 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); }
+.usage-gauge-full { border-color: var(--amber); color: var(--amber); }
+.usage-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.usage-count { font-weight: 700; }
+.usage-note { font-size: 12px; }

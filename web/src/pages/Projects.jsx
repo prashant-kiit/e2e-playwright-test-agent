@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api.js";
-import { Spinner } from "../components.jsx";
+import { Spinner, UsageMeter } from "../components.jsx";
 import Revisions from "./Revisions.jsx";
 import Stories from "./Stories.jsx";
 import TargetConfig from "./TargetConfig.jsx";
@@ -19,15 +19,29 @@ export default function Projects() {
   const [targets, setTargets] = useState([]);
   const [newProject, setNewProject] = useState("");
   const [error, setError] = useState("");
+  const [usage, setUsage] = useState(null);
 
   async function load() {
     const [p, t] = await Promise.all([api.listProjects(), api.listTargets()]);
     setProjects(p);
     setTargets(t);
+    // Separately, and allowed to fail quietly: the quota panel is information,
+    // and a page that would not render its projects because a usage read
+    // failed would be trading the thing the operator came for against a
+    // nice-to-have. The enqueue enforces the caps either way.
+    api.usage().then(setUsage).catch(() => setUsage(null));
   }
   useEffect(() => {
     load().catch((e) => setError(String(e.message || e)));
   }, []);
+
+  // `load` is async, and the two places that call it from an event handler
+  // (after a write, and after a 429) do not await it -- so an unguarded call
+  // makes a failing reload an unhandled rejection. One wrapper rather than a
+  // `.catch` at each call site: a third caller would forget.
+  function reload() {
+    load().catch((e) => setError(String(e.message || e)));
+  }
 
   async function addProject(e) {
     e.preventDefault();
@@ -57,6 +71,7 @@ export default function Projects() {
           </button>
         </form>
       </div>
+      <UsageMeter usage={usage} />
       {error && <div className="error">{error}</div>}
       {projects.length === 0 && <p className="muted">No projects yet. Create one above.</p>}
       {projects.map((p) => (
@@ -64,7 +79,7 @@ export default function Projects() {
           key={p.id}
           project={p}
           targets={targets.filter((t) => t.project_id === p.id)}
-          onChange={load}
+          onChange={reload}
         />
       ))}
     </div>
@@ -154,11 +169,21 @@ function TargetRow({ target, onChange }) {
     } catch (e) {
       // 409 must not be an operator's first hint that runs aren't queued: say
       // so, since there is no queue to fall back on (DESIGN.md §5).
+      //
+      // 429 is a *quota* refusal and its message is already written for the
+      // operator -- it names the cap, the usage and the remedy, and the remedy
+      // differs per cap -- so it is shown as the server worded it rather than
+      // flattened into one sentence here (P5-04). Rewriting it in the browser
+      // would mean two places deciding what "out of quota" means.
       setError(
         e.status === 409
           ? "This target already has a live run. Runs are not queued — wait for it to finish, or pause/stop it, then start this one."
           : String(e.message || e),
       );
+      // A refused start means the caps are worth re-reading: the gauge the
+      // operator is about to look at should agree with the refusal they just
+      // got.
+      if (e.status === 429) onChange?.();
     } finally {
       setBusy(false);
     }

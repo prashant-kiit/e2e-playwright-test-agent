@@ -120,6 +120,12 @@ export const api = {
   // delivery: "delivered" or "N revisions ahead", from one Postgres query.
   deliveryState: (targetId) => req("GET", `/targets/${targetId}/delivery`),
 
+  // This tenant's usage against its plan caps (P5-04). One call, because the
+  // panel needs both halves: a count with no denominator cannot be rendered as
+  // "2 of 3". No tenant id in the path -- there is no tenant to ask about but
+  // your own.
+  usage: () => req("GET", "/usage"),
+
   // runs
   listRuns: (targetId) =>
     req("GET", targetId ? `/runs?target_id=${targetId}` : "/runs"),

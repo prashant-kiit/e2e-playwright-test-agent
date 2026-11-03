@@ -12,20 +12,22 @@ fakes, and what was deliberately deferred.
 
 > ## P5 is OPEN. This record is partial.
 >
-> Three of seven tickets are complete **in the tree**; four are not started. Tree state and
+> Four of seven tickets are complete **in the tree**; three are not started. Tree state and
 > tracker state are two separate facts and the tracker is the source of the second one
 > (`docs/agents/issue-tracker.md`): #31, #32 and #34 are closed `completed` — #34's
 > two-axis review was re-run and acted on (§Follow-ups items 27 and 27b), which is what its
-> close was waiting on. #30, #33 and #35–#37 are open.
+> close was waiting on. **#35 is closed `completed` too.** Of the seven tickets, three are
+> open: #33, #36 and #37. #30 is the parent spec issue and stays open until they are.
 >
 > | Ticket | State in the tree |
 > |---|---|
 > | #31 P5-01 — users table + session-resolved `current_tenant_id()` | Implemented (`e492a9d`, review fixes `06a3acd`). **Not independently re-verified in this record** — see the note below |
 > | #32 P5-02 — tenant-scoped reads + tenant-scoped uniqueness + fail-closed | **Complete.** The `users.email` half plus token expiry/refresh landed first (`105e9b7`); the enforced read path and the `projects`/`targets` composite uniqueness landed in the slice below, and were exercised against a live stack with a second real tenant |
 > | #34 P5-03 — per-tenant KMS-encrypted PATs, scope/expiry/fail-loud | **Complete, reviewed and closed.** The envelope, the per-target `Tools` binding, the save-time scope check, the portal surface and the structural credential tests. The two-axis review found two real credential leaks (the PAT in `Tools.__repr__`, a data key reachable in a `SealError`) and one half-true acceptance criterion (a git-transport 401/403 did not mark the credential invalid); all fixed — see §Follow-ups 27b. **Still not seen against a real KMS, a real GitHub token or a browser** — see §"What is covered only by fakes" |
-> | #33 P5-05, #35 P5-04, #36 P5-06, #37 P5-07 | Not started |
+> | #35 P5-04 — per-tenant concurrency cap and monthly run quota at enqueue | **Complete.** The two columns, the typed 429 rejection above the `AppLock` trio, the usage endpoint and the portal gauges. Exercised against the live stack with the real dev database, where both breaches were driven over HTTP and left no run row. **The portal half ships with no test of its own** — that seam was deliberately not taken; see the slice below |
+> | #33 P5-05, #36 P5-06, #37 P5-07 | Not started |
 >
-> **What this record does and does not claim.** The three §"Verified" sections below each
+> **What this record does and does not claim.** The four §"Verified" sections below each
 > cover one slice, and every line in them was observed. P5-01's own evidence lives in its two
 > commit messages; it has not been re-run here, so this record does not vouch for it.
 > **P5-02's isolation claims were checked against a second real tenant** over HTTP against
@@ -261,6 +263,156 @@ one — must still be able to say where it stands. `plan_reset` is a dry run tha
 because it makes two authenticated GitHub calls: the test is whether a path dials out, not
 whether it writes. (The count said "three" here and "two" in `tools.py`'s module docstring
 until the review in the slice below; both now say four.)
+
+---
+
+## Verified on 2026-11-03 — P5-04 / #35 (per-tenant quotas at the enqueue seam)
+
+The change: `tenants` gains `max_concurrent_runs` and `monthly_run_quota`; `repo.start_run`
+refuses an enqueue that would exceed either, with a typed rejection the route answers **429**;
+`GET /usage` reports usage against both caps and the portal renders two gauges.
+
+**Suite, run as CI runs it** (`QA_REQUIRE_DB=1 make ci-test`, exit 0): ruff clean,
+**909 backend tests** (up from 883), **70 frontend tests** (unchanged — see the gap below).
+New coverage: **16** tests in the new `test_quotas.py` (both breaches, tenant scoping,
+unmetered, the boundary from the allowed side, ordering against the `AppLock` trio, what the
+monthly count includes, the crashed-run and paused-run cases, and that setting one cap leaves
+the other alone) and **7** in the new `test_api_quotas.py` (both breaches over HTTP, the
+launcher never called, 429-vs-409, and the three usage-endpoint cases).
+
+**+26 for 23 new tests**, and the missing 3 are accounted for rather than shrugged at: the
+baseline was measured at 883 on a clean worktree of `263bfea`, and `test_no_repo_mount.py`
+went 178 → 181 because three of its tests are parametrized over *every* module under `app/`
+and this slice adds one (`app/domain/quotas.py`). A test count that does not add up is
+usually a test that silently stopped collecting, so it was worth chasing to the file.
+
+**The constraint and the backfill, observed on a throwaway database** rather than inferred
+from the suite — the same by-hand check `users.email` and `projects.name` got, and for the
+same reason. `upgrade head` → `downgrade -1` → `upgrade head`, reading
+`information_schema.columns` and `pg_constraint` at each stop:
+
+| Stage | `tenants` |
+|---|---|
+| head | `max_concurrent_runs integer NULL`, `monthly_run_quota integer NULL`, **no server default on either**; seeded row `(1, 'default', 3, 500)` |
+| downgrade −1 | neither column present (`id`, `name`, `created_at`, `slug` only) |
+| re-upgrade | both back, nullable, no default; seeded row `(1, 'default', 3, 500)` again |
+
+Zero CHECK constraints on `tenants` at head, which matches every other enum/bounded column
+in this schema (the values are enforced in the application, not the database) and is stated
+here so the absence is not mistaken for an oversight.
+
+**Two behaviours the docstring claims and the suite cannot see**, both checked by hand on
+that database: a tenant inserted *after* the revision gets `NULL`/`NULL` — unmetered, the
+documented default — and re-running the backfill `UPDATE` reported `UPDATE 1`, touching only
+the row that was null and leaving the already-configured tenant alone. The `IS NULL` guard
+does what its comment says.
+
+**Against the live stack, with the real dev database.** `docker compose up -d --build api`
+migrated the dev database (which holds P4's walkthrough data: a project, the `saucedemo`
+target, runs and artifacts), and the existing tenant picked up `3`/`500`. Then, over `curl`
+with a real session cookie (**taken before the crashed-run fix below**; the breach paths it
+covers are unchanged by that fix, and `/usage` was retaken afterwards):
+
+| Request | Answer |
+|---|---|
+| `GET /usage` | `live_runs 0, runs_this_month 0, max_concurrent_runs 3, monthly_run_quota 500`, both `at_*` false |
+| `GET /usage` with `monthly_run_quota = 0` | `at_monthly_quota: true`, `at_concurrency_cap: false` |
+| `POST /targets/1/runs` with `monthly_run_quota = 0` | **429**, "this tenant has started 0 of its 0 runs for this calendar month; the quota resets at the start of next month" |
+| `POST /targets/1/runs` with `max_concurrent_runs = 0` | **429**, "this tenant already has 0 of 0 runs going at once; wait for one to finish or stop one…" |
+| `runs` / `app_locks` after both refusals | unchanged — **no run row, no lock** |
+
+**The crashed-run fix, demonstrated on the live stack after it landed** — the table above was
+read before that fix, so the `/usage` query it exercised is not the one that shipped and the
+evidence was retaken rather than left to stand. The dev database's seven runs are all
+terminal, so they prove nothing either way; a crashed run was inserted with SQL (`pending`,
+lease lapsed two hours), then the *same row* flipped to `paused` with its lease cleared:
+
+| State of the one non-terminal run | `/usage` |
+|---|---|
+| `pending`, lease lapsed 2h (**crashed**) | `live_runs: 0`, `runs_this_month: 1` |
+| same row, `paused`, lease `NULL` | `live_runs: 1`, `runs_this_month: 1` |
+
+Which is the whole distinction in two lines: a crashed run holds **no** concurrency quota (the
+trio is about to reap it) but **does** spend monthly quota (it started, and it cost a sandbox);
+a paused run holds both. Before the fix the first row read `live_runs: 1` and a tenant at a cap
+of 1 was locked out by its own dead run. The probe row was deleted afterwards and the dev
+database is back to its seven original runs.
+
+`runs_this_month` reading **0** on a database holding five runs is the calendar-month
+boundary confirming itself: those runs are from October and the check ran on 3 November. The
+caps were driven to `0` deliberately, because that is the only way to observe a breach
+against the live stack without starting a real sandbox run; they were restored to `3`/`500`
+afterwards and the dev database is back as it was. A cap of zero also reads a little oddly in
+the message ("0 of 0"), which is left alone: it is a degenerate configuration used here as a
+test instrument, not a state the product offers.
+
+**The two-axis review, and what it found.** Run before the ticket was closed, as every slice
+in this phase except P5-03's first attempt.
+
+**The one that mattered: a regression the suite was green on.** `tenant_usage` counted
+`Run.status.in_(LIVE)` with no lease test, so a **crashed** run — `PENDING`/`RUNNING` with a
+lapsed lease — held concurrency quota. A tenant at a cap of 1 with one dead run would get 429
+from the check *above* the lock trio that was three lines from reaping that very run, so a
+restart that worked before this slice would stop working until the reaper came round, and the
+reaper is a 30-second loop that may not be running at all. It also made
+`ConcurrencyLimitReached`'s own docstring false: "self-clearing" has to mean this too.
+`live_run_holding` had already settled what "genuinely live" means — paused counts, lapsed and
+not paused is crashed — and the fix is that the count now asks the same question and gets the
+same answer. Two tests pin both halves.
+
+**Also found and fixed:**
+
+- **`set_tenant_caps` conflated "no cap" with "don't change".** `None` is a *value* on these
+  columns, so it cannot also be the "not specified" default: `set_tenant_caps(max_concurrent_runs=5)`
+  silently wiped the monthly quota to unmetered. Both axes flagged it independently. Now an
+  explicit `UNSET` sentinel, so only the caps you pass are touched and `None` still means
+  unmetered on purpose. Two tests, one per direction.
+- **A double switch on `QuotaKind`**: `_BREACHES` mapped kind → class and then the caller
+  re-switched on the same kind to pick the matching `limit`/`used` out of `caps` and `usage` —
+  one decision made twice in two places that could disagree. `quotas.breach` now returns a
+  `Breach` carrying all three.
+- `api.py`'s 429 comment claimed the arm was ordered "before `RunConflict` because it is the
+  narrower class". Untrue and worth deleting rather than keeping: they are siblings and
+  neither catches the other, so the order does not matter — which is what the comment says now.
+- `test_quotas.py`'s docstring pointed at `tests/test_api.py` for the HTTP half; it is
+  `tests/test_api_quotas.py`.
+- The portal: `g.cap === null` would render "2 of undefined" if the field were ever absent
+  (now `== null`, catching `undefined` too), and the reload fired after a 429 called an async
+  `load()` with no `.catch`, making a failed re-read an unhandled rejection. The second was a
+  pre-existing footgun at `afterWrite` that this slice added a second caller to, so the fix is
+  one guarded `reload()` both callers share rather than a `.catch` at each site.
+- This record's own errors: a ticket-table row that had lost its `> ` and broken out of the
+  banner blockquote, a test count that did not add up, and "three §Verified sections" when
+  there are now four.
+
+**Declined, recorded so they are decisions and not oversights:**
+
+- **A cap of `0` is accepted** and means total lockout, with a message that reads oddly ("0 of
+  0 runs going at once"). Kept: suspending a tenant is a real need, `0` is the honest way to
+  say it, and the odd sentence only appears in a configuration an operator chose deliberately.
+- **`resume_run` is not quota-checked.** Correct as built — `PAUSED` is in `LIVE`, so a
+  resumed run was already counted and starts nothing new. The reviewer's residual case is real
+  and is follow-up 30.
+- **Two independent gauges duplicating the rejection's wording** between `components.jsx` and
+  `repo.py`. DESIGN.md §6 endorses the two-gauge shape; the duplication is a consequence and
+  the portal has no test to hold the wording anyway (see below).
+
+**One review claim checked and found wrong**, recorded because this record's job is evidence
+rather than deference: the standards axis said the conftest caps restore leaves a
+test-created second tenant behind because "`tenants` isn't truncated". It is not truncated,
+but `_truncate_all` does `DELETE FROM tenants WHERE id <> :seeded`, so `test_quotas.py`'s
+`OTHER = 2` is removed like any other extra row — which is exactly why the restore only needs
+`WHERE id = :seeded`.
+
+**What this slice did not meet.** The portal surface (`UsageMeter`, the `/usage` call in
+`Projects.jsx`, the 429 passed through as the server worded it) **ships with no test of its
+own.** The frontend component seam was offered and deliberately not taken when the seams for
+this ticket were agreed, so the 70 frontend tests are the same 70 as before. What this means
+precisely: the two gauges and the "at your cap" notes have been read, and the backend they
+render has live evidence above, but nothing executes the component — and no browser has
+rendered it. `Projects.test.jsx`'s API mock *was* extended with `usage`, which is maintenance
+rather than coverage: without it every test in that file took the page's error path and still
+passed while rendering none of the page, which is worth knowing as a pattern.
 
 ---
 
@@ -608,6 +760,38 @@ hygiene.
     **What the review did not change:** the fakes. No real KMS, no real GitHub token, no
     browser — items 21–23 below still stand, and AC1/AC3/AC4 remain proven against
     `StubKms`, an httpx `MockTransport` and jsdom respectively.
+
+28. **The portal's quota surface has no test at all.** `UsageMeter`, the `/usage` call in
+    `Projects.jsx` and the 429 passed through as the server worded it are unexercised: the
+    frontend component seam was offered and deliberately not taken when this ticket's seams
+    were agreed, so the frontend suite is the same 70 tests as before. Two defects in it were
+    found by *reading* during review (`=== null`, and an unguarded async reload), which is
+    precisely the class of bug a component test catches cheaply. Either take that seam or
+    accept that this panel is verified by eye.
+
+29. **New tenants are unmetered, so "one abusive tenant cannot starve the platform" is not
+    yet true.** The caps default to `NULL` (no cap) and the only writer, `repo.set_tenant_caps`,
+    is deliberately not a route — so every tenant created after this ticket is unbounded until
+    somebody opens a console. This was a deliberate choice: the alternative, refusing
+    everything for an unconfigured tenant, locks out a customer nobody has got round to
+    configuring, and there is still no tenant-admin surface to configure one with (item 6,
+    which gates this). The spec axis is right that this is a hole rather than merely a
+    follow-up, and it is recorded as one: **P5-04 bounds a tenant whose caps are set, and
+    nothing yet guarantees they are set.**
+
+30. **Lowering a cap does not retroactively bound what is already live.** `resume_run` is not
+    quota-checked, correctly — `PAUSED` is in `LIVE`, so a paused run was already counted and
+    resuming starts nothing new. But if an operator lowers a cap while runs are paused,
+    resuming them takes the tenant over the new cap, and nothing refuses it. The caps are an
+    admission check, not a continuous invariant. Worth a decision when the tenant-admin
+    surface lands, because that is when lowering a cap becomes a thing people do.
+
+31. **The calendar month is UTC, and nothing says so to the customer.** `tenant_usage` takes
+    `now.replace(day=1, ...)` on a UTC clock, so a tenant far from UTC sees their quota reset
+    up to most of a day early or late relative to their own calendar. There is also a minor
+    skew worth knowing: `month_start` comes from the application clock while `runs.created_at`
+    comes from the database's `now()`. Neither matters at the current scale and both would
+    matter to a customer reading an invoice.
 
 ### Harness hygiene
 

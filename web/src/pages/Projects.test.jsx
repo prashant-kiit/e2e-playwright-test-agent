@@ -22,6 +22,7 @@ vi.mock("../api.js", () => ({
     updateTargetConfig: vi.fn(),
     listRevisions: vi.fn(),
     revisionFiles: vi.fn(),
+    usage: vi.fn(),
   },
 }));
 
@@ -72,6 +73,18 @@ describe("Projects", () => {
       login: "acme-ci",
     });
     api.listRevisions.mockResolvedValue([]);
+    // The quota panel (P5-04). Mocked here rather than left undefined
+    // because `load()` calls it: an unmocked `api.usage` throws inside the
+    // page's own loader and sends every test in this file down the error
+    // path, where they would still pass while rendering none of the page.
+    api.usage.mockResolvedValue({
+      live_runs: 0,
+      runs_this_month: 2,
+      max_concurrent_runs: 3,
+      monthly_run_quota: 10,
+      at_concurrency_cap: false,
+      at_monthly_quota: false,
+    });
   });
 
   it("shows the target with its delivery state", async () => {
