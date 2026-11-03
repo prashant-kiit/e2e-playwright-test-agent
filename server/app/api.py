@@ -24,7 +24,17 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import apphub, authoring, delivery, envelope, repo, revisions, storage, target_config
+from . import (
+    apphub,
+    authoring,
+    delivery,
+    envelope,
+    prompt_store,
+    repo,
+    revisions,
+    storage,
+    target_config,
+)
 from .auth import AdminDep, AuthDep
 from .db import SessionLocal, get_session
 from .delivery import credentials as pats
@@ -44,6 +54,7 @@ from .schemas import (
     ProjectCreate,
     ProjectOut,
     PromptOut,
+    PromptSave,
     ResetBody,
     RevisionOut,
     RunCreate,
@@ -191,8 +202,37 @@ def get_delivery_tools() -> delivery.Tools:
 # --- prompts + settings --------------------------------------------------
 
 @router.get("/prompts", response_model=list[PromptOut])
-def list_prompts():
-    return apphub.read_prompts()
+def list_prompts(session: Session = Depends(get_session)):
+    return apphub.read_prompts(session)
+
+
+@router.put("/prompts/{name:path}", response_model=PromptOut)
+def save_prompt(
+    name: str, body: PromptSave, session: Session = Depends(get_session)
+):
+    """Record this tenant's version of one prompt.
+
+    `{name:path}` because a prompt's name carries a slash (`steps/2-plan.md`):
+    it is the file's path relative to the prompts directory, which is the name
+    the page has always shown and the key the rows use.
+
+    A name the package never shipped is a 404. Accepting it would create a row
+    nothing resolves -- a prompt a customer could carefully tune and never have
+    sent -- which is a worse outcome than being told the name is wrong.
+    """
+    try:
+        return apphub.save_prompt(session, name, body.content)
+    except prompt_store.PromptNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"no such prompt: {name}") from exc
+    except IntegrityError as exc:
+        # unique(tenant_id, name, rev): a concurrent save took this revision.
+        # Same answer as every other racing write here -- there is no merge for
+        # two people editing one prompt, so the later one reloads and re-edits.
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="another save recorded a revision first; reload and try again",
+        ) from exc
 
 
 @router.get("/settings")

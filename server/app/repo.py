@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from . import target_config
+from . import prompt_store, target_config
 from .domain import lease, quotas
 from .domain.status import LIVE, TERMINAL, RunStatus, assert_transition, is_live
 from .domain.steps import Step
@@ -516,6 +516,15 @@ def start_run(
             session.delete(existing)
         session.flush()
 
+    # Pin the prompt versions this run will be given, before the row exists.
+    # P5-06: resolution happens once, here, and `control.service.run_facts`
+    # serves exactly these revs -- so "the recorded version matches what ran"
+    # holds by construction rather than because nothing happened to change in
+    # between. Seeds this tenant's defaults on their first run, which is what
+    # makes a tenant nobody has prepared able to run at all
+    # (app/prompt_store.py explains why seeding is lazy).
+    prompt_revs = prompt_store.revs_of(prompt_store.resolve_all(session))
+
     run = Run(
         tenant_id=current_tenant_id(),
         run_key=_new_run_key(target.app, now),
@@ -523,6 +532,7 @@ def start_run(
         story_id=story_id,
         mode=mode,
         status=RunStatus.PENDING,
+        prompt_revs=prompt_revs,
         lease_expires_at=lease.new_expiry(now=now),
     )
     session.add(run)

@@ -75,7 +75,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import repo, revisions
+from .. import prompt_store, repo, revisions
 from ..domain.status import is_live
 from ..domain.steps import Step
 from ..models import Artifact, Run
@@ -230,6 +230,23 @@ def run_facts(session: Session, scope: RunScope) -> RunFacts:
         last_completed_step=run.last_completed_step,
         claude_session_id=run.claude_session_id,
         target=config_of(run.target),
+        # Exactly the versions the run row pins, not whatever the tenant's
+        # current head is: `pinned` refuses to substitute, so the bodies served
+        # here are the bodies the recorded revs name. That is what makes
+        # "the recorded version matches what ran" structural (P5-06).
+        #
+        # A read, deliberately: `prompt_store.resolve_all` would seed missing
+        # rows, and a sandbox's request must not write a tenant's prompts
+        # mid-run. A run from before the column simply has none to serve.
+        prompts=(
+            prompt_store.pinned(session, run.prompt_revs)
+            if run.prompt_revs
+            # A run from before the column: there is no pinned version to look
+            # up, and the shipped files are exactly what it was given when it
+            # started. Served at the seed rev rather than left empty, so the
+            # runner never has to decide what to do without prompts.
+            else prompt_store.shipped_at_seed_rev()
+        ),
     )
 
 

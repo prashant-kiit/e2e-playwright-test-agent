@@ -347,3 +347,39 @@ def test_events_replays_history_of_a_finished_run(client, session):
     body = r.text
     assert "line one" in body and "line two" in body
     assert "event: end" in body
+
+
+# --- prompts: rows now, overridable per tenant (P5-06) --------------------
+
+def test_listing_prompts_serves_the_tenants_rows_with_their_versions(client):
+    """The portal's Prompts page shows what the agent is sent -- which is a row
+    now, not a file, so the page carries the version too."""
+    body = client.get("/prompts").json()
+
+    names = [p["name"] for p in body]
+    assert "qa_system_prompt.md" in names
+    assert "steps/_context.md" in names
+    assert all(p["content"] for p in body)
+    # Seeded on first read, so every prompt is at the default revision.
+    assert {p["rev"] for p in body} == {1}
+
+
+def test_saving_an_override_bumps_the_version_and_is_what_the_page_then_shows(client):
+    saved = client.put(
+        "/prompts/steps/2-plan.md", json={"content": "Plan it my way.\n"}
+    )
+    assert saved.status_code == 200
+    assert saved.json()["rev"] == 2
+
+    shown = {p["name"]: p for p in client.get("/prompts").json()}
+    assert shown["steps/2-plan.md"]["content"] == "Plan it my way.\n"
+    assert shown["steps/2-plan.md"]["rev"] == 2
+    # The neighbour is untouched and still at the default.
+    assert shown["steps/3-explore.md"]["rev"] == 1
+
+
+def test_overriding_a_prompt_that_does_not_exist_is_a_404_not_a_new_prompt(client):
+    """The names are the shipped set: a typo must not quietly create a prompt
+    nothing will ever send."""
+    r = client.put("/prompts/steps/99-invented.md", json={"content": "hi\n"})
+    assert r.status_code == 404

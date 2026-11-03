@@ -134,6 +134,11 @@ input:focus, select:focus { border-color: var(--accent); }
 .kv dd { margin: 0; }
 .prompt-list { display: flex; flex-direction: column; gap: 8px; }
 .prompt-head { width: 100%; display: flex; justify-content: space-between; align-items: center; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 10px 12px; border-radius: 8px; cursor: pointer; font: inherit; }
+/* The editable prompt panel (P5-06): a prompt is a row a customer can tune,
+   so the body is a textarea rather than a <pre>. It keeps the .log monospace
+   look so what you edit reads like what the agent is sent. */
+.prompt-edit { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.prompt-body { width: 100%; box-sizing: border-box; resize: vertical; white-space: pre; overflow-wrap: normal; overflow-x: auto; }
 .form-grid { display: flex; flex-direction: column; gap: 14px; max-width: 520px; }
 .form-grid textarea { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 9px 11px; font: inherit; resize: vertical; }
 .checkbox { display: flex; align-items: center; gap: 8px; color: var(--muted); }

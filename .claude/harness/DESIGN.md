@@ -609,8 +609,15 @@ not a P1 fix: see the queue note in §5.
 - `apps/<app>/*` files → config in `targets`; stories, plans, seed and tests become
   SeaweedFS blobs indexed by `revision`. **Done (P3.)** `apps/` and `app.json` are deleted.
 - Prompts → code-shipped defaults seeded into Postgres, tenant-overridable, versioned.
-  **Half done (P3):** they are code-shipped package data under `server/app/prompts/`, read
-  from the installed package. The `prompts` table, tenant overrides and versioning are P5.
+  **Done (P5-06).** `prompts(id, tenant_id, name, body, rev)` holds a tenant's versions;
+  `app/prompt_store.py` resolves "highest rev wins", seeding a tenant's missing defaults from
+  the package files at the resolution seam rather than in the migration — so a tenant created
+  by any path inherits the defaults, and a prompt file added in a later release is picked up by
+  the next resolve that misses it. Overrides append a row, never rewrite one. `runs.prompt_revs`
+  pins `{name: rev}` at `repo.start_run` and `control.service.run_facts` serves exactly those
+  revs, so the version recorded against a run is the version that ran even if an override lands
+  mid-flight. The package files are the seed source and nothing else: `prompt_store` is the only
+  module that opens one, and the runner renders what the context handed it.
 - The long-lived mounted repo (`QA_REPO_ROOT`) disappears. **Done (P3)**, and the sentence
   that followed it here was too strong, so it is corrected rather than deleted: removing the
   mount removed the *shared authoritative* disk — no replica needs another replica's disk to
@@ -732,7 +739,7 @@ does not have to reconstruct which were considered.
 | **A K8s or Fargate scheduler** | when there is a cluster | The dispatch seam exists for them; Docker is the one implementation P4 ships, and the dev stack's socket mount is what the seam exists to replace (§6) |
 | **The run-scoped internal control-plane API** | P5 | It would remove `DATABASE_URL` and the `S3_*` credentials from a sandbox. It is the same mechanism as P5's tenant-scoped reads, and building it earlier would have meant building that worse (§6) |
 | ~~**KMS envelope encryption of PATs**~~ | ~~P5~~ | **Done (P5-03).** See §8 |
-| **Prompts in Postgres with tenant overrides** | P5 | A per-tenant mechanism, and there is one tenant (§12) |
+| **Prompts in Postgres with tenant overrides** | P5 | Done in P5-06 (§12) |
 | **A GitHub App replacing PATs** | not scheduled | §8 names it the better long-term answer; PATs were chosen for launch and remain the credential after P5-03. The envelope, the scope check and the fail-loud path are all independent of which kind of credential it is |
 | **`audit_log`** | P5 | Delivery approvals are the thing it exists to record, and the approving actor is a per-tenant user (§10) |
 

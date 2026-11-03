@@ -321,6 +321,21 @@ class Run(TenantOwned, Base):
     # the lease reaper is what reconciles (P4).
     spend_usd: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
     sandbox_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Which version of each prompt this run was given: `{name: rev}`, pinned at
+    # `repo.start_run` and never rewritten. P5-06 / #30 story 24 -- "a run
+    # records which prompt version it used".
+    #
+    # Pinning it at the start, rather than resolving again when the sandbox
+    # asks for its facts, is what makes the recorded version *the* version that
+    # ran: `control.service.run_facts` serves exactly these (name, rev) rows,
+    # so an override saved while the run is in flight changes the next run and
+    # not this one. Resolving twice would leave the column a claim about what
+    # probably happened.
+    #
+    # Null for a run that predates the column, and for one started before any
+    # prompt existed to resolve; a reader must treat it as "not recorded"
+    # rather than "no prompts".
+    prompt_revs: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -483,6 +498,61 @@ class FileIndex(TenantOwned, Base):
     size: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     revision: Mapped[Revision] = relationship(back_populates="files")
+
+
+class Prompt(TenantOwned, Base):
+    """One version of one prompt, for one tenant. The agent's instructions as data.
+
+    Prompts were code-shipped package data through P3 (`server/app/prompts/`,
+    via `package_data.prompts_dir()`). P5-06 makes them rows so a customer can
+    tune the agent for their application without a code change or a redeploy --
+    DESIGN.md §12's "code-shipped defaults seeded into Postgres,
+    tenant-overridable, versioned".
+
+    **`name` is the prompt's path relative to the prompts directory**, posix
+    style: `qa_system_prompt.md`, `steps/_context.md`, `steps/4-generate.md`.
+    The same string the portal's Prompts page has always shown, so a row and
+    the file it was seeded from are obviously the same prompt.
+
+    **`rev` is the version, and rows are append-only.** `SEED_REV` (1) is the
+    body seeded from the code-shipped file; every override inserts a new row at
+    the next rev rather than updating one, which is what makes "my prompt
+    overrides are versioned, so I can see what changed and when" (#30, story
+    24) a question the table answers. Resolution is therefore "the highest rev
+    for this tenant and name" -- an override beats the default because it is
+    later, not because it is flagged.
+
+    **The code-shipped files are the seed source, not a live second author.**
+    `prompt_store` reads a file only to insert a tenant's missing `SEED_REV`
+    row; once that row exists the file is never consulted for that tenant
+    again. Editing a `.md` therefore changes nothing for any tenant that has
+    already resolved it -- which is the property that makes the table the one
+    authority rather than a cache in front of the files.
+
+    `UNIQUE(tenant_id, name, rev)` is what makes an override's insert the
+    concurrency check: two simultaneous saves computing the same next rev
+    cannot both land, so one gets an IntegrityError instead of silently
+    overwriting the other's version.
+    """
+
+    __tablename__ = "prompts"
+    # Named explicitly, for the reason `uq_tenants_slug` is: `compare_metadata`
+    # does not compare constraint names, so an unnamed `unique=True` would be
+    # `prompts_tenant_id_name_rev_key` from the models and
+    # `uq_prompts_tenant_id_name_rev` from the chain with the drift test unable
+    # to see the disagreement.
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", "rev", name="uq_prompts_tenant_id_name_rev"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    rev: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
 
 
 # Every tenant-owned entity above inherits `TenantOwned`, so one call covers

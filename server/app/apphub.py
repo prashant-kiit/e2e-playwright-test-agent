@@ -11,30 +11,55 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
 
-from . import config
-from .orchestrator.claude import prompts_dir
+from sqlalchemy.orm import Session
+
+from . import config, prompt_store
 
 
-def read_prompts() -> list[dict]:
+def read_prompts(session: Session) -> list[dict]:
     """Every prompt the agent can be given, for the portal's Prompts page.
 
-    Read from package data -- the same directory the runner reads -- so what the
-    portal shows is what the agent is actually sent. Prompts move into Postgres
-    with tenant overrides in P5 (DESIGN.md §12).
+    Rows now, not files (P5-06): the tenant's own version of each prompt, at
+    the revision it is on, which is what the runner will actually be sent. The
+    page is the authoring surface for the overrides, so it shows the thing a
+    customer would edit rather than the bytes the package shipped.
+
+    **Writes nothing**, which took two goes to get right. A tenant that has
+    never run anything has no rows, and the page still has to show them the
+    defaults they have inherited -- but seeding to achieve that would make a
+    GET a write, and a GET has no transaction of its own to commit it, so the
+    rows would be created and silently discarded on every page load.
+    `prompt_store.current_all` reports what *would* resolve instead: the
+    shipped bytes at the seed revision until something seeds them for real.
+
+    Ordered overview first, then the steps in their numbered order, as the page
+    has always shown them.
     """
-    root = prompts_dir()
-    files: list[Path] = []
-    overview = root / "qa_system_prompt.md"
-    if overview.exists():
-        files.append(overview)
-    steps = root / "steps"
-    if steps.exists():
-        files.extend(sorted(steps.glob("*.md")))
+    resolved = prompt_store.current_all(session)
+
+    def order(name: str) -> tuple[int, str]:
+        # The overview above the steps; the steps sort lexically, which is what
+        # their numeric prefixes are for.
+        return (1, name) if name.startswith("steps/") else (0, name)
+
     return [
-        {"name": p.relative_to(root).as_posix(), "content": p.read_text()} for p in files
+        {"name": p.name, "content": p.body, "rev": p.rev}
+        for p in sorted(resolved.values(), key=lambda p: order(p.name))
     ]
+
+
+def save_prompt(session: Session, name: str, content: str) -> dict:
+    """Record this tenant's new version of one prompt.
+
+    Appends a revision and commits it; see `prompt_store.save_override`.
+    Raises `prompt_store.PromptNotFound` for a name the package never shipped,
+    which the route turns into a 404 -- a typo must not create a prompt nothing
+    will ever send -- and lets an `IntegrityError` from a concurrent save at
+    the same revision through for the route to answer 409.
+    """
+    saved = prompt_store.save_override(session, name, content)
+    return {"name": saved.name, "content": saved.body, "rev": saved.rev}
 
 
 def settings() -> dict:

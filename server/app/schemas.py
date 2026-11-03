@@ -172,6 +172,15 @@ class TargetCreatedOut(BaseModel):
 class PromptOut(BaseModel):
     name: str
     content: str
+    # Which version of this prompt the tenant is on: 1 is the seeded default,
+    # 2 and up are their own overrides (P5-06). On the page so "what changed
+    # and when" has somewhere to start, and so the Prompts page can show that
+    # a prompt has been tuned rather than looking identical to a default.
+    rev: int
+
+
+class PromptSave(BaseModel):
+    content: str
 
 
 class ArtifactOut(BaseModel):

@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 from ..domain.status import RunStatus
 from ..domain.steps import Step
+from ..prompt_store import ResolvedPrompt
 from ..target_config import TargetConfig
 
 
@@ -51,6 +52,18 @@ class RunFacts:
     last_completed_step: Step | None
     claude_session_id: str | None
     target: TargetConfig
+    # The prompts this run was pinned to at `repo.start_run`, keyed by name,
+    # each with the rev it came from. They travel with the run's other
+    # immutable facts because after P5-05 a sandbox has no database session to
+    # read a row with -- the same reason `target` travels, and the prompts are
+    # the same kind of thing: what this run *is*, decided before it started.
+    #
+    # Never empty for a run this API serves: one started before P5-06 has a
+    # null `prompt_revs` and no pinned version to look up, so `run_facts` fills
+    # this with the shipped defaults at the seed revision -- which is what such
+    # a run was given when it started. The runner has no file to fall back to,
+    # so filling it here is what keeps those runs resumable.
+    prompts: dict[str, ResolvedPrompt]
 
     def as_dict(self) -> dict:
         return {
@@ -72,6 +85,10 @@ class RunFacts:
                 "agent_notes": list(self.target.agent_notes),
                 "target_repo": self.target.target_repo,
                 "target_branch": self.target.target_branch,
+            },
+            "prompts": {
+                name: {"name": p.name, "body": p.body, "rev": p.rev}
+                for name, p in self.prompts.items()
             },
         }
 
@@ -96,6 +113,10 @@ class RunFacts:
                 target_repo=target["target_repo"],
                 target_branch=target["target_branch"],
             ),
+            prompts={
+                name: ResolvedPrompt(name=p["name"], body=p["body"], rev=p["rev"])
+                for name, p in raw.get("prompts", {}).items()
+            },
         )
 
 

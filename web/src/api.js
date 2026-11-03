@@ -156,5 +156,14 @@ export const api = {
 
   // prompts + settings
   getPrompts: () => req("GET", "/prompts"),
+  // A prompt's name carries a slash ("steps/2-plan.md"), and the route takes
+  // it as a path parameter, so the slash must survive: encode each segment
+  // rather than the whole name.
+  savePrompt: (name, content) =>
+    req(
+      "PUT",
+      `/prompts/${name.split("/").map(encodeURIComponent).join("/")}`,
+      { content },
+    ),
   getSettings: () => req("GET", "/settings"),
 };

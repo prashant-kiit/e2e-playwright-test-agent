@@ -13,23 +13,49 @@ from tests.delivery_helpers import (
     make_worktree,
 )
 
-# --- prompts: package data, not a checkout --------------------------------
+# --- prompts: rows, seeded from the package (P5-06) -----------------------
 
-def test_prompts_are_read_from_the_package(tmp_path, monkeypatch):
-    """What the portal shows is what the agent is sent, and neither needs a
-    mounted repo to find it."""
+def test_prompts_are_served_as_this_tenants_rows(session, tmp_path, monkeypatch):
+    """What the portal shows is what the agent is sent -- a row now, seeded
+    from the shipped file, and still found without a mounted repo."""
     monkeypatch.chdir(tmp_path)
 
-    names = [p["name"] for p in apphub.read_prompts()]
+    served = apphub.read_prompts(session)
+    names = [p["name"] for p in served]
 
     assert "qa_system_prompt.md" in names
     assert "steps/_context.md" in names
-    assert all(p["content"] for p in apphub.read_prompts())
+    assert all(p["content"] for p in served)
+    # Seeded on this first read, so every prompt is at the default revision.
+    assert {p["rev"] for p in served} == {1}
 
 
-def test_the_step_prompts_are_listed_in_order():
-    names = [p["name"] for p in apphub.read_prompts() if p["name"].startswith("steps/")]
+def test_the_step_prompts_are_listed_in_order(session):
+    names = [
+        p["name"] for p in apphub.read_prompts(session) if p["name"].startswith("steps/")
+    ]
     assert names == sorted(names)
+
+
+def test_the_page_shows_an_override_and_its_revision(session):
+    """The page is the authoring surface, so it shows what a customer would
+    edit rather than the bytes the package shipped."""
+    apphub.save_prompt(session, "steps/2-plan.md", "Plan it my way.\n")
+
+    shown = {p["name"]: p for p in apphub.read_prompts(session)}
+
+    assert shown["steps/2-plan.md"]["content"] == "Plan it my way.\n"
+    assert shown["steps/2-plan.md"]["rev"] == 2
+    assert shown["steps/3-explore.md"]["rev"] == 1
+
+
+def test_saving_a_prompt_the_package_never_shipped_is_refused(session):
+    """A typo must not create a row nothing resolves -- a prompt a customer
+    could tune carefully and never have sent."""
+    from app import prompt_store
+
+    with pytest.raises(prompt_store.PromptNotFound):
+        apphub.save_prompt(session, "steps/99-invented.md", "hi\n")
 
 
 # --- settings: no repo root -----------------------------------------------

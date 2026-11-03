@@ -66,6 +66,11 @@ def run_pipeline(
     # must not need a session, least of all a sandboxed one -- and after P5-05
     # there is no session in a sandbox to need.
     target_cfg = facts.target
+    # The prompt versions this run was pinned to at `repo.start_run`, read in
+    # the same one call for the same reason: a Runner must not need a session,
+    # and the pinning is what makes them immutable facts of the run rather than
+    # something to look up per step (P5-06).
+    prompts = facts.prompts
 
     start = resume_step(facts.last_completed_step)
     rd = config.run_dir(run_key)
@@ -112,6 +117,7 @@ def run_pipeline(
             worktree=worktree,
             target=target_cfg,
             prev_session_id=prev_sid,
+            prompts=prompts,
         )
 
         try:
