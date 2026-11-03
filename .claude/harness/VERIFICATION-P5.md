@@ -531,6 +531,34 @@ log the API read back by cursor. `tests/test_docker_sandbox.py` grew a `control_
 fixture to make that possible — the container cannot reach the test's database any more, so
 something has to be at the URL it is given.
 
+**And then against the real compose stack**, which is a step beyond the test harness: `make
+up`, log in as the seeded admin, `POST /targets/1/runs` for the existing `saucedemo` target,
+and read the rows back out of Postgres. `QA_SANDBOX=docker`,
+`QA_CONTROL_PLANE_URL=http://api:8000`. The run completed all five steps and left **30 log
+lines** in `run_log`, hydrated **13 files from revision 4**, and indexed **5 artifacts** —
+all written by a container holding no database credential and no object-store key, through
+the internal API. Two details worth reading off that log:
+
+- it ends `=== run <key> completed ===` and `=== teardown: worktree removed ===`, which are
+  precisely the lines the liveness-gate bug dropped — the fix is confirmed in the stack
+  rather than only in a test;
+- it committed **no revision**, correctly: compose does not set `QA_FAKE_TREE_WRITES`, so the
+  fake runner changes no tracked file, and "a step that changed no tracked file commits
+  nothing" is the documented behaviour.
+
+`docker network inspect qa-sandbox` reports `Internal: true` with exactly one member, the
+API. Postgres and SeaweedFS are no longer on it.
+
+**A procedural trap found the same way, and it is now in README §9.** The first attempt at
+that run sat in `pending` for ever with a `sandbox_handle` and no container. The cause was
+not the code: `docker compose up -d --build` does **not** rebuild the sandbox image, because
+the `sandbox` service carries `profiles: ["never-started"]` and Compose skips the build of a
+service a profile excludes. The image in use was nine days old and predated all of P5, so its
+entrypoint still wanted `DATABASE_URL` and exited at once. `make up` and `make sandbox-images`
+build it explicitly; `docker compose up --build` silently does not. The failure mode is worth
+knowing because it is indistinguishable from a dispatch bug: a run stuck `pending`, a handle
+on the row, and a container that `AutoRemove` has already taken away.
+
 **Three real bugs were found by running it, not by the suite**, and each is now pinned:
 
 1. **`HttpGateway` verified its own token.** A sandbox holds no signing key — it must not,
