@@ -14,14 +14,16 @@ fakes, and what was deliberately deferred.
 >
 > Three of seven tickets are complete **in the tree**; four are not started. Tree state and
 > tracker state are two separate facts and the tracker is the source of the second one
-> (`docs/agents/issue-tracker.md`): #31, #32 and #34 are closed `completed`, and #30, #33
-> and #35–#37 are open.
+> (`docs/agents/issue-tracker.md`): #31 and #32 are closed `completed`; **#34 is complete in
+> the tree but still open on the tracker**, pending the two-axis code review, which could not
+> be run in the session that wrote this — see §Follow-ups item 27. #30, #33 and #35–#37 are
+> open.
 >
 > | Ticket | State in the tree |
 > |---|---|
 > | #31 P5-01 — users table + session-resolved `current_tenant_id()` | Implemented (`e492a9d`, review fixes `06a3acd`). **Not independently re-verified in this record** — see the note below |
 > | #32 P5-02 — tenant-scoped reads + tenant-scoped uniqueness + fail-closed | **Complete.** The `users.email` half plus token expiry/refresh landed first (`105e9b7`); the enforced read path and the `projects`/`targets` composite uniqueness landed in the slice below, and were exercised against a live stack with a second real tenant |
-> | #34 P5-03 — per-tenant KMS-encrypted PATs, scope/expiry/fail-loud | **Complete in the tree.** The envelope, the per-target `Tools` binding, the save-time scope check, the portal surface and the structural credential tests. **Not yet seen against a real KMS, a real GitHub token or a browser** — see §"What is covered only by fakes" |
+> | #34 P5-03 — per-tenant KMS-encrypted PATs, scope/expiry/fail-loud | **Complete in the tree, not yet reviewed or closed.** The envelope, the per-target `Tools` binding, the save-time scope check, the portal surface and the structural credential tests. **Not yet seen against a real KMS, a real GitHub token or a browser** — see §"What is covered only by fakes" |
 > | #33 P5-05, #35 P5-04, #36 P5-06, #37 P5-07 | Not started |
 >
 > **What this record does and does not claim.** The three §"Verified" sections below each
@@ -513,18 +515,29 @@ hygiene.
     expiry test asserts through a module attribute rather than a parameter. Flagged by the
     standards review; left as the user-chosen seam.
 
+27. **P5-03 was not code-reviewed.** Every prior slice in this phase went through the
+    two-axis review (standards and spec) before its ticket was closed, and P5-02's item 10b
+    records what that review caught — a migration docstring claiming a `pg_constraint`
+    readback it did not perform, a database read left on the event loop, a bypass scan blind
+    to one spelling. This slice's review was launched and **died on an API rate limit before
+    either axis reported**, so nothing was aggregated and nothing was acted on. The suite is
+    green and the migration was checked by hand, but neither of those is the review. **#34 is
+    deliberately left open on the tracker because of this**, and the review should be re-run
+    against `17293a5` before it is closed. Treat the §Decisions rows above as the author's
+    account rather than as reviewed conclusions.
+
 ### Harness hygiene
 
 12. **`SPEC-P5-multi-tenancy.md` and `.claude/harness/issues/p5/README.md` are both
     zero-byte files**, committed empty in `82542c6` ("add initial multi-tenancy
     specifications and README for P5"). Every prior phase has a real spec file; P5's
     spec lives only in issue #30. Either write them or stop referring to them.
-13. ~~**No P5 ticket has been closed on the tracker.**~~ **Done.** #31 and #32 are closed as
+13. ~~**No P5 ticket has been closed on the tracker.**~~ **Partly done.** #31 and #32 are closed as
     `completed`, each with a comment carrying its evidence and its remaining follow-ups.
     #31's comment says in as many words that closing it does **not** upgrade this record's
     refusal to vouch for it — the tracker had simply fallen behind the tree, and that is
-    what the close fixes. Still open: #30 (the parent spec) and #33–#37, all
-    `ready-for-agent`.
+    what the close fixes. Still open: #30 (the parent spec), #33 and #35–#37, all
+    `ready-for-agent`, plus #34 — whose work is in the tree but whose close waits on item 27.
 14. **The README still says P4's closeout is pending**, in two places — the P4 paragraph
     near the top and the phase list near the bottom both call the real agent run outstanding
     and say "P4 is implemented and not closed". `VERIFICATION-P4.md`'s own banner records
