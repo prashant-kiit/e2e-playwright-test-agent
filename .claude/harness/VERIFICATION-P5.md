@@ -12,23 +12,16 @@ fakes, and what was deliberately deferred.
 
 > ## P5 is OPEN. This record is partial.
 >
-> Five of seven tickets are complete **in the tree**; two are not started. Tree state and
-> tracker state are two separate facts and the tracker is the source of the second one
-> (`docs/agents/issue-tracker.md`): #31, #32 and #34 are closed `completed` — #34's
-> two-axis review was re-run and acted on (§Follow-ups items 27 and 27b), which is what its
-> close was waiting on. **#35 is closed `completed` too.** **#33's review has run and been
-> acted on** — it found one real authorization gap (blob reads and writes authorized by
-> tenant prefix rather than by a row and a content hash) plus six smaller items, and all of
-> them are fixed in the same slice (§"What the two-axis review found"), so nothing is
-> outstanding against the ticket. **It is nevertheless still OPEN on the tracker**, because
-> the close needs a tracker write this session was not permitted to make; the comment it
-> should carry is in `.claude/harness/issues/p5/p5-05-close.md`. Of the seven tickets, three
-> are open on the tracker: #33 (close pending), #36 and #37. #30 is the parent spec issue and
-> stays open until they are.
->
-> That split is exactly the distinction this banner opens with, and it is worth not papering
-> over: the work is done and reviewed, and the *record* of it on the tracker is not — and the
-> tracker is the source of truth for the second fact.
+> Five of seven tickets are complete **in the tree** and closed on the tracker; two are not
+> started. Tree state and tracker state are two separate facts and the tracker is the source
+> of the second one (`docs/agents/issue-tracker.md`): #31, #32 and #34 are closed
+> `completed` — #34's two-axis review was re-run and acted on (§Follow-ups items 27 and 27b),
+> which is what its close was waiting on. **#35 is closed `completed` too.** **#33 is closed
+> `completed` as well**: its two-axis review ran, found one real authorization gap (blob
+> reads and writes authorized by tenant prefix rather than by a row and a content hash) plus
+> six smaller items, and all of them are fixed in the slice they reviewed — see §"What the
+> two-axis review found". Of the seven tickets, two are open: #36 and #37. #30 is the parent
+> spec issue and stays open until they are.
 >
 > | Ticket | State in the tree |
 > |---|---|
@@ -36,7 +29,7 @@ fakes, and what was deliberately deferred.
 > | #32 P5-02 — tenant-scoped reads + tenant-scoped uniqueness + fail-closed | **Complete.** The `users.email` half plus token expiry/refresh landed first (`105e9b7`); the enforced read path and the `projects`/`targets` composite uniqueness landed in the slice below, and were exercised against a live stack with a second real tenant |
 > | #34 P5-03 — per-tenant KMS-encrypted PATs, scope/expiry/fail-loud | **Complete, reviewed and closed.** The envelope, the per-target `Tools` binding, the save-time scope check, the portal surface and the structural credential tests. The two-axis review found two real credential leaks (the PAT in `Tools.__repr__`, a data key reachable in a `SealError`) and one half-true acceptance criterion (a git-transport 401/403 did not mark the credential invalid); all fixed — see §Follow-ups 27b. **Still not seen against a real KMS, a real GitHub token or a browser** — see §"What is covered only by fakes" |
 > | #35 P5-04 — per-tenant concurrency cap and monthly run quota at enqueue | **Complete, and the first P5 slice seen in a real browser.** The two columns, the typed 429 rejection above the `AppLock` trio, the usage endpoint and the portal gauges. Both breaches driven over HTTP against the live stack, leaving no run row. The three gaps it shipped with were all closed in later passes: an untested portal surface, caps that bounded only a configured tenant (follow-ups 28 and 29), and — found by the browser check itself — `/usage` missing from both proxy lists, which made the panel invisible in the real app while 84 frontend tests passed |
-> | #33 P5-05 — run-scoped internal control-plane API | **Complete and reviewed; tracker close pending.** The token, the service, the routes, both gateways, and the whole run path rewired onto them. `DATABASE_URL` and `S3_*` are gone from a sandbox and the stores are off its network. Proven in a **real container** and then **against the real compose stack** — the only slice of P5 whose central claim is checked end to end against the deployed arrangement. Four real bugs, and none of them was found by the suite: three by running a container (a client that verified a token it holds no key for, a liveness gate that ate the end of every log, a flusher raced on close) and the fourth by the review (blob authorization by prefix, so a run could read *or overwrite* a sibling target's revision blobs). All fixed here. **Two gaps accepted and recorded rather than fixed** — `record_cost`'s liveness exemption, and the whole API being sandbox-reachable rather than only `/internal` (§Follow-ups 32–34) |
+> | #33 P5-05 — run-scoped internal control-plane API | **Complete, reviewed and closed.** The token, the service, the routes, both gateways, and the whole run path rewired onto them. `DATABASE_URL` and `S3_*` are gone from a sandbox and the stores are off its network. Proven in a **real container** and then **against the real compose stack** — the only slice of P5 whose central claim is checked end to end against the deployed arrangement. Four real bugs, and none of them was found by the suite: three by running a container (a client that verified a token it holds no key for, a liveness gate that ate the end of every log, a flusher raced on close) and the fourth by the review (blob authorization by prefix, so a run could read *or overwrite* a sibling target's revision blobs). All fixed here. **Two gaps accepted and recorded rather than fixed** — `record_cost`'s liveness exemption, and the whole API being sandbox-reachable rather than only `/internal` (§Follow-ups 32–34) |
 > | #36 P5-06, #37 P5-07 | Not started |
 >
 > **P5-05's claims were checked against a real container and then against the real compose
