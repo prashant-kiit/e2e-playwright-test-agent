@@ -15,6 +15,12 @@ dependencies = [
     "httpx>=0.27",
     # Used directly by app/schemas.py and app/auth_api.py, not just via fastapi.
     "pydantic>=2",
+    # AES-GCM for app/envelope.py: a tenant's GitHub PAT is sealed under a data
+    # key that a cloud KMS wraps (boto3, already here, makes the KMS calls).
+    # The standard library has no AES, and the alternative -- asking the KMS to
+    # encrypt the PAT directly -- would put every customer's credential in a
+    # cloud provider's request log.
+    "cryptography>=42",
 ]
 
 [dependency-groups]

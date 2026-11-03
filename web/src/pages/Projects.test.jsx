@@ -16,6 +16,9 @@ vi.mock("../api.js", () => ({
     createProject: vi.fn(),
     listStories: vi.fn(),
     deliveryState: vi.fn(),
+    targetCredential: vi.fn(),
+    saveTargetPat: vi.fn(),
+    clearTargetPat: vi.fn(),
     updateTargetConfig: vi.fn(),
     listRevisions: vi.fn(),
     revisionFiles: vi.fn(),
@@ -55,6 +58,18 @@ describe("Projects", () => {
       revisions_ahead: 2,
       ever_delivered: true,
       summary: "2 revision(s) ahead of the last delivered one",
+      credential_state: "valid",
+      pat_expires_at: null,
+      credential_warning: null,
+    });
+    api.targetCredential.mockResolvedValue({
+      app: "saucedemo",
+      state: "valid",
+      expires_at: null,
+      days_until_expiry: null,
+      expiring_soon: false,
+      warning: null,
+      login: "acme-ci",
     });
     api.listRevisions.mockResolvedValue([]);
   });
@@ -74,6 +89,7 @@ describe("Projects", () => {
       [/^stories$/i, /user stories/i],
       [/^config$/i, /configuration/i],
       [/^revisions$/i, /revision/i],
+      [/^credential$/i, /github credential/i],
     ]) {
       await userEvent.click(screen.getByRole("button", { name: button }));
       expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
@@ -82,5 +98,73 @@ describe("Projects", () => {
         expect(screen.queryByRole("heading", { name: heading })).not.toBeInTheDocument(),
       );
     }
+  });
+
+  // The credential badge rides on the delivery state the row already fetches
+  // (P5-03), so "this target cannot deliver" is visible without opening a
+  // panel -- which is the whole value of warning before an expiry lapses.
+
+  it("warns on the target row when no credential is stored", async () => {
+    api.deliveryState.mockResolvedValue({
+      rev: 3,
+      delivered: false,
+      delivered_sha: null,
+      revisions_ahead: 2,
+      ever_delivered: true,
+      summary: "2 revision(s) ahead of the last delivered one",
+      credential_state: "absent",
+      pat_expires_at: null,
+      credential_warning:
+        "No GitHub credential is stored for this target, so delivery cannot run.",
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/no github token/i)).toBeInTheDocument();
+  });
+
+  it("warns on the target row when the credential was rejected", async () => {
+    api.deliveryState.mockResolvedValue({
+      rev: 3,
+      delivered: true,
+      delivered_sha: "a".repeat(40),
+      revisions_ahead: 0,
+      ever_delivered: true,
+      summary: "delivered (revision 3)",
+      credential_state: "invalid",
+      pat_expires_at: null,
+      credential_warning: "GitHub rejected this credential the last time we delivered.",
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/token rejected/i)).toBeInTheDocument();
+  });
+
+  it("warns on the target row when the credential is about to expire", async () => {
+    api.deliveryState.mockResolvedValue({
+      rev: 3,
+      delivered: true,
+      delivered_sha: "a".repeat(40),
+      revisions_ahead: 0,
+      ever_delivered: true,
+      summary: "delivered (revision 3)",
+      credential_state: "valid",
+      pat_expires_at: "2026-11-10T00:00:00Z",
+      credential_warning: "This GitHub credential expires in 7 days.",
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/token expires soon/i)).toBeInTheDocument();
+  });
+
+  it("shows no credential badge when the credential is healthy", async () => {
+    renderPage();
+    await screen.findByText("Sauce Demo");
+
+    expect(screen.queryByText(/no github token/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/token rejected/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/token expires soon/i)).not.toBeInTheDocument();
   });
 });

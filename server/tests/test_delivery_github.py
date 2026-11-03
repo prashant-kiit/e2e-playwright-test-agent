@@ -9,12 +9,14 @@ status codes that carried meaning in the shell tools (409 = empty repo,
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
 
 from app.delivery import errors
-from app.delivery.github import GitHubClient, clone_url, token_from_env
+from app.delivery.github import GitHubClient, clone_url
+from tests.source_helpers import code_of
 
 
 def client_for(handler) -> GitHubClient:
@@ -180,34 +182,30 @@ def test_fine_grained_token_reports_no_scopes_and_is_not_pre_rejected():
     assert info.has_delivery_scopes() is True
 
 
-def test_the_pat_comes_from_the_environment(monkeypatch):
-    monkeypatch.setenv("GITHUB_PAT", "from-env")
-    assert token_from_env() == "from-env"
+def test_there_is_no_environment_source_for_a_tenant_credential():
+    """`token_from_env` is retired (P5-03).
 
+    The three tests that stood here checked that it read `GITHUB_PAT` from the
+    environment and from nowhere else -- no `.env` beside the workspace, which
+    was P3's rule. P5 removes the function instead of guarding it, because a
+    single operator token is not *any* tenant's credential: every delivery it
+    authored went into a customer's repository as the same identity. A target's
+    token now comes from its own row, sealed, through
+    `app/delivery/credentials.py`.
 
-def test_there_is_no_file_fallback_for_the_pat(monkeypatch, tmp_path):
-    """The most dangerous line this phase could have introduced.
+    Structural rather than behavioural, and asserted on the module surface so
+    the environment path cannot quietly reappear as a fallback for a target
+    that has no PAT saved -- which is exactly the shape a well-meaning fix for
+    "delivery stopped working after P5-03" would take.
 
-    The delivery workspace is a tree an LLM wrote while reading a live customer
-    website, so a credential lookup anywhere near it is an exfiltration path.
-    The function takes no path at all now, which is the structural form of that
-    rule: there is nowhere for it to look.
+    Through `code_of`, so the docstring that *explains* the retirement is
+    allowed to name the variable while a read of it is not -- the distinction
+    tests/source_helpers.py exists to draw.
     """
-    import inspect
+    import app.delivery.github as github_mod
 
-    monkeypatch.delenv("GITHUB_PAT", raising=False)
-    (tmp_path / ".env").write_text('GITHUB_PAT="from-a-file"\n')
-    monkeypatch.chdir(tmp_path)
-
-    assert inspect.signature(token_from_env).parameters == {}
-    with pytest.raises(errors.CredentialError):
-        token_from_env()
-
-
-def test_token_from_env_raises_when_there_is_no_token(monkeypatch):
-    monkeypatch.delenv("GITHUB_PAT", raising=False)
-    with pytest.raises(errors.CredentialError, match="GITHUB_PAT"):
-        token_from_env()
+    assert not hasattr(github_mod, "token_from_env")
+    assert "GITHUB_PAT" not in code_of(Path(github_mod.__file__))
 
 
 def test_clone_url_embeds_the_token():

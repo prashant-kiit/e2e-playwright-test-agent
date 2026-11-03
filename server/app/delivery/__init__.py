@@ -14,6 +14,16 @@ this file, and an eager re-export of `default_tools` here would pull
 `app.delivery.github`, the one module that reads `GITHUB_PAT`, into the import
 graph of every sandbox.
 
+**`app.delivery.credentials` is not in the table at all** (P5-03), and that
+is one step further than lazy. Lazy keeps a module out of the sandbox's import
+*graph*; it does not keep the name out of this file, and this file *is* loaded
+by every sandbox. A table entry reading `"decrypt_pat": "credentials"` would
+hand anything running in there the exact name to ask for -- one
+`getattr(delivery, ...)` away from a function that unwraps a tenant's data key.
+The control plane imports that module by path instead
+(`from .delivery.credentials import ...` in app/api.py), which is a line a
+reviewer sees and a sandbox has no reason to contain.
+
 So the names below resolve on first attribute access instead. Wanting the naming
 contract no longer drags the credential reader along, and
 tests/test_sandbox_credentials.py walks the entrypoint's real import graph to
@@ -38,6 +48,7 @@ _EXPORTS: dict[str, str] = {
     "DeliveryState": "catalog",
     "ConfirmationMismatch": "errors",
     "CredentialError": "errors",
+    "CredentialRejected": "errors",
     "DeliveryError": "errors",
     "GitError": "errors",
     "Git": "git",

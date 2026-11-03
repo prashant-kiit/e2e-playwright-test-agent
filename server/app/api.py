@@ -24,19 +24,22 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import apphub, authoring, delivery, repo, revisions, storage, target_config
+from . import apphub, authoring, delivery, envelope, repo, revisions, storage, target_config
 from .auth import AdminDep, AuthDep
 from .db import SessionLocal, get_session
+from .delivery import credentials as pats
 from .domain.status import RunStatus, is_live, is_terminal
 from .models import Artifact
 from .orchestrator.bus import LogBus, bus_from_env
 from .sandbox import dispatch, egress
 from .schemas import (
     ArtifactOut,
+    CredentialOut,
     DeliverBody,
     DeliveryOut,
     DeliveryStateOut,
     FileIndexOut,
+    PatBody,
     ProjectCreate,
     ProjectOut,
     PromptOut,
@@ -125,22 +128,55 @@ def get_catalog(store: Storage = Depends(get_storage)) -> delivery.Catalog:
 
     "Is this delivered?" is a Postgres question (invariant 5), so answering it
     must not need a credential. Hanging it off `get_delivery_tools` meant an
-    operator with no `GITHUB_PAT` configured got a 503 for an answer that never
+    operator with no credential configured got a 503 for an answer that never
     leaves the database -- found in a real browser, where the portal could not
     show the badge at all.
+
+    P5-03 makes that split matter more rather than less: a credential is now
+    per target and saved in the portal, so "a target with no PAT yet" is the
+    *normal* state of a newly created target, and it must still be able to say
+    where it stands.
     """
     return delivery.DbCatalog(SessionLocal, store)
 
 
-def get_delivery_tools() -> delivery.Tools:
-    """git + GitHub + the PAT. Overridden in tests so no route touches the
-    network; building it here (not at import) keeps a missing PAT from breaking
-    unrelated endpoints.
+def get_token_validator():
+    """The live GitHub call that validates a pasted PAT's scopes and expiry.
 
-    Dependencies resolve before the handler body runs, so a failure here would
-    escape the routes' own exception handling as a bare 500. A missing `git` or
-    a missing PAT is an environment problem, so it is reported as 503 with the
-    reason rather than as an opaque server error.
+    A dependency for the same reason `get_resolver` is one: the check is
+    load-bearing -- it is what turns "your delivery will fail in four hours"
+    into "this token is missing `workflow`" -- and a check nothing can
+    substitute is a check nothing tests. No route touches the network in the
+    suite because every test overrides this.
+    """
+    return pats.validate_with_github
+
+
+def get_key_wrapper() -> envelope.KeyWrapper:
+    """What wraps the data key a PAT is sealed under.
+
+    `wrapper_from_env` picks the cloud KMS when `QA_KMS_KEY_ID` is set and an
+    in-process key otherwise, so the dev stack works offline -- see
+    app/envelope.py, which also explains why the second is not a production
+    configuration.
+    """
+    return envelope.wrapper_from_env()
+
+
+def get_delivery_tools() -> delivery.Tools:
+    """git + GitHub + the catalog + the credential seam, **unbound**.
+
+    Overridden in tests so no route touches the network. Building it here (not
+    at import) keeps an environment problem from breaking unrelated endpoints:
+    dependencies resolve before the handler body runs, so a failure here would
+    escape the routes' own exception handling as a bare 500, and a missing
+    `git` is reported as 503 with the reason instead.
+
+    Since P5-03 a *missing credential* is no longer one of those failures. There
+    is nothing process-wide left to be missing: the seam carries no token until
+    a delivery binds it to a target (`tools.for_app`), and a target with no PAT
+    saved fails inside the route, where it becomes a message about that target
+    rather than a 503 about the service.
     """
     try:
         return delivery.default_tools()
@@ -384,6 +420,7 @@ def target_delivery_state(
         state = catalog.state(target.app)
     except delivery.DeliveryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    credential = pats.credential_status(target)
     return DeliveryStateOut(
         app=ref.app,
         repo=ref.repo,
@@ -394,7 +431,95 @@ def target_delivery_state(
         delivered_sha=state.delivered_sha,
         revisions_ahead=state.revisions_ahead,
         summary=state.describe(),
+        credential_state=credential.state,
+        pat_expires_at=credential.expires_at,
+        credential_warning=credential.warning,
     )
+
+
+# --- the tenant's own GitHub credential (P5-03) --------------------------
+#
+# Through P4 there was one operator `GITHUB_PAT` in the API's environment, so
+# every delivery into every customer's repository was authored by the same
+# identity. These three routes are how a credential becomes the customer's:
+# sealed onto their target's row, validated the moment they paste it, and
+# reported back without the token or the ciphertext ever reaching the browser.
+#
+# Saving and clearing are tenant-admin actions, beside approving a delivery:
+# all three write into -- or authorise writing into -- a customer's repository.
+# *Reading* the state is not, because a member has to be able to see why
+# delivery is refused.
+
+def _credential_out(target, status, *, login: str | None = None) -> CredentialOut:
+    return CredentialOut(
+        app=target.app,
+        state=status.state,
+        expires_at=status.expires_at,
+        days_until_expiry=status.days_until_expiry,
+        expiring_soon=status.expiring_soon,
+        warning=status.warning,
+        login=login,
+    )
+
+
+@router.get("/targets/{target_id}/credential", response_model=CredentialOut)
+def target_credential(target_id: int, session: Session = Depends(get_session)):
+    """Is there a credential, does GitHub still accept it, is it about to lapse.
+
+    Every field is a function of the row, so this costs no KMS call and no
+    GitHub call -- the same reason "is this delivered?" is a Postgres question.
+    """
+    target = _target_or_404(session, target_id)
+    return _credential_out(target, pats.credential_status(target))
+
+
+@router.put(
+    "/targets/{target_id}/pat",
+    response_model=CredentialOut,
+    dependencies=[AdminDep],
+)
+def save_target_pat(
+    target_id: int,
+    body: PatBody,
+    session: Session = Depends(get_session),
+    validate=Depends(get_token_validator),
+    wrapper: envelope.KeyWrapper = Depends(get_key_wrapper),
+):
+    """Store a tenant's GitHub PAT for this target, sealed.
+
+    **422, not 502, for every refusal here.** A token missing `workflow`, an
+    empty paste, a token GitHub has revoked: each is the operator's input being
+    refused while they can still fix it, and a different paste is the fix. 502
+    is reserved for GitHub refusing a credential *at delivery*, which is a
+    different event with a different remedy (DESIGN.md §8). Telling a customer
+    with a scope typo that GitHub was down is how they stop reading the message.
+
+    The row is not touched unless the token passed validation, so a failed
+    rotation leaves the working credential in place rather than a broken one.
+    """
+    target = _target_or_404(session, target_id)
+    try:
+        info = pats.save_pat(
+            session, target, body.token, validate=validate, wrapper=wrapper
+        )
+    except pats.CredentialRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _credential_out(
+        target, pats.credential_status(target), login=info.login
+    )
+
+
+@router.delete(
+    "/targets/{target_id}/pat",
+    response_model=CredentialOut,
+    dependencies=[AdminDep],
+)
+def clear_target_pat(target_id: int, session: Session = Depends(get_session)):
+    """Remove this target's credential. Delivery then cannot run until a new
+    one is saved, which is what `absent` says and what the portal shows."""
+    target = _target_or_404(session, target_id)
+    pats.clear_pat(session, target)
+    return _credential_out(target, pats.credential_status(target))
 
 
 @router.post("/targets/{target_id}/deliver", response_model=DeliveryOut, dependencies=[AdminDep])

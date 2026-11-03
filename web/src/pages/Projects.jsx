@@ -5,6 +5,7 @@ import { Spinner } from "../components.jsx";
 import Revisions from "./Revisions.jsx";
 import Stories from "./Stories.jsx";
 import TargetConfig from "./TargetConfig.jsx";
+import TargetCredential from "./TargetCredential.jsx";
 
 // Projects and their targets.
 //
@@ -110,6 +111,13 @@ const PANELS = [
     label: "Revisions",
     render: ({ target, reloadKey }) => <Revisions target={target} key={reloadKey} />,
   },
+  {
+    name: "credential",
+    label: "Credential",
+    render: ({ target, afterWrite }) => (
+      <TargetCredential target={target} onChange={afterWrite} />
+    ),
+  },
 ];
 
 function TargetRow({ target, onChange }) {
@@ -178,6 +186,7 @@ function TargetRow({ target, onChange }) {
             View target code ↗
           </a>
           <DeliveryBadge state={delivery} />
+          <CredentialBadge state={delivery} />
           {PANELS.map(({ name, label }) => (
             <button
               key={name}
@@ -212,6 +221,34 @@ function TargetRow({ target, onChange }) {
       {error && <div className="error">{error}</div>}
       {open && <div className="target-panel">{open.render({ target, afterWrite, reloadKey })}</div>}
     </div>
+  );
+}
+
+// Why this target cannot deliver, or soon will not be able to (P5-03).
+//
+// It reads the *delivery* state because the credential rides along on it: the
+// row already fetches that for the badge beside this one, and a second request
+// for "can this target deliver at all?" would be a second thing to forget.
+//
+// Nothing is rendered for a healthy credential. A badge that is always there
+// is a badge nobody reads, and the three cases here each need an action from
+// the customer — paste a token, replace a rejected one, renew one that is
+// lapsing — so each is worth interrupting for and a working one is not.
+const CREDENTIAL_BADGES = {
+  absent: ["pill-failed", "no GitHub token"],
+  invalid: ["pill-failed", "token rejected"],
+};
+
+function CredentialBadge({ state }) {
+  if (!state) return null;
+  const [tone, label] =
+    CREDENTIAL_BADGES[state.credential_state] ||
+    (state.credential_warning ? ["pill-pending", "token expires soon"] : []);
+  if (!label) return null;
+  return (
+    <span className={`pill ${tone}`} title={state.credential_warning || label}>
+      {label}
+    </span>
   );
 }
 

@@ -110,6 +110,13 @@ export const api = {
   deleteStory: (targetId, storyId) =>
     req("DELETE", `/targets/${targetId}/stories/${storyId}`),
 
+  // The target's own GitHub credential (P5-03). The token goes up and never
+  // comes back: no response here carries it or its ciphertext, so there is
+  // nothing for this layer to hold on to.
+  targetCredential: (targetId) => req("GET", `/targets/${targetId}/credential`),
+  saveTargetPat: (targetId, token) => req("PUT", `/targets/${targetId}/pat`, { token }),
+  clearTargetPat: (targetId) => req("DELETE", `/targets/${targetId}/pat`),
+
   // delivery: "delivered" or "N revisions ahead", from one Postgres query.
   deliveryState: (targetId) => req("GET", `/targets/${targetId}/delivery`),
 

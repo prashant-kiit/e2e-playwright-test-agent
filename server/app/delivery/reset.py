@@ -19,7 +19,7 @@ from pathlib import Path
 
 from .errors import ConfirmationMismatch
 from .render import target_ref
-from .tools import Tools, default_tools
+from .tools import Tools, for_target
 
 
 @dataclass(frozen=True)
@@ -35,8 +35,17 @@ class ResetResult:
 
 
 def plan_reset(app: str, *, tools: Tools | None = None) -> ResetResult:
-    """What a reset would do, changing nothing (the --dry-run path)."""
-    tools = tools or default_tools()
+    """What a reset would do, changing nothing (the --dry-run path).
+
+    It binds a credential even though it changes nothing, because it genuinely
+    dials out: "does this repo have commits, and what branches are on it?" is
+    two authenticated calls to GitHub, not a Postgres query.
+    """
+    with for_target(tools, app) as bound:
+        return _plan_reset(app, tools=bound)
+
+
+def _plan_reset(app: str, *, tools: Tools) -> ResetResult:
     target = target_ref(tools.catalog.config(app))
 
     if not tools.gh.repo_has_commits(target.repo):
@@ -78,11 +87,19 @@ def reset_target(
     dry_run: bool = False,
     tools: Tools | None = None,
 ) -> ResetResult:
-    tools = tools or default_tools()
+    with for_target(tools, app) as bound:
+        return _reset_target(
+            app, confirm_repo=confirm_repo, dry_run=dry_run, tools=bound
+        )
+
+
+def _reset_target(
+    app: str, *, confirm_repo: str, dry_run: bool, tools: Tools
+) -> ResetResult:
     target = target_ref(tools.catalog.config(app))
 
     if dry_run:
-        return plan_reset(app, tools=tools)
+        return _plan_reset(app, tools=tools)
 
     if confirm_repo != target.repo:
         raise ConfirmationMismatch(
@@ -90,7 +107,7 @@ def reset_target(
             f"got {confirm_repo!r}"
         )
 
-    planned = plan_reset(app, tools=tools)
+    planned = _plan_reset(app, tools=tools)
     if planned.already_empty:
         return planned
 

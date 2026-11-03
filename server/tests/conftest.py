@@ -126,6 +126,28 @@ def _no_real_blob_storage(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_kms(monkeypatch):
+    """No test may build a real cloud KMS client.
+
+    `envelope.wrapper_from_env()` builds one as soon as `QA_KMS_KEY_ID` is set,
+    and a test that sets it (or a developer machine that exports it) would then
+    try to wrap a data key against a real key in a real account -- slow where
+    it works, and a confusing authentication failure where it does not. The
+    suite is designed around `LocalKeyWrapper`, so reaching for boto3 here is
+    always the bug. The sibling of `_no_real_blob_storage` and `_no_real_dns`.
+    """
+
+    def refuse(*args, **kwargs):
+        raise AssertionError(
+            "a test built a real KMS client via envelope.kms_client(); pass a "
+            "wrapper explicitly (envelope.LocalKeyWrapper) or substitute "
+            "app.envelope.kms_client"
+        )
+
+    monkeypatch.setattr("app.envelope.kms_client", refuse)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_dns(monkeypatch):
     """No test may resolve a name against real DNS.
 

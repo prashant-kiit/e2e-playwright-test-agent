@@ -128,9 +128,15 @@ def test_an_unknown_command_is_rejected_by_argparse(env):
         cli.main(["frobnicate", "demo"])
 
 
-def test_a_missing_token_is_reported_as_an_error(env, monkeypatch, capsys):
-    """default_tools() resolves the PAT; without one the CLI must not traceback."""
-    monkeypatch.delenv("GITHUB_PAT", raising=False)
+def test_a_missing_credential_is_reported_as_an_error(env, monkeypatch, capsys):
+    """A credential failure must reach the operator as a message, not a traceback.
+
+    P5-03 moved *where* that failure comes from: it used to be `default_tools()`
+    finding no `GITHUB_PAT` in the environment, and it is now binding the seam
+    to a target whose row carries no sealed PAT. Both arrive here as the same
+    `CredentialError` through the same `except`, which is why this test is
+    unchanged apart from its name -- and why the CLI needed no change at all.
+    """
 
     def boom():
         raise errors.CredentialError("no GitHub token")

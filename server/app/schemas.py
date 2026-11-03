@@ -6,6 +6,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .domain.credentials import CredentialState
 from .domain.status import RunStatus
 from .domain.steps import Step
 
@@ -221,6 +222,37 @@ class ResetBody(BaseModel):
     dry_run: bool = False
 
 
+class PatBody(BaseModel):
+    """The one thing the save route takes. A body rather than a query parameter
+    or a path segment, because those end up in access logs and this does not."""
+
+    token: str = Field(min_length=1, max_length=500)
+
+
+class CredentialOut(BaseModel):
+    """A target's GitHub credential, as the portal is allowed to see it.
+
+    **There is no field for the token and none for the ciphertext**, and that
+    is the schema doing a job rather than an omission: a response body lands in
+    a browser's network log, and nothing in the portal has any use for either
+    value. What it needs is the three questions in `credential_status` --
+    is there a credential, does GitHub still accept it, is it about to lapse.
+
+    Costs no KMS call and no GitHub call: every field is a function of the row.
+    """
+
+    app: str
+    state: CredentialState
+    expires_at: datetime | None
+    days_until_expiry: int | None
+    expiring_soon: bool
+    warning: str | None
+    # Who GitHub says the token belongs to. Only known on the save that just
+    # validated it -- it is not stored, because it is GitHub's answer at a
+    # moment and not a fact about the row.
+    login: str | None = None
+
+
 class DeliveryStateOut(BaseModel):
     """"Is this delivered?", answered from Postgres (invariant 5).
 
@@ -238,6 +270,13 @@ class DeliveryStateOut(BaseModel):
     delivered_sha: str | None
     revisions_ahead: int
     summary: str
+    # The credential, carried on the answer the portal already fetches per
+    # target for the delivery badge (P5-03). A second round trip for "can this
+    # target deliver at all?" would be a second thing to forget: the two
+    # questions are asked in the same breath and shown in the same row.
+    credential_state: CredentialState
+    pat_expires_at: datetime | None
+    credential_warning: str | None
 
 
 class DeliveryOut(BaseModel):

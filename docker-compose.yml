@@ -89,6 +89,12 @@ services:
       # Orchestrator knobs (host-overridable): fake runner by default so the
       # stack runs token-free; QA_FAKE_DELAY slows fake steps for pause demos.
       QA_RUNNER: "${QA_RUNNER:-fake}"
+      # The cloud KMS key that wraps each tenant's PAT data key (P5-03). Unset
+      # here, so `make up` works with no cloud account: app/envelope.py then
+      # derives an in-process wrapping key, which is real AES-GCM but not a
+      # production configuration -- see that module and README 6.5. A key
+      # *identifier* is not a credential; the IAM grant is what authorises it.
+      QA_KMS_KEY_ID: "${QA_KMS_KEY_ID:-}"
       QA_FAKE_DELAY: "${QA_FAKE_DELAY:-0}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       # The per-run limits (host-overridable, .env.example documents them). The

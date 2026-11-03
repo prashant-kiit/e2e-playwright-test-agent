@@ -67,6 +67,10 @@ targets(id, tenant_id, project_id, app, name,
         targetRepo, targetBranch,
         github_pat_ciphertext, pat_expires_at, credential_state)
         UNIQUE(tenant_id, app)                    -- per tenant, not global (P5)
+        -- the credential trio landed in P5-03: ciphertext (a KMS-wrapped data
+        -- key travels with it), the expiry GitHub reported, and
+        -- absent|valid|invalid. Decrypted only in the control plane, inside
+        -- the delivery Tools seam -- never in a sandbox, never in a log (8)
 
 revision(id, tenant_id, target_id, rev, parent_rev,
          tree_hash, produced_by_run, delivered_sha,
@@ -396,6 +400,39 @@ launch).
   **delivery only**, and surface it. Never silently retry. A credential problem must
   never cost a customer a run — the results are already durable.
 
+**Landed in P5-03.** Three things about the shape are worth having written down, because
+none of them was obvious from the paragraph above:
+
+- **The envelope wraps a *data key*, never the PAT.** `app/envelope.py` generates a random
+  AES-256 key per secret, encrypts the PAT under it locally, and asks the KMS only to wrap
+  the 32-byte key. So the PAT is never in a KMS request and therefore never in the
+  provider's audit log of those requests, rotating the KMS key re-wraps small keys instead
+  of re-encrypting rows, and no secret can outgrow the KMS payload limit. The sealed form is
+  one self-describing string (`qa-env1$wrapped$nonce$ciphertext`), so the column is text and
+  the format can gain a version without a migration.
+- **`Tools` is bound to one target before it can push.** There was one `token` on the
+  delivery seam, read from `GITHUB_PAT` once per process. It is now what
+  `tools.for_app(app)` resolves from that target's row, and `for_target(tools, app)` is the
+  context manager every entry point uses — because binding and "GitHub rejected this
+  credential" are two halves of one decision, and five entry points each able to do the
+  first and forget the second is how the fail-loud rule would quietly stop holding. An
+  unbound seam raises a `CredentialError` naming the call that was missed rather than an
+  `AttributeError` from inside a push. `is_bootstrapped` deliberately does **not** bind:
+  that answer is a Postgres query, and needing a credential for it would be needing the
+  network by another name.
+- **A refusal at save time is 422, not 502.** A token missing `workflow`, an empty paste, a
+  revoked token: each is the operator's input being refused while they can still fix it, and
+  a different paste is the fix. 502 stays for GitHub refusing a credential *at delivery*,
+  which is a different event with a different remedy. `CredentialRejected` and
+  `CredentialError` are separate classes for exactly this reason — one class for both would
+  have told a customer with a scope typo that GitHub was down.
+- **`GITHUB_PAT` is retired, not kept as a fallback.** One operator token is not *any*
+  tenant's credential: every delivery it authored went into a customer's repository as the
+  same identity. Nothing is migrated into the new columns either — sealing that one token
+  per target would silently give every customer the same credential under a per-tenant
+  name. A deployment that was delivering before this revision saves a PAT per target
+  afterwards, and the portal says so.
+
 ---
 
 ## 9. Storage layout and GC
@@ -624,6 +661,10 @@ one hook by the caller. Recorded here because the natural way to write P2 is to 
 | 28 | **Tenant-scoped reads are enforced, not remembered**: one `do_orm_execute` listener adds the filter to every ORM SELECT of a `TenantOwned` row, so a query cannot forget it — only explicitly opt out, and the opt-outs are a pinned allowlist. Installed at import with no off switch, because a flag would let the suite prove isolation in a configuration production does not run in (P5) |
 | 29 | Another tenant's row is **404, not 403**: a reader who does not own a row must not be able to tell "exists, not yours" from "does not exist", or the small integer ids become an inventory of what other tenants hold (P5) |
 | 30 | Background sweeps **iterate tenants** rather than reading across them. A sweep is not one query (`reap_expired` reads locks, then each lock's run, then frees it), so an unfiltered outer query would need every nested read opted out too — and the opt-out would become the normal case in the one module that touches every tenant's rows. One tenant's failure does not stop the others: the reaper is the only thing that frees an app lock (P5) |
+| 31 | **The envelope wraps a data key, not the PAT.** A random AES-256 key per secret, encrypted locally, with only the 32-byte key sent to the KMS — so the PAT is never in a KMS request or its audit log, key rotation re-wraps keys instead of re-encrypting rows, and no secret can outgrow the KMS payload limit (P5-03) |
+| 32 | **The delivery seam is bound to one target before it can push.** `for_target(tools, app)` resolves that target's credential *and* marks it invalid if GitHub rejects it, because those are two halves of one decision; an unbound seam fails loud naming the call that was missed. `is_bootstrapped` does not bind — its answer is a Postgres query (P5-03) |
+| 33 | **A credential refused at save time is 422; one refused at delivery is 502.** Separate exception classes, because one class for both would read to a customer with a scope typo as a GitHub outage — and the two have different remedies (P5-03) |
+| 34 | **`GITHUB_PAT` is retired, not kept as a fallback, and nothing is migrated into the new columns.** One operator token is not any tenant's credential; sealing it per target would give every customer the same identity under a per-tenant name (P5-03) |
 
 ---
 
@@ -639,7 +680,9 @@ does not have to reconstruct which were considered.
 | **The run queue and batch runs** | not scheduled | A second run on a busy target is refused with a 409, not queued. The queue is a scheduler *above* the lock trio, and §5 says to leave that trio alone |
 | **A K8s or Fargate scheduler** | when there is a cluster | The dispatch seam exists for them; Docker is the one implementation P4 ships, and the dev stack's socket mount is what the seam exists to replace (§6) |
 | **The run-scoped internal control-plane API** | P5 | It would remove `DATABASE_URL` and the `S3_*` credentials from a sandbox. It is the same mechanism as P5's tenant-scoped reads, and building it earlier would have meant building that worse (§6) |
-| **KMS envelope encryption of PATs; prompts in Postgres with tenant overrides** | P5 | Both are per-tenant mechanisms, and there is one tenant (§8, §12) |
+| ~~**KMS envelope encryption of PATs**~~ | ~~P5~~ | **Done (P5-03).** See §8 |
+| **Prompts in Postgres with tenant overrides** | P5 | A per-tenant mechanism, and there is one tenant (§12) |
+| **A GitHub App replacing PATs** | not scheduled | §8 names it the better long-term answer; PATs were chosen for launch and remain the credential after P5-03. The envelope, the scope check and the fail-loud path are all independent of which kind of credential it is |
 | **`audit_log`** | P5 | Delivery approvals are the thing it exists to record, and the approving actor is a per-tenant user (§10) |
 
 ### What P5 inherits

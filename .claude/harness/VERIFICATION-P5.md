@@ -12,24 +12,27 @@ fakes, and what was deliberately deferred.
 
 > ## P5 is OPEN. This record is partial.
 >
-> Two of seven tickets are complete **in the tree** and closed on the tracker; five are not
-> started. Those are two separate facts and the tracker is the source of the second one
-> (`docs/agents/issue-tracker.md`): #31 and #32 are closed `completed`, #30 and #33–#37 are
-> open.
+> Three of seven tickets are complete **in the tree**; four are not started. Tree state and
+> tracker state are two separate facts and the tracker is the source of the second one
+> (`docs/agents/issue-tracker.md`): #31, #32 and #34 are closed `completed`, and #30, #33
+> and #35–#37 are open.
 >
 > | Ticket | State in the tree |
 > |---|---|
 > | #31 P5-01 — users table + session-resolved `current_tenant_id()` | Implemented (`e492a9d`, review fixes `06a3acd`). **Not independently re-verified in this record** — see the note below |
 > | #32 P5-02 — tenant-scoped reads + tenant-scoped uniqueness + fail-closed | **Complete.** The `users.email` half plus token expiry/refresh landed first (`105e9b7`); the enforced read path and the `projects`/`targets` composite uniqueness landed in the slice below, and were exercised against a live stack with a second real tenant |
-> | #33 P5-05, #34 P5-03, #35 P5-04, #36 P5-06, #37 P5-07 | Not started |
+> | #34 P5-03 — per-tenant KMS-encrypted PATs, scope/expiry/fail-loud | **Complete in the tree.** The envelope, the per-target `Tools` binding, the save-time scope check, the portal surface and the structural credential tests. **Not yet seen against a real KMS, a real GitHub token or a browser** — see §"What is covered only by fakes" |
+> | #33 P5-05, #35 P5-04, #36 P5-06, #37 P5-07 | Not started |
 >
-> **What this record does and does not claim.** The two §"Verified" sections below each cover
-> one slice, and every line in them was observed. P5-01's own evidence lives in its two
+> **What this record does and does not claim.** The three §"Verified" sections below each
+> cover one slice, and every line in them was observed. P5-01's own evidence lives in its two
 > commit messages; it has not been re-run here, so this record does not vouch for it.
 > **P5-02's isolation claims were checked against a second real tenant** over HTTP against
 > the live stack. That tenant was deleted again afterwards, so the evidence was observed
-> and then reverted and no second tenant exists in the dev database now. A real browser
-> has still not been part of any P5 verification.
+> and then reverted and no second tenant exists in the dev database now. **P5-03's claims
+> rest on the suite plus two by-hand migration runs on throwaway databases**; it has not
+> met the live stack, a real KMS key or a real GitHub PAT. A real browser has still not
+> been part of any P5 verification.
 
 ---
 
@@ -143,6 +146,117 @@ tenant. This matters for how the table above should be read: it records what a s
 *did*, not a second tenant you can go and look at. The next ticket that needs one creates it
 the same way, with SQL, until follow-up 6 lands.
 
+## Verified on 2026-11-03 — P5-03 / #34 (per-tenant KMS-encrypted PATs)
+
+The change: a tenant's GitHub PAT moves from one `GITHUB_PAT` in the API's environment onto
+the target's own row, envelope-encrypted; scope is validated against GitHub as it is pasted;
+expiry is stored and warned about in-portal; and a 401/403 at delivery sets
+`credential_state = invalid`, failing that delivery only. `token_from_env()` is **deleted**,
+not guarded.
+
+**Suite, run as CI runs it** (`QA_REQUIRE_DB=1 make test`, exit 0): ruff clean,
+**874 backend tests** (up from 801), **70 frontend tests** (up from 57).
+New coverage: 10 in the new `test_envelope.py` (the sealed form, tamper and version
+rejection, the KMS wrapper sending only the data key, which wrapper a deployment gets), 30 in
+the new `test_delivery_credentials.py` (save/clear/rotate, the three scope cases, expiry
+warnings, `DbCredentials` against real rows including cross-tenant, and the `Tools` binding
+and fail-loud guard), 15 in the new `test_api_credentials.py` (the HTTP contract, the role
+gate, 401-at-delivery end to end), 4 in `test_delivery_git.py` (redaction of a bare token, of every
+GitHub token prefix and of a sealed column, and a commit sha that must survive it),
+6 in `test_sandbox_credentials.py`, and 13 frontend (9 in the new
+`TargetCredential.test.jsx`, 4 in `Projects.test.jsx`).
+
+**The migration, observed on two throwaway databases** rather than inferred from the suite,
+because the suite structurally cannot make either claim — nothing in it asserts a column's
+*absence*, and every target it creates post-dates the revision.
+
+`upgrade head` → `downgrade -1` → `upgrade head`, reading `information_schema.columns` at
+each stop:
+
+| Stage | `github_pat_ciphertext` | `pat_expires_at` | `credential_state` |
+|---|---|---|---|
+| head | `text`, nullable, no default | `timestamptz`, nullable, no default | `varchar`, **not null**, **no default** |
+| downgrade −1 | absent | absent | absent |
+| re-upgrade | `text`, nullable, no default | `timestamptz`, nullable, no default | `varchar`, not null, no default |
+
+And the backfill, on a second database where a target was inserted **at the previous
+revision** and then migrated forward:
+
+```
+pre-revision target inserted
+after upgrade: app='legacy-app' state='absent' ciphertext=None expires=None
+insert without credential_state refused, as intended:
+  null value in column "credential_state" of relation "targets" violates not-null constraint
+```
+
+Those two lines are the whole claim: an existing target becomes `absent` — which is exactly
+true of it — and **the server default that performed the backfill was dropped in the same
+revision**, so new rows must set the column from `CredentialState` rather than have the
+database guess it. That is the pattern P2 set for `tenant_id` and P3 for the config columns,
+and nothing in the suite would have noticed an orphaned default.
+
+**No CHECK constraint, deliberately and consistently.** `native_enum=False` plus
+SQLAlchemy 2.x's `create_constraint=False` default makes `credential_state` a plain
+`VARCHAR(20)`, validated in the application by `_enum_col`'s `validate_strings=True` — the
+same shape `runstatus` and `step` have had since the initial schema. Checked against
+`pg_constraint` on the throwaway database: no table-level CHECK on any of them. It is
+recorded here because the absence reads like an oversight, and the migration's own comment
+had claimed a CHECK that has never existed.
+
+**Two bugs the loop found, both in the first green version of the code.**
+
+The first was caught by an existing test, which is the better outcome: naming the redaction
+regex `_BARE_GITHUB_TOKEN` made `test_no_module_reachable_from_the_entrypoint_reads_a_github_credential[GITHUB_TOKEN]`
+fail, because `app/delivery/errors.py` *is* imported by code a sandbox runs and the assertion
+is on the source text. A name is a mention. Renamed to `_BARE_PAT`.
+
+The second was a day-rounding error in the expiry warning. `timedelta.days` truncates, so a
+credential with 2 days and 23 hours left was reported as "2 days" and one with 3 hours left
+as **"0 days"** — a message that reads like "no deadline" about the most urgent case the
+warning exists for. `_days_until` rounds up now, and never claims more time than the
+credential has.
+
+**"Fails the delivery only, never the run" is structural here, not defended.** The criterion
+presumes a run could be at risk, and in this architecture none can be: delivery is a
+separate, human-approved control-plane action (DESIGN.md §7) and no run ever performs one —
+the only non-route caller is the optional infra sync at target creation, which is not a run
+either. So the end-to-end test asserts what there is to assert: the route answers 502, the
+credential becomes `invalid`, and nothing else moved. If a future change ever made a run
+reach a delivery, that test would not notice; the thing keeping the rule true is the
+architecture, and it is worth knowing which of the two is doing the work.
+
+**What the credential rule is now held to, structurally.** P4's version was about one
+operator token; there is a credential per customer to keep out now, plus the key material
+that would open it. `tests/test_sandbox_credentials.py` asserts: `TargetConfig` has exactly
+its seven configuration fields and no credential field, so there is no value for the sandbox
+environment builder to pass along even by mistake; a real sealed PAT and the wrapping key in
+the control plane's environment appear nowhere in a built sandbox environment, by name or by
+value; and **no module reachable from the sandbox entrypoint's real import graph imports
+`app.envelope` or `app.delivery.credentials`, or so much as mentions `decrypt_pat`,
+`open_sealed` or `LocalKeyWrapper`**. That last one matters more than it looks: until #33
+lands, a sandbox still holds `DATABASE_URL` and can therefore *read*
+`targets.github_pat_ciphertext`. The envelope is what makes that harmless, and it stays
+harmless only while nothing in there can unwrap a data key.
+
+That assertion is also what settled where the credential surface is exported from.
+`app/delivery/__init__.py` re-exports lazily so a sandbox wanting `tracked_tree` does not
+import the credential reader — but the *table* of names lives in a file every sandbox loads,
+and an entry reading `"decrypt_pat": "credentials"` would hand anything running in there the
+exact name to ask for, one `getattr` away from the function that unwraps a data key. So the
+credential functions are **not in the table at all**; `app/api.py` imports that module by
+path instead, which is a line a reviewer sees.
+
+**What the `Tools` seam looks like afterwards.** `for_target(tools, app)` is the one way a
+delivery entry point acquires a credential, and it binds *and* marks-invalid-on-rejection in
+one context manager — because those are two halves of one decision, and five entry points
+each able to do the first and forget the second is how the fail-loud rule would quietly stop
+holding. An unbound seam raises a `CredentialError` naming the call that was missed, rather
+than an `AttributeError` on `None` from somewhere inside a push. Three paths deliberately do
+**not** bind: `is_bootstrapped`, the already-bootstrapped arm of `ensure_bootstrapped`, and
+the `--dry-run` arms of bootstrap and push. All four answer from Postgres and the blob store
+and dial out to nothing, and a new target with no PAT saved yet — the normal state of one —
+must still be able to say where it stands.
+
 ---
 
 ## Decisions recorded during this phase
@@ -166,6 +280,18 @@ the same way, with SQL, until follow-up 6 lands.
 | **The reaper iterates tenants instead of reading across them** | Its sweeps are not single queries (`reap_expired` reads locks, then each lock's run, then frees it), so an unfiltered outer query would need every nested read opted out too — and the opt-out would become the normal case in the one module that touches every tenant's rows. `_for_each_tenant` binds each tenant and does ordinary scoped work |
 | **A failing sweep for one tenant does not stop the others** | The reaper is the only thing that frees an app lock, so one customer's wedged row must not be able to park every other customer's apps. A noisy neighbour holding a *control*, not just a resource |
 | **The bypass is a separate function, not a flag on `get_run`** | An `across_tenants=False` parameter would make the unscoped read reachable from every existing call site by typo, and would not show up in a grep. `get_run_across_tenants` is a name a reviewer notices |
+| **The envelope wraps a data key, not the PAT** | A random AES-256 key per secret, encrypted locally, with only the 32-byte key sent to the KMS. The PAT is then never in a KMS request nor in that provider's audit log of them; rotating the KMS key re-wraps small keys instead of re-encrypting rows; and no secret can outgrow the KMS payload limit. Asking the KMS to encrypt the PAT directly would have been shorter code and none of those things |
+| **A local in-process wrapper exists, and says so** | The suite and `make up` must work with no cloud account, and a format only exercisable against real KMS is a format nothing tests. `LocalKeyWrapper` is real AES-GCM with an HKDF-derived key, and `describe` reports “not a production configuration” — so a deployment that forgot `QA_KMS_KEY_ID` can be *seen* to have forgotten it rather than silently storing PATs under a key sitting in its own process |
+| **Binding the seam and marking a rejected credential are one context manager** | `for_target(tools, app)` does both. They are two halves of one decision — the credential it resolves is the credential whose rejection has to be recorded — and five entry points each able to bind and forget to mark is how §8's fail-loud rule would quietly stop holding |
+| **An unbound seam fails loud, naming the call that was missed** | `None` for the GitHub client would have been shorter and much worse: the first use is `AttributeError: 'NoneType' object has no attribute 'repo_has_commits'`, raised from inside a push, with nothing in it to suggest that a credential was never bound |
+| **`is_bootstrapped` and the dry runs do not bind** | They answer from Postgres and the blob store and dial out to nothing. Requiring a credential would be requiring the network by another name — the bug `api.get_catalog` exists to avoid — and it would make the `--dry-run` preview impossible for a target just created, which is when it is most useful |
+| **`CredentialRejected` is a separate class from `CredentialError`** | 422 against 502. “The token you just typed will not do” and “the token we have stopped working” have different remedies, and one class for both would have told a customer with a scope typo that GitHub was down |
+| **`GITHUB_PAT` is deleted, not guarded, and nothing is migrated into the new columns** | One operator token is not *any* tenant's credential: every delivery it authored went into a customer's repository as the same identity. Sealing it per target would have given every customer the same credential under a per-tenant name, which is worse than making them save one |
+| **`credential_state` is a column, not inferred from a null ciphertext** | The rejected case *has* ciphertext and is still unusable, and the portal has to say three different things. `invalid` is also **sticky**: it survives until a new token is saved, so a customer is told their token was refused instead of watching the same delivery fail again |
+| **`mark_invalid` keeps the ciphertext** | Deleting it would throw away the only evidence of what was rejected, and an operator who fixes the token's scopes on GitHub's side can re-save the same value |
+| **The credential surface is absent from `delivery.__init__`'s lazy table** | Lazy keeps a module out of a sandbox's import *graph*; it does not keep the name out of a file every sandbox loads. An entry reading `"decrypt_pat": "credentials"` is one `getattr` away from the function that unwraps a data key. `app/api.py` imports that module by path instead, which is a line a reviewer sees |
+| **The expiry warning rounds days up** | `timedelta.days` truncates, which is the wrong direction for a warning: it reported 2 days and 23 hours as “2 days” and 3 hours as “0 days” — a message reading like “no deadline” about the most urgent case the warning exists for |
+| **`QA_KMS_KEY_ID` is not on the forbidden-credential list** | It is a key *identifier*; the IAM grant is what authorises its use. That list is also applied to every compose service, so including it would forbid the API from being configured with the key it needs. That a sandbox does not get it is asserted directly instead |
 | **404, not 403, for another tenant's row** | A reader who does not own a row should not be able to tell "exists, not yours" from "does not exist", or the small integer ids become an inventory of what other tenants have |
 
 ---
@@ -194,6 +320,24 @@ impression.
   two users whose emails collide across tenants, has still not been migrated, and both
   revisions' `downgrade` deliberately fails loudly in that case rather than picking a winner,
   which remains unobserved.
+- **A real KMS key.** Every test and the dev stack use `LocalKeyWrapper`. `KmsKeyWrapper` is
+  driven by a stub that records what it was asked to wrap — which does prove the thing most
+  worth proving, that only a 32-byte data key is ever sent — but **no data key has been
+  wrapped by a real cloud KMS**, no IAM grant has been exercised, and the `kms:Encrypt` /
+  `kms:Decrypt` call shapes rest on reading the API documentation.
+- **A real GitHub PAT.** Save-time scope validation is driven through the injected
+  validator, and the `TokenInfo` header parsing through `httpx.MockTransport`. No real token
+  has been pasted, so GitHub's actual `x-oauth-scopes` and
+  `github-authentication-token-expiration` header values for a classic PAT, and the absence
+  of both for a fine-grained one, are **assumed from the documentation and from P1's
+  parsing code**, not observed. The expiry parser's date formats are the least-tested thing
+  in this slice.
+- **A delivery with a per-tenant PAT.** No push has been made with a credential read off a
+  target row. The 401-at-delivery path is proven end to end through the route with a GitHub
+  client that refuses everything; the *success* path has only ever run with a literal
+  `"t0ken"` from the test doubles, against a bare repo on disk.
+- **The portal's credential panel.** Covered by jsdom. No browser has typed a PAT into it,
+  and the expiry warning has never been seen rendered.
 - **P5-01 in its entirety** — see the banner. Its claims rest on its commits.
 - **The guard under concurrency.** Proven to re-bind per execution by alternating tenants in
   one process, and by the suite, which runs the whole API in-process. Two tenants issuing
@@ -234,7 +378,10 @@ hygiene.
 4. **A role or tenant change takes effect at next login, not next refresh.** `/auth/refresh`
    reconstitutes claims from the token and never re-reads the `users` row, inheriting
    P5-01's trade-off and extending its worst case from one session to 30 days of renewals.
-   **Relevant to #35's quotas and #34's PATs if either becomes role-gated.**
+   **This is no longer hypothetical: P5-03 gated PAT save and clear on the admin role**, so
+   demoting a tenant admin leaves them able to rotate that tenant's GitHub credential — the
+   credential a delivery pushes with — for up to 30 days of refreshes. It is the sharpest
+   consequence of the stateless-token decision so far, and it is the same fix as item 1.
 5. **A cold load of the login page fires one pointless `POST /auth/refresh`.** `api.me()`
    401s when nobody is logged in, which trips the refresh dance. Harmless, one round trip,
    but it puts a 401 and a failed refresh in the log of every first visit.
@@ -274,6 +421,44 @@ hygiene.
     existed, and `acme` cannot be delivered today. The fix is a `--tenant` option resolving a
     slug and a `tenant_scope` around the command, and it belongs with the tenant-admin
     surface (item 6) rather than here.
+
+### Introduced by the per-tenant PATs
+
+21. **Rotating `QA_SECRET_KEY` destroys every stored PAT**, wherever `QA_KMS_KEY_ID` is unset
+    — which is every deployment today, including the dev stack. The local wrapper derives its
+    wrapping key from that secret, so the key that signs session cookies is also the key that
+    protects credentials, and item 1 already says a leak of it forges any user's session.
+    `decrypt_pat` fails loud rather than guessing (`CredentialError`, "could not be
+    decrypted"), and the remedy is for each customer to re-save their token — but nothing
+    warns that this is what rotation costs, and nothing re-encrypts. **Setting
+    `QA_KMS_KEY_ID` in any real deployment is the answer**, and the fact that the fallback is
+    silent-but-loud-later rather than refused outright is a deliberate choice recorded in
+    §Decisions, not an oversight.
+22. **There is no re-wrap or rotation tooling.** A new KMS key leaves existing rows wrapped
+    by the old one; they keep decrypting while the old key remains enabled and stop the day
+    it does not. Re-wrapping is a loop over `targets` calling unwrap-then-wrap, and it does
+    not exist. Nothing needs it yet because nothing has rotated.
+23. **A revoked token still reads `valid` until a delivery tries it.** `credential_state` is
+    written at save time and at a 401/403 during delivery, and nothing re-validates in the
+    background. Expiry is handled — the warning is computed from `pat_expires_at` at read
+    time, so it becomes true on its own — but a customer who revokes a PAT on GitHub's side
+    sees "valid" in the portal until the next delivery fails. A periodic `GET /user` per
+    target would fix it and would also be a per-tenant rate-limit consumer, which is why it
+    was not done here.
+24. **No audit row for a PAT save or rotation.** #37's acceptance criteria name PAT
+    save/rotate explicitly, so the route is deliberately left without one rather than given a
+    bespoke log line to be ripped out. **#37 must cover `PUT`/`DELETE /targets/{id}/pat`**;
+    they are the two mutations this slice added.
+25. **`make deliver` and the delivery CLI cannot deliver anything until a PAT is saved in the
+    portal**, and they still bind no tenant (item 20), so they are the seeded tenant's only.
+    Together that means the CLI path now depends on a browser session having happened first.
+    Not a regression in isolation — it previously depended on an environment variable the
+    operator had to set — but the two limits compound, and the fix is the same `--tenant`
+    option item 20 names.
+26. **The account a token authors as is reported once and not stored.** `login` comes back on
+    the save that validated the token and is not a column, because it is GitHub's answer at a
+    moment rather than a fact about the row. The cost is that the portal can show "deliveries
+    will be authored by X" immediately after saving and never again.
 
 ### Carried over or deferred
 
@@ -351,8 +536,9 @@ hygiene.
 
 ## Closing
 
-Two tickets are in, and between them they moved P5 from "every table has a `tenant_id`" to
-"a second customer can exist". The claim worth making about each is narrow and was checked by
+Three tickets are in. The first two moved P5 from "every table has a `tenant_id`" to "a
+second customer can exist"; the third moved it from "a second customer can exist" to "a
+second customer can deliver as themselves". The claim worth making about each is narrow and was checked by
 hand against a real database, because the suite structurally cannot make it: for `users.email`
 and again for `projects.name`/`targets.app`, that **the old global unique is replaced, not
 left beside the new composite one** — no test in the suite asserts a constraint's absence.
@@ -376,4 +562,27 @@ and the first two-tenant request in production would have crossed the boundary. 
 would have caught it is the one in §Verified that alternates tenants in a single process, and
 it exists because the mechanism was spiked before it was trusted.
 
-**P5 is open: two of seven tickets are done (#31, #32), and five are not started.**
+P5-03's own lesson is smaller than P5-02's and worth the same kind of attention, because
+both are about a guarantee that a green suite cannot see. The redaction regex was named
+`_BARE_GITHUB_TOKEN`, and that alone failed a P4 test: `app/delivery/errors.py` is imported
+by code a sandbox runs, and the structural assertion is on the module's *source text*, so a
+constant's name is a mention. The fix was a rename. What it demonstrated is that the
+credential rule in this repo is enforced by reading code rather than by running it — which
+is the only way to enforce "this cannot happen" — and that such a test will therefore fire on
+things that are not bugs. The temptation in that moment is to loosen the assertion. The
+right move was to rename the constant and write down why, which is now a comment beside it.
+
+The same reading-rather-than-running produced the slice's one genuinely structural decision:
+`app/delivery/__init__.py`'s lazy export table keeps a module out of a sandbox's import
+graph, but the table itself lives in a file every sandbox loads, so an entry naming
+`decrypt_pat` would have handed anything running in there the exact string to `getattr`. No
+test demanded that; the test demanded only that the module not be imported. It was removed
+from the table because the weaker guarantee was not the one worth having.
+
+The largest hole this slice leaves is not in the code. **Where `QA_KMS_KEY_ID` is unset —
+every deployment today — `QA_SECRET_KEY` protects every stored PAT as well as every session
+cookie**, so follow-up 2's missing `Secure` flag and follow-up 1's unrevocable token now sit
+next to a secret that also decrypts customer credentials (follow-up 21). The envelope is
+real; the key is in the wrong place until that variable is set.
+
+**P5 is open: three of seven tickets are done (#31, #32, #34), and four are not started.**

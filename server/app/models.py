@@ -38,6 +38,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 
 from .db import Base
+from .domain.credentials import CredentialState
 from .domain.roles import UserRole
 from .domain.status import RunStatus
 from .domain.steps import Step
@@ -224,6 +225,31 @@ class Target(TenantOwned, Base):
     agent_notes: Mapped[list] = mapped_column(JSON, nullable=False)
     target_repo: Mapped[str] = mapped_column(String(200), nullable=False)
     target_branch: Mapped[str] = mapped_column(String(200), nullable=False)
+
+    # The tenant's own GitHub credential (P5-03, DESIGN.md §8). The columns §3
+    # named and P4 never built.
+    #
+    # `github_pat_ciphertext` is an envelope-sealed PAT: ciphertext plus a
+    # KMS-wrapped data key in one self-describing string (app/envelope.py). It
+    # is **never** the token -- nothing in this process reads the column
+    # expecting a credential, and the one function that opens it lives in
+    # app/delivery/credentials.py, reached only through the delivery `Tools`
+    # seam in the control plane. Nullable because a target legitimately has no
+    # credential until its customer pastes one, which is what `ABSENT` says.
+    github_pat_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What GitHub reported when the token was saved, so the portal can warn
+    # before it lapses. Null for a fine-grained or non-expiring token, which is
+    # "no expiry reported" and not "expires now".
+    pat_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Non-null with no server default, like `tenant_id` and the P3 config
+    # columns: the backfill default lives in the migration and is dropped
+    # there, so a row cannot acquire a credential state the database guessed.
+    credential_state: Mapped[CredentialState] = mapped_column(
+        _enum_col(CredentialState), nullable=False, default=CredentialState.ABSENT
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

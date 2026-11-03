@@ -9,8 +9,13 @@ In the sandbox environment:
 
 Never in the sandbox:
 
-    GITHUB_PAT            or any GitHub credential
-    QA_SECRET_KEY         the session-cookie signing key, or any portal credential
+    a GitHub credential   there is no longer a `GITHUB_PAT` anywhere; a tenant's
+                          PAT lives sealed on its target's row, and the sandbox
+                          is handed a `TargetConfig`, which has no field for one
+    QA_SECRET_KEY         the session-cookie signing key, or any portal
+                          credential -- and, where no cloud KMS is configured,
+                          the key that would unwrap every tenant's sealed PAT
+    QA_KMS_KEY_ID         the sandbox has no business naming the wrapping key
     a repo mount          or any path into the control plane
     the control plane's own configuration
 

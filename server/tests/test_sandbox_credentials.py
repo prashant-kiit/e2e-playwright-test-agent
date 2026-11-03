@@ -39,7 +39,24 @@ REPO_ROOT = SERVER_DIR.parent
 # Everything that would let a sandbox write to a customer's repository or act as
 # the portal. Named individually rather than by prefix: a list is readable, and
 # a prefix rule would quietly stop covering a credential named differently.
-FORBIDDEN = ("GITHUB_PAT", "GITHUB_TOKEN", "GH_TOKEN", "QA_ADMIN_PASSWORD", "QA_SECRET_KEY")
+FORBIDDEN = (
+    "GITHUB_PAT",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "QA_ADMIN_PASSWORD",
+    # Also the wrapping key for every tenant's sealed PAT: `LocalKeyWrapper`
+    # derives from it, so a sandbox holding it could open the ciphertext the
+    # database already lets it read (P5-03, and until P5-05 removes
+    # DATABASE_URL).
+    "QA_SECRET_KEY",
+)
+
+# `QA_KMS_KEY_ID` is deliberately **not** in that list. It is a key *identifier*,
+# not a credential -- what authorises its use is the deployment's IAM grant --
+# and the list above is also applied to every compose service, so including it
+# would forbid the API from being configured with the key it needs. That a
+# sandbox does not get it is asserted directly instead, in
+# `test_no_sealed_credential_or_wrapping_key_reaches_the_sandbox`.
 
 
 @pytest.fixture()
@@ -67,6 +84,7 @@ def _control_plane_environment(monkeypatch):
     monkeypatch.setenv("S3_BUCKET", "qa-artifacts")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("QA_CORS_ORIGINS", "http://localhost:5173")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
 
 
 # --- one function builds the environment ---------------------------------
@@ -396,3 +414,94 @@ def test_without_a_proxy_there_is_no_proxy_environment_at_all(cfg):
 
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "QA_PROXY_URL"):
         assert name not in env
+
+
+# --- the per-tenant PAT (P5-03) ------------------------------------------
+#
+# P4's rule was about one operator `GITHUB_PAT`. P5-03 turns the credential
+# into a per-tenant secret on the target row, which makes the rule larger
+# rather than smaller: there is now a credential *per customer* to keep out,
+# plus the key material that would open it. The tests below are the same shape
+# as the ones above -- what cannot happen, not what did.
+
+
+def test_the_target_configuration_a_sandbox_is_handed_carries_no_credential():
+    """The structural half, and the reason it is cheap to be sure of.
+
+    `sandbox_environment` takes a `TargetConfig`, which is the target's row
+    *minus* its credential: the dataclass has no field for one, so there is no
+    value for the environment builder to pass along even by mistake. A sealed
+    PAT reaching a sandbox would have to start with somebody adding a field
+    here, which is a reviewable line rather than an oversight.
+    """
+    import dataclasses
+
+    fields = {f.name for f in dataclasses.fields(TargetConfig)}
+
+    assert fields == {
+        "app",
+        "name",
+        "base_url",
+        "locators",
+        "agent_notes",
+        "target_repo",
+        "target_branch",
+    }
+    for name in ("github_pat_ciphertext", "pat_expires_at", "credential_state"):
+        assert name not in fields
+
+
+def test_no_sealed_credential_or_wrapping_key_reaches_the_sandbox(cfg, monkeypatch):
+    """Belt as well as braces: a real sealed PAT and the key that opens it are
+    both in the control plane's environment, and neither comes out."""
+    from app import envelope
+
+    monkeypatch.setenv("QA_KMS_KEY_ID", "arn:aws:kms:eu-west-1:1:key/abc")
+    sealed = envelope.seal(
+        "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        envelope.LocalKeyWrapper(b"the-suite-wrapping-key"),
+    )
+
+    env = sandbox_env.sandbox_environment(7, cfg)
+
+    assert "QA_KMS_KEY_ID" not in env
+    assert not any(sealed in value for value in env.values())
+    assert not any("ghp_" in value for value in env.values())
+    # The wrapping key itself, under whatever name: `_control_plane_environment`
+    # puts a recognisable value in QA_SECRET_KEY, and the rename guard above
+    # covers the general case.
+    assert not any(value == "secret-qa_secret_key" for value in env.values())
+
+
+def test_no_module_reachable_from_the_entrypoint_can_open_a_sealed_credential():
+    """The import-graph half, extended to the decrypt path.
+
+    The sandbox image ships the same server package as the API, so
+    `app/envelope.py` and `app/delivery/credentials.py` exist in it. What must
+    not exist is a path from the entrypoint to them: until P5-05 the sandbox
+    holds `DATABASE_URL`, so it can *read* `targets.github_pat_ciphertext`
+    already -- the envelope is what makes that harmless, and it stays harmless
+    only while nothing in there can unwrap a data key.
+    """
+    modules = _modules_reachable_from_the_entrypoint()
+
+    assert "app.envelope" not in modules
+    assert "app.delivery.credentials" not in modules
+
+
+@pytest.mark.parametrize("name", ("decrypt_pat", "open_sealed", "LocalKeyWrapper"))
+def test_nothing_the_sandbox_imports_mentions_the_decrypt_path(name):
+    """The rename guard, as for the forbidden credentials above: a module that
+    acquired this by being imported for something else would not show up as a
+    failing behaviour anywhere."""
+    offenders = []
+    for module in _modules_reachable_from_the_entrypoint():
+        path = SERVER_DIR / (module.replace(".", "/") + ".py")
+        if not path.is_file():
+            path = SERVER_DIR / module.replace(".", "/") / "__init__.py"
+        if path.is_file() and name in code_of(path):
+            offenders.append(module)
+    assert offenders == [], (
+        f"{offenders} are reachable from the sandbox entrypoint and mention "
+        f"{name}; no sandbox may be able to open a tenant's sealed credential"
+    )
