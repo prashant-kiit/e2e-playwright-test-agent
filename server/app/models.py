@@ -31,6 +31,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy import (
     Enum as SAEnum,
@@ -39,6 +40,7 @@ from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 
 from .db import Base
 from .domain.credentials import CredentialState
+from .domain.quotas import DEFAULT_MAX_CONCURRENT_RUNS, DEFAULT_MONTHLY_RUN_QUOTA
 from .domain.roles import UserRole
 from .domain.status import RunStatus
 from .domain.steps import Step
@@ -124,8 +126,22 @@ class Tenant(Base):
     # to recognise. A tenant nobody has configured is unmetered, which is the
     # safe direction while there is still no tenant-admin surface to configure
     # one with.
-    max_concurrent_runs: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    monthly_run_quota: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The server defaults are **kept**, not dropped, and that is a deliberate
+    # departure from this schema's usual rule (P2's `tenant_id`, P5-03's
+    # `credential_state` both drop theirs so application code must set the
+    # column rather than let the database guess). The rule exists to stop a
+    # column acquiring a meaningless value nobody chose. Here the default *is*
+    # the choice: there is no `create_tenant` in this application, so a tenant
+    # comes from the migration's seed or from raw SQL, and a server default is
+    # the only thing on both paths. Without it, "bound each tenant so one
+    # cannot starve the platform" was true only of tenants somebody had
+    # remembered to configure.
+    max_concurrent_runs: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, server_default=text(str(DEFAULT_MAX_CONCURRENT_RUNS))
+    )
+    monthly_run_quota: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, server_default=text(str(DEFAULT_MONTHLY_RUN_QUOTA))
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

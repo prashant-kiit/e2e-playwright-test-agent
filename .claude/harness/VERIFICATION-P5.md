@@ -24,7 +24,7 @@ fakes, and what was deliberately deferred.
 > | #31 P5-01 — users table + session-resolved `current_tenant_id()` | Implemented (`e492a9d`, review fixes `06a3acd`). **Not independently re-verified in this record** — see the note below |
 > | #32 P5-02 — tenant-scoped reads + tenant-scoped uniqueness + fail-closed | **Complete.** The `users.email` half plus token expiry/refresh landed first (`105e9b7`); the enforced read path and the `projects`/`targets` composite uniqueness landed in the slice below, and were exercised against a live stack with a second real tenant |
 > | #34 P5-03 — per-tenant KMS-encrypted PATs, scope/expiry/fail-loud | **Complete, reviewed and closed.** The envelope, the per-target `Tools` binding, the save-time scope check, the portal surface and the structural credential tests. The two-axis review found two real credential leaks (the PAT in `Tools.__repr__`, a data key reachable in a `SealError`) and one half-true acceptance criterion (a git-transport 401/403 did not mark the credential invalid); all fixed — see §Follow-ups 27b. **Still not seen against a real KMS, a real GitHub token or a browser** — see §"What is covered only by fakes" |
-> | #35 P5-04 — per-tenant concurrency cap and monthly run quota at enqueue | **Complete.** The two columns, the typed 429 rejection above the `AppLock` trio, the usage endpoint and the portal gauges. Exercised against the live stack with the real dev database, where both breaches were driven over HTTP and left no run row. **The portal half ships with no test of its own** — that seam was deliberately not taken; see the slice below |
+> | #35 P5-04 — per-tenant concurrency cap and monthly run quota at enqueue | **Complete.** The two columns, the typed 429 rejection above the `AppLock` trio, the usage endpoint and the portal gauges. Exercised against the live stack with the real dev database, where both breaches were driven over HTTP and left no run row. The two gaps it first shipped with — an untested portal surface, and caps that bounded only a configured tenant — were both closed in a second pass (follow-ups 28 and 29). Still unseen by a browser |
 > | #33 P5-05, #36 P5-06, #37 P5-07 | Not started |
 >
 > **What this record does and does not claim.** The four §"Verified" sections below each
@@ -404,15 +404,27 @@ but `_truncate_all` does `DELETE FROM tenants WHERE id <> :seeded`, so `test_quo
 `OTHER = 2` is removed like any other extra row — which is exactly why the restore only needs
 `WHERE id = :seeded`.
 
-**What this slice did not meet.** The portal surface (`UsageMeter`, the `/usage` call in
-`Projects.jsx`, the 429 passed through as the server worded it) **ships with no test of its
-own.** The frontend component seam was offered and deliberately not taken when the seams for
-this ticket were agreed, so the 70 frontend tests are the same 70 as before. What this means
-precisely: the two gauges and the "at your cap" notes have been read, and the backend they
-render has live evidence above, but nothing executes the component — and no browser has
-rendered it. `Projects.test.jsx`'s API mock *was* extended with `usage`, which is maintenance
-rather than coverage: without it every test in that file took the page's error path and still
-passed while rendering none of the page, which is worth knowing as a pattern.
+**The two gaps this slice first shipped with, and how they were closed.** Both were recorded
+as follow-ups 28 and 29 before being closed in a second pass; the detail is there and the
+short version is here.
+
+The portal surface shipped with **no test of its own**, the frontend component seam having
+been declined when this ticket's seams were agreed — and the review then found two defects in
+it by *reading*, which is exactly the class of bug a component test catches cheaply. The seam
+was taken afterwards: **84 frontend tests, up from 70**, and both of those defects are now
+pinned by tests that were confirmed to fail with the fix reverted.
+
+More seriously, the caps bounded only a tenant somebody had configured, and nothing configured
+one — there is no `create_tenant` in this application, so a tenant comes from the seed or from
+raw SQL and both skipped the caps. `NULL` meant unmetered, so every tenant created after this
+ticket was unbounded, which left #35's own premise ("one busy or abusive tenant cannot starve
+the platform") true only by luck. Revision `f1a62c90d4e7` gives both columns a **server
+default**, the one mechanism both creation paths go through. `NULL` still means no cap; it is
+now asked for rather than inherited.
+
+Still true, and not closed by either: **no browser has rendered this panel.** jsdom executes
+the component, which is a different claim from a person or a headless Chrome seeing it, and no
+P5 slice has had the second kind of evidence.
 
 ---
 
@@ -761,23 +773,49 @@ hygiene.
     browser — items 21–23 below still stand, and AC1/AC3/AC4 remain proven against
     `StubKms`, an httpx `MockTransport` and jsdom respectively.
 
-28. **The portal's quota surface has no test at all.** `UsageMeter`, the `/usage` call in
-    `Projects.jsx` and the 429 passed through as the server worded it are unexercised: the
-    frontend component seam was offered and deliberately not taken when this ticket's seams
-    were agreed, so the frontend suite is the same 70 tests as before. Two defects in it were
-    found by *reading* during review (`=== null`, and an unguarded async reload), which is
-    precisely the class of bug a component test catches cheaply. Either take that seam or
-    accept that this panel is verified by eye.
+28. ~~**The portal's quota surface has no test at all.**~~ **Done.** The seam was taken after
+    all: **14 frontend tests** (70 → 84), 8 in the new `UsageMeter.test.jsx` and 6 added to
+    `Projects.test.jsx`. The component tests cover used-of-limit rendering, the unmetered
+    count with no denominator, each cap's own remedy sentence, and both gauges full at once
+    (the case that made the `/usage` endpoint report two independent flags rather than deriving
+    them from the single breach it would refuse with). The page tests cover the gauges
+    appearing, the page still rendering when the usage read fails, a 429 shown **in the
+    server's own words**, the usage being re-read after a refusal so the gauge agrees with it,
+    and a 409 still getting the queue explanation rather than collapsing into the quota one.
 
-29. **New tenants are unmetered, so "one abusive tenant cannot starve the platform" is not
-    yet true.** The caps default to `NULL` (no cap) and the only writer, `repo.set_tenant_caps`,
-    is deliberately not a route — so every tenant created after this ticket is unbounded until
-    somebody opens a console. This was a deliberate choice: the alternative, refusing
-    everything for an unconfigured tenant, locks out a customer nobody has got round to
-    configuring, and there is still no tenant-admin surface to configure one with (item 6,
-    which gates this). The spec axis is right that this is a hole rather than merely a
-    follow-up, and it is recorded as one: **P5-04 bounds a tenant whose caps are set, and
-    nothing yet guarantees they are set.**
+    **Both defects the review had found by reading are now pinned, and both were confirmed to
+    fail with the fix reverted** rather than merely passing once written: restoring
+    `=== null` makes the undefined-cap test fail with the literal "2 of undefined", and
+    restoring the unguarded `onChange={load}` makes the reload test fail. A test that passes
+    both with and without the bug it names is worth nothing, so each was checked both ways.
+
+29. ~~**New tenants are unmetered, so "one abusive tenant cannot starve the platform" is not
+    yet true.**~~ **Done**, in revision `f1a62c90d4e7`: both cap columns now carry a **server
+    default** of `3`/`500`, so a tenant arrives bounded however it was created.
+
+    **Server-side, and that is the whole point rather than an implementation detail.** There
+    is no `create_tenant` function anywhere in this application — a tenant comes from the
+    users migration's seed or from a hand-written `INSERT`, and the second is how every real
+    second tenant has been made so far, since there is still no tenant-admin surface (item 6).
+    An application-side default would have covered neither path.
+
+    **The default is kept, not dropped, which departs from this chain's usual pattern** (P2's
+    `tenant_id` and P5-03's `credential_state` both add a server default, backfill with it and
+    drop it in the same revision, so application code must set the column rather than let the
+    database guess). That rule exists to stop a column acquiring a value nobody chose. Here
+    the default *is* the choice, and it has to outlive the revision: its job is to apply to
+    rows inserted next year by code that does not mention these columns. The departure is
+    stated in the revision, in `models.py` and here, so it reads as a decision rather than as
+    somebody forgetting the pattern.
+
+    `NULL` still means no cap, so an unmetered enterprise plan is still expressible — it is
+    now something a plan **asks for** rather than what a tenant gets by nobody thinking about
+    it. Verified by hand on a throwaway database: a bare `INSERT` lands `3`/`500`; an `INSERT`
+    naming `NULL, NULL` stays unmetered; after `downgrade -1` the defaults are gone and a bare
+    `INSERT` is unmetered again, which is exactly the `e9c41a7d3f28` behaviour. One honest
+    edge: altering a default never rewrites existing rows, so a tenant created *during* a
+    downgrade window keeps its `NULL`s after the re-upgrade. That is also what protects a
+    deliberately unmetered tenant from being re-capped by a later migration.
 
 30. **Lowering a cap does not retroactively bound what is already live.** `resume_run` is not
     quota-checked, correctly — `PAUSED` is in `LIVE`, so a paused run was already counted and

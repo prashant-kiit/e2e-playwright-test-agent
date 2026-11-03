@@ -364,9 +364,19 @@ refused for the sake of a run nobody ran. 429 rather than the 409 a busy app get
 "your tenant is out of allowance" and "this app already has a live run" have different
 remedies and an operator who cannot tell them apart can act on neither.
 
-`NULL` on either column means **no cap**, not a cap of zero: a tenant nobody has configured
-is unmetered, which is the safe direction while there is still no tenant-admin surface to
-configure one with. The enqueue skips counting entirely for such a tenant.
+`NULL` on either column means **no cap**, not a cap of zero — but a tenant does not *arrive*
+that way. Both columns carry a **server default** (`3` and `500`), kept rather than dropped,
+because there is no `create_tenant` in the application at all: a tenant comes from a migration
+seed or from raw SQL, and a server default is the only thing on both paths. Without it, "bound
+each tenant so one cannot starve the platform" held only for tenants somebody had remembered
+to configure, and nothing remembered. An unmetered plan is still expressible by writing
+`NULL` on purpose, and the enqueue then skips counting entirely for that tenant.
+
+This is a deliberate departure from the rule that a column's server default is dropped in the
+revision that adds it (P2's `tenant_id`, P5-03's `credential_state`). That rule stops a column
+acquiring a value nobody chose; here the default *is* the choice and has to outlive the
+revision, because its job is to apply to rows inserted by code that does not mention these
+columns.
 
 Both caps are the **tenant's**, counted across all of its apps, and the monthly one counts
 runs *started* in the calendar month — a failed run still spent its sandbox, and a quota
@@ -703,8 +713,9 @@ one hook by the caller. Recorded here because the natural way to write P2 is to 
 | 32 | **The delivery seam is bound to one target before it can push.** `for_target(tools, app)` resolves that target's credential *and* marks it invalid if GitHub rejects it, because those are two halves of one decision; an unbound seam fails loud naming the call that was missed. Four paths do not bind — `is_bootstrapped`, the already-bootstrapped arm and the two `--dry-run` arms — because their answers are Postgres and blob-store reads; `plan_reset` binds because it dials out. A rejection reaching us as a git transport failure rather than a REST 401/403 is translated to the same `CredentialError`, so it is one outcome with one status and one sticky state (P5-03) |
 | 33 | **A credential refused at save time is 422; one refused at delivery is 502.** Separate exception classes, because one class for both would read to a customer with a scope typo as a GitHub outage — and the two have different remedies (P5-03) |
 | 34 | **`GITHUB_PAT` is retired, not kept as a fallback, and nothing is migrated into the new columns.** One operator token is not any tenant's credential; sealing it per target would give every customer the same identity under a per-tenant name (P5-03) |
-| 35 | **An enqueue quota breach is a rejection, not a run.** Checked in `repo.start_run` *above* the `AppLock` trio and before any row is written, so a refusal leaves no run and no lock: a `failed` row would report work that never happened and would spend the monthly quota it was just refused for. 429, distinct from the 409 a busy app gets, because the remedies differ. `NULL` on either cap means unmetered, so a tenant nobody has configured is never locked out (P5-04) |
+| 35 | **An enqueue quota breach is a rejection, not a run.** Checked in `repo.start_run` *above* the `AppLock` trio and before any row is written, so a refusal leaves no run and no lock: a `failed` row would report work that never happened and would spend the monthly quota it was just refused for. 429, distinct from the 409 a busy app gets, because the remedies differ (P5-04) |
 | 36 | **A rejection names one cap; the usage panel asks about each.** `quotas.breach` returns the single kind to refuse with, monthly first, because a tenant that is both out of quota and at its concurrency cap must hear the one that is true for longer — telling them to wait cannot help. Both caps can be full at once, so the portal reads two independent predicates rather than deriving its gauges from the rejection (P5-04) |
+| 37 | **A tenant arrives bounded, and unmetered is something a plan asks for.** The caps carry a server default that is deliberately *not* dropped, because no `create_tenant` exists — a tenant comes from a seed or from raw SQL, and only a server default covers both. `NULL` still means no cap; it just has to be written on purpose now. A cap of `0` is lockout, which is how a tenant is suspended (P5-04) |
 
 ---
 

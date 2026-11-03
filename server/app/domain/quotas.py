@@ -25,6 +25,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
+# What a tenant gets when nobody has said otherwise. These are the values the
+# *database* defaults to (see the `tenants` columns and revision `f1a62c90d4e7`),
+# repeated here so application code can name them -- not the source of the
+# default, which has to be server-side: there is no `create_tenant` in this
+# application at all, so a tenant arrives from the migration's seed or from raw
+# SQL, and only a server default is on both paths.
+#
+# Deliberately generous rather than tight. The job of a default cap is to make
+# "unbounded" something a plan has to ask for, not to be the right number for
+# any particular customer -- a default that throttled real work would be routed
+# around, and a cap people route around bounds nothing.
+DEFAULT_MAX_CONCURRENT_RUNS = 3
+DEFAULT_MONTHLY_RUN_QUOTA = 500
+
 
 class QuotaKind(str, Enum):
     """Which limit was reached. The portal renders a different sentence per

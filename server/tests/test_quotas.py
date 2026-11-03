@@ -21,6 +21,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from sqlalchemy import text
 
 from app import repo
 from app.domain import lease, quotas
@@ -310,3 +311,56 @@ def test_a_cap_can_still_be_set_to_unmetered_explicitly(session):
     caps = repo.tenant_caps(session)
     assert caps.max_concurrent_runs == 4
     assert caps.monthly_run_quota is None
+
+
+# --- a tenant nobody configured is still bounded --------------------------
+
+def test_a_tenant_created_without_caps_is_bounded_rather_than_unmetered(session):
+    """The hole P5-04 shipped with, closed.
+
+    "Bound each tenant's usage so one busy or abusive tenant cannot starve the
+    platform" (#35) was only true of a tenant whose caps somebody had set --
+    and nothing set them. There is no `create_tenant` anywhere in the
+    application: a tenant comes from the migration's seed or from raw SQL, so
+    an application-side default could not have covered either. The caps carry a
+    **server** default, which is the only thing both paths go through.
+
+    `NULL` still means unmetered. It is now something a plan has to *ask* for
+    rather than what a tenant gets by forgetting.
+    """
+    session.add(Tenant(id=OTHER, slug="second", name="Second"))
+    session.commit()
+
+    with tenant_scope(OTHER):
+        caps = repo.tenant_caps(session)
+
+    assert caps.max_concurrent_runs == quotas.DEFAULT_MAX_CONCURRENT_RUNS
+    assert caps.monthly_run_quota == quotas.DEFAULT_MONTHLY_RUN_QUOTA
+    assert not caps.unmetered
+
+
+def test_a_tenant_inserted_by_raw_sql_is_bounded_too(session):
+    """The path that actually creates tenants today, and the reason the default
+    is the database's rather than the ORM's: there is still no tenant-admin
+    surface, so every real second tenant so far has been an `INSERT`."""
+    session.execute(
+        text("INSERT INTO tenants (id, slug, name) VALUES (:id, 'sqlmade', 'SQL Made')"),
+        {"id": OTHER},
+    )
+    session.commit()
+
+    with tenant_scope(OTHER):
+        caps = repo.tenant_caps(session)
+
+    assert caps.max_concurrent_runs == quotas.DEFAULT_MAX_CONCURRENT_RUNS
+    assert caps.monthly_run_quota == quotas.DEFAULT_MONTHLY_RUN_QUOTA
+
+
+def test_a_tenant_can_still_be_made_explicitly_unmetered(session):
+    """An unmetered plan is a real product state; it just has to be chosen."""
+    session.add(Tenant(id=OTHER, slug="second", name="Second"))
+    session.commit()
+
+    with tenant_scope(OTHER):
+        repo.set_tenant_caps(session, max_concurrent_runs=None, monthly_run_quota=None)
+        assert repo.tenant_caps(session).unmetered
