@@ -1755,6 +1755,25 @@ documentation, and none of them is fixed.
     the service in process, so `app/internal_api.py` and `app/control/http.py` are covered
     by their own tests and by the container checks in §P5-05 — but no suite run drives the
     HTTP seam through `drive_run`.
+
+    **Closed on 2026-11-04 (#49).** `server/tests/test_pipeline_over_http.py` drives
+    `launcher.drive_run` with an `HttpGateway` over the real router through `TestClient`,
+    and with the `GatewayLogBus` a sandbox actually writes through — so hydrate's blob
+    reads, the step boundary's blob writes and revision commit, the artifact sweep's upload
+    and index, and the log all cross the HTTP seam in one composed run. The assertions are
+    deliberately the ones `tests/test_docker_sandbox.py` makes about a real container: the
+    run row, the step rows, the revisions, the artifacts and the log. No Docker, so it runs
+    in the default suite.
+    Two things it pins that an operation-by-operation test cannot: the last line a run
+    emits (`=== run <key> completed ===`) arrives *after* the final status transition and
+    is asserted to be in the log, which is the `publish_log` exemption observed rather than
+    reasoned about; and the bus's `close` is part of the path, which is where losing the
+    final batch was a real bug.
+    **Still not covered, and named rather than implied**: the container, the image and the
+    network. `TestClient` is every layer of this except the wire, and the Docker-backed
+    tests remain the only thing that proves the rest — which is the honest measure of what
+    is left, since P5-05's record says four real bugs here were found by running a
+    container and none by the suite.
 53. **`test_a_resume_that_changes_nothing_does_not_manufacture_a_version` is flaky, and it
     fails in the liveness gate.** Observed on 2026-11-04: one full-suite run failed it with
     `RunNotLive: run 1 is completed; its token no longer authorizes anything` from
