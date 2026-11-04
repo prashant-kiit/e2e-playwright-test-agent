@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from app import envelope
+from app import config, envelope
 
 PAT = "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -117,7 +117,10 @@ def test_a_kms_failure_is_a_seal_error_rather_than_a_boto_exception():
 # --- which wrapper a deployment gets ------------------------------------
 
 def test_without_a_kms_key_the_local_wrapper_is_built_and_says_so(monkeypatch):
+    """`QA_SECRET_KEY` is set here and must make no difference: this module
+    does not read it any more (follow-up 21, below)."""
     monkeypatch.delenv("QA_KMS_KEY_ID", raising=False)
+    monkeypatch.setenv("QA_ENV", "dev")
     monkeypatch.setenv("QA_SECRET_KEY", "dev-secret")
 
     built = envelope.wrapper_from_env()
@@ -165,3 +168,175 @@ def test_a_kms_failure_does_not_echo_the_data_key():
     # Still diagnosable: it says the wrap failed and what kind of failure it was.
     assert "wrap" in message
     assert "ValueError" in message
+
+
+# --- the key the local wrapper derives from ------------------------------
+#
+# `VERIFICATION-P5.md` follow-up 21: wherever `QA_KMS_KEY_ID` is unset -- every
+# deployment at the time it was written -- `QA_SECRET_KEY` was both the cookie
+# signing secret and the key protecting every stored customer PAT. One
+# variable, two unrelated jobs, one of which is "read every customer's GitHub
+# credential". The envelope was already real; the key was in the wrong place.
+#
+# `QA_ENVELOPE_KEY` is now that key, and this module no longer reads
+# `QA_SECRET_KEY` at all.
+
+
+def test_rotating_the_cookie_secret_no_longer_destroys_a_stored_pat(monkeypatch):
+    """The fix, stated as the behaviour that was broken.
+
+    Follow-up 21's complaint was that rotating `QA_SECRET_KEY` -- a thing an
+    operator does for an unrelated reason, like a leaked session-forging key --
+    silently made every stored PAT undecryptable. A seal taken before the
+    rotation must open after it.
+    """
+    monkeypatch.delenv("QA_KMS_KEY_ID", raising=False)
+    monkeypatch.setenv("QA_ENVELOPE_KEY", "the-envelope-key")
+
+    monkeypatch.setenv("QA_SECRET_KEY", "cookie-secret-before")
+    sealed = envelope.seal(PAT, envelope.wrapper_from_env())
+
+    monkeypatch.setenv("QA_SECRET_KEY", "cookie-secret-after-the-rotation")
+
+    assert envelope.open_sealed(sealed, envelope.wrapper_from_env()) == PAT
+
+
+def test_the_cookie_secret_is_not_the_envelope_key_even_in_development(
+    monkeypatch,
+):
+    """And the dev fallback is a constant of its own, not `QA_SECRET_KEY`.
+
+    This is what actually severs the two jobs. A dev fallback that read
+    `QA_SECRET_KEY` would leave the dev stack in exactly the arrangement
+    follow-up 21 describes, and the fix real only where somebody had set the
+    new variable.
+    """
+    monkeypatch.delenv("QA_KMS_KEY_ID", raising=False)
+    monkeypatch.delenv("QA_ENVELOPE_KEY", raising=False)
+    monkeypatch.setenv("QA_ENV", "dev")
+
+    monkeypatch.setenv("QA_SECRET_KEY", "one-secret")
+    sealed = envelope.seal(PAT, envelope.wrapper_from_env())
+    monkeypatch.setenv("QA_SECRET_KEY", "a-completely-different-secret")
+
+    assert envelope.open_sealed(sealed, envelope.wrapper_from_env()) == PAT
+
+
+def test_a_deployment_with_no_envelope_key_is_refused(monkeypatch):
+    """The startup check. Without this the fix would be decorative: a
+    deployment that set neither variable would quietly fall back to the
+    well-known development constant, which is strictly worse than the
+    arrangement being fixed -- `QA_SECRET_KEY` was at least secret.
+    """
+    monkeypatch.delenv("QA_KMS_KEY_ID", raising=False)
+    monkeypatch.delenv("QA_ENVELOPE_KEY", raising=False)
+    monkeypatch.delenv("QA_ENV", raising=False)  # i.e. a deployment
+
+    with pytest.raises(envelope.CredentialConfigError) as excinfo:
+        envelope.wrapper_from_env()
+
+    assert "QA_ENVELOPE_KEY" in str(excinfo.value)
+    assert "QA_KMS_KEY_ID" in str(excinfo.value)
+
+
+def test_the_two_keys_may_not_be_the_same_value(monkeypatch):
+    """Setting both variables to the same string is follow-up 21 spelled by
+    hand, and it is the likeliest way to "fix" this by copying a line in a
+    deployment config. Refused in development too: it is never what anyone
+    means, and the one place it would be discovered otherwise is an incident.
+    """
+    monkeypatch.delenv("QA_KMS_KEY_ID", raising=False)
+    monkeypatch.setenv("QA_ENV", "dev")
+    monkeypatch.setenv("QA_SECRET_KEY", "the-same-string")
+    monkeypatch.setenv("QA_ENVELOPE_KEY", "the-same-string")
+
+    with pytest.raises(envelope.CredentialConfigError) as excinfo:
+        envelope.wrapper_from_env()
+
+    assert "must not be the same" in str(excinfo.value)
+
+
+def test_a_kms_key_makes_the_envelope_key_irrelevant(monkeypatch):
+    """`QA_KMS_KEY_ID` is still what makes this production, and a deployment
+    that has one needs no local key at all -- the refusal above must not fire
+    for the configuration it is trying to push people towards."""
+    monkeypatch.setenv("QA_KMS_KEY_ID", "arn:aws:kms:eu-west-1:1:key/abc")
+    monkeypatch.delenv("QA_ENVELOPE_KEY", raising=False)
+    monkeypatch.delenv("QA_ENV", raising=False)
+    monkeypatch.setattr(envelope, "kms_client", lambda: StubKms())
+
+    assert isinstance(envelope.wrapper_from_env(), envelope.KmsKeyWrapper)
+
+
+def test_a_deployment_with_an_envelope_key_but_no_kms_still_says_it_is_not_production(
+    monkeypatch,
+):
+    """Allowed, because the local wrapper's existence is a recorded decision
+    (§Decisions) and refusing it would make `QA_KMS_KEY_ID` mandatory -- a
+    bigger change than this fix. But `describe` must keep saying what it is, so
+    the startup log of such a deployment reads as the compromise it is.
+    """
+    monkeypatch.delenv("QA_KMS_KEY_ID", raising=False)
+    monkeypatch.delenv("QA_ENV", raising=False)
+    monkeypatch.setenv("QA_ENVELOPE_KEY", "a-real-but-local-key")
+
+    built = envelope.wrapper_from_env()
+
+    assert isinstance(built, envelope.LocalKeyWrapper)
+    assert "not a production configuration" in built.describe
+
+
+def test_the_envelope_key_may_not_be_the_cookie_secrets_development_default(
+    monkeypatch,
+):
+    """The same-value refusal, in the configuration that actually bypassed it.
+
+    Found by review. `QA_SECRET_KEY` has a development fallback --
+    `config.DEV_SECRET_KEY` -- which really does sign cookies, so with the
+    variable unset and `QA_ENVELOPE_KEY` set to that same string, the two keys
+    *are* identical. The first version of this guard compared `QA_ENVELOPE_KEY`
+    against `os.environ.get("QA_SECRET_KEY", "")` and so compared it to the
+    empty string and allowed it: follow-up 21 reintroduced, in the one
+    configuration three documents call refused.
+
+    The comparison is therefore against the key that is **in effect**, which
+    `config` is the single place to resolve.
+    """
+    monkeypatch.delenv("QA_KMS_KEY_ID", raising=False)
+    monkeypatch.delenv("QA_SECRET_KEY", raising=False)
+    monkeypatch.setenv("QA_ENV", "dev")
+    monkeypatch.setenv("QA_ENVELOPE_KEY", config.DEV_SECRET_KEY)
+
+    with pytest.raises(envelope.CredentialConfigError) as excinfo:
+        envelope.wrapper_from_env()
+
+    assert "QA_SECRET_KEY" in str(excinfo.value)
+
+
+def test_the_envelope_key_may_not_be_the_run_token_key_either(monkeypatch):
+    """`QA_RUN_TOKEN_KEY` signs the token that is a sandbox's whole authority,
+    so sharing it with the PAT-decrypting key is the same smell as sharing the
+    cookie key -- and it was unrefused while only `QA_SECRET_KEY` was checked.
+    """
+    monkeypatch.delenv("QA_KMS_KEY_ID", raising=False)
+    monkeypatch.setenv("QA_ENV", "dev")
+    monkeypatch.setenv("QA_SECRET_KEY", "the-cookie-key")
+    monkeypatch.setenv("QA_RUN_TOKEN_KEY", "the-run-token-key")
+    monkeypatch.setenv("QA_ENVELOPE_KEY", "the-run-token-key")
+
+    with pytest.raises(envelope.CredentialConfigError) as excinfo:
+        envelope.wrapper_from_env()
+
+    assert "QA_RUN_TOKEN_KEY" in str(excinfo.value)
+
+
+def test_the_three_keys_all_differing_is_the_configuration_that_works(monkeypatch):
+    """The other side of both refusals, so they cannot pass by refusing
+    everything."""
+    monkeypatch.delenv("QA_KMS_KEY_ID", raising=False)
+    monkeypatch.setenv("QA_ENV", "dev")
+    monkeypatch.setenv("QA_SECRET_KEY", "cookie")
+    monkeypatch.setenv("QA_RUN_TOKEN_KEY", "run-tokens")
+    monkeypatch.setenv("QA_ENVELOPE_KEY", "envelope")
+
+    assert isinstance(envelope.wrapper_from_env(), envelope.LocalKeyWrapper)

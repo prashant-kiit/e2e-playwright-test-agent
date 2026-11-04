@@ -41,7 +41,6 @@ sandbox that could sign its own tokens could mint one for any run of any tenant.
 
 from __future__ import annotations
 
-import os
 from dataclasses import asdict, dataclass
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
@@ -78,9 +77,9 @@ class RunTokenError(Exception):
 
 
 def _secret() -> str:
-    return os.environ.get("QA_RUN_TOKEN_KEY") or os.environ.get(
-        "QA_SECRET_KEY", "dev-secret-change-me"
-    )
+    """`QA_RUN_TOKEN_KEY`, else the portal's own key. See
+    `config.run_token_key`, which is now the one place that resolves it."""
+    return config.run_token_key()
 
 
 def _serializer() -> URLSafeTimedSerializer:

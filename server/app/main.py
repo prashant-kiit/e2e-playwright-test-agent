@@ -17,18 +17,59 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import models  # noqa: F401  (register ORM tables on Base.metadata)
+from . import (
+    config,
+    models,  # noqa: F401  (register ORM tables on Base.metadata)
+)
 from .api import router
 from .auth_api import auth_router
+from .envelope import verify_credential_config
 from .internal_api import internal_router
 from .reaper import reaper_loop
 from .sandbox.dispatch import destroy_sandbox
+
+logger = logging.getLogger(__name__)
+
+
+def check_credential_config() -> None:
+    """Refuse to start without a credential key, and say which one is in use.
+
+    Named for the refusal, because that is the half that matters: an earlier
+    name said only `log_...`, which hid a function whose first job is to stop
+    the process.
+
+    Two jobs, both of which have to happen before anything is served.
+
+    It **refuses to come up** if no key is configured (`app/envelope.py`
+    raises). `wrapper_from_env` is otherwise called lazily, at the moment a
+    customer saves a PAT or a delivery decrypts one -- so a deployment with
+    neither `QA_KMS_KEY_ID` nor `QA_ENVELOPE_KEY` would start cleanly, serve,
+    and fail that one route, which is an operator reading a 500 instead of a
+    process that would not boot.
+
+    And it says which wrapper was built, so a deployment storing every
+    customer's PAT under a key in its own process does not look identical to
+    one using a KMS. **At `WARNING` when that is what a deployment is doing**,
+    because this process installs no logging configuration -- uvicorn
+    configures its own loggers and the root logger has no handler -- so an
+    `app.*` record below `WARNING` never reaches a terminal. An `INFO` line
+    here was checked against a real uvicorn boot and printed nothing at all.
+    A development stack is *meant* to be on that key, so there it stays `INFO`:
+    a warning on every `make up` is a warning nobody reads when it matters.
+    """
+    wrapper = verify_credential_config()
+    message = "stored credentials are protected by: %s"
+    if wrapper.production or config.is_dev_deployment():
+        logger.info(message, wrapper.describe)
+    else:
+        logger.warning(message, wrapper.describe)
 
 
 def _reaper_enabled() -> bool:
@@ -38,6 +79,9 @@ def _reaper_enabled() -> bool:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # The credential key arrangement, before anything is served.
+    check_credential_config()
+
     # Schema is managed by Alembic (the container entrypoint runs
     # `alembic upgrade head` before uvicorn), in the app and in the tests alike.
     # `reap_sandbox` is passed rather than imported by the reaper: a reaped run

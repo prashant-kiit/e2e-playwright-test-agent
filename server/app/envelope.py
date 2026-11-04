@@ -40,6 +40,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from . import config
+
 # The format version, and the AAD every seal is bound to. Bumping it makes
 # every older ciphertext fail authentication rather than be misread, which is
 # the behaviour to want from a format change on a credential column.
@@ -59,6 +61,18 @@ class SealError(Exception):
     """
 
 
+class CredentialConfigError(Exception):
+    """This deployment is not configured to protect stored credentials.
+
+    Distinct from `SealError`, and deliberately not a subclass of it: a
+    `SealError` means "this one ciphertext is not usable", which an operator
+    answers by re-saving one credential. This means "the key arrangement is
+    wrong", which nobody can answer at runtime -- so it is raised where it can
+    stop a process rather than fail a request, and `verify_credential_config`
+    is called at startup for exactly that reason.
+    """
+
+
 class KeyWrapper(Protocol):
     """Wraps and unwraps a data key. The only thing that holds a long-lived key."""
 
@@ -70,6 +84,18 @@ class KeyWrapper(Protocol):
         """What this wrapper is, for a startup log line. See `wrapper_from_env`."""
         ...
 
+    @property
+    def production(self) -> bool:
+        """Whether this is an arrangement a deployment should be running.
+
+        A flag rather than the caller matching on `describe`'s text or on the
+        class: the startup line's *level* depends on this (see
+        `app/main.py`), and deciding that by searching a human-readable string
+        for "not a production configuration" would make the sentence load
+        bearing.
+        """
+        ...
+
 
 class LocalKeyWrapper:
     """A wrapper whose key is in this process. **Development and tests only.**
@@ -77,9 +103,14 @@ class LocalKeyWrapper:
     It exists because the suite and `make up` must work with no cloud account:
     a format that can only be exercised against real KMS is a format nothing
     tests. The wrapping key is derived with HKDF rather than used raw, so a
-    short or low-entropy `QA_SECRET_KEY` still yields a 32-byte AES key, and so
-    the same secret used for cookie signing does not become the literal
-    encryption key.
+    short or low-entropy `QA_ENVELOPE_KEY` still yields a 32-byte AES key.
+
+    The key it derives from is `QA_ENVELOPE_KEY`, **never `QA_SECRET_KEY`**.
+    HKDF was once described here as what kept the cookie secret from becoming
+    "the literal encryption key", which was true and beside the point: a
+    derivation of a secret is still that secret's secrecy, so rotating the
+    cookie key still destroyed every stored PAT and a leak of it still opened
+    every one. See `wrapper_from_env`.
     """
 
     def __init__(self, secret: bytes | str) -> None:
@@ -94,6 +125,10 @@ class LocalKeyWrapper:
     @property
     def describe(self) -> str:
         return "local (in-process key; not a production configuration)"
+
+    @property
+    def production(self) -> bool:
+        return False
 
     def wrap(self, data_key: bytes) -> bytes:
         nonce = os.urandom(_NONCE_BYTES)
@@ -128,6 +163,10 @@ class KmsKeyWrapper:
     @property
     def describe(self) -> str:
         return f"cloud KMS (key {self._key_id})"
+
+    @property
+    def production(self) -> bool:
+        return True
 
     def wrap(self, data_key: bytes) -> bytes:
         try:
@@ -170,19 +209,87 @@ def kms_client():
     return boto3.client("kms", region_name=os.environ.get("AWS_REGION") or None)
 
 
+# The development fallback, and a constant of its own rather than a read of
+# `QA_SECRET_KEY`. That read was the whole of follow-up 21: one variable doing
+# two unrelated jobs, one of them "decrypt every customer's GitHub credential".
+# Severing them is only real if the fallback is severed too -- a dev default
+# that read the cookie secret would leave the dev stack in the arrangement
+# being fixed. It is well-known on purpose: a deployment must not reach it, and
+# `wrapper_from_env` refuses rather than letting it be reached quietly.
+DEV_ENVELOPE_KEY = "dev-envelope-key-change-me"
+
+
 def wrapper_from_env() -> KeyWrapper:
     """The wrapper this deployment is configured for.
 
-    `QA_KMS_KEY_ID` is what makes it production. Without it the local wrapper is
-    built so the suite and the dev stack work offline -- and `describe` says
-    which one was built, so a deployment that forgot the variable can be seen
-    to have forgotten it rather than silently storing PATs under a key sitting
-    in its own process.
+    `QA_KMS_KEY_ID` is what makes it production, and a deployment that has one
+    needs nothing else here. Without it:
+
+    * `QA_ENVELOPE_KEY` is the local wrapper's key. It is **not**
+      `QA_SECRET_KEY` and this module no longer reads that variable at all, so
+      rotating the key that signs session cookies no longer destroys every
+      stored PAT, and a leak of it no longer opens them.
+    * with neither variable set, a development stack gets `DEV_ENVELOPE_KEY`
+      and **a deployment is refused**. The refusal is the point: the silent
+      fallback is what follow-up 21 was about, and falling back to a constant
+      published in this file would be strictly worse than the arrangement it
+      replaces, since `QA_SECRET_KEY` was at least secret.
+    * the two keys being *equal* is refused everywhere, development included.
+      It is follow-up 21 reintroduced by hand, it is the likeliest way to
+      satisfy this check by copying a line in a deployment config, and the only
+      other place it would be discovered is an incident.
+
+    `describe` still says which wrapper was built, so a deployment running the
+    local one can be seen to be running it.
     """
     key_id = os.environ.get("QA_KMS_KEY_ID", "").strip()
     if key_id:
         return KmsKeyWrapper(key_id)
-    return LocalKeyWrapper(os.environ.get("QA_SECRET_KEY", "dev-secret-change-me"))
+
+    envelope_key = os.environ.get("QA_ENVELOPE_KEY", "").strip()
+    if envelope_key:
+        # Against the keys that are *in effect*, not against the raw variables.
+        # Both of these have development fallbacks that really do sign things,
+        # so `QA_ENVELOPE_KEY=dev-secret-change-me` with `QA_SECRET_KEY` unset
+        # is the two keys being identical however empty the variable looks --
+        # which an earlier version of this guard allowed. `config` is the one
+        # place that resolves them.
+        for name, signing_key in (
+            ("QA_SECRET_KEY", config.secret_key()),
+            ("QA_RUN_TOKEN_KEY", config.run_token_key()),
+        ):
+            if envelope_key == signing_key.strip():
+                raise CredentialConfigError(
+                    f"QA_ENVELOPE_KEY and {name} must not be the same value: "
+                    f"one signs credentials this deployment issues and the "
+                    f"other decrypts every stored customer PAT, so sharing "
+                    f"them means a leak of either is a leak of both"
+                )
+        return LocalKeyWrapper(envelope_key)
+
+    if not config.is_dev_deployment():
+        raise CredentialConfigError(
+            "no key is configured to protect stored customer credentials: set "
+            "QA_KMS_KEY_ID (the production answer) or, for a non-production "
+            "deployment, QA_ENVELOPE_KEY. QA_ENV=dev falls back to a key "
+            "published in app/envelope.py and is not available here"
+        )
+    return LocalKeyWrapper(DEV_ENVELOPE_KEY)
+
+
+def verify_credential_config() -> KeyWrapper:
+    """Build the configured wrapper at startup, and hand it back.
+
+    So that a misconfigured deployment fails when it boots rather than at the
+    first customer who saves a PAT -- by which time the operator is reading a
+    500 from a route instead of a refusal from a process that would not start.
+
+    It returns the wrapper rather than a tuple of two of its fields: the
+    caller wants `describe` and `production`, and unpacking them here made this
+    a function that existed to narrow its own return value. Raises
+    `CredentialConfigError`; the caller is `app/main.py`.
+    """
+    return wrapper_from_env()
 
 
 

@@ -50,12 +50,25 @@ FORBIDDEN = (
     "GITHUB_TOKEN",
     "GH_TOKEN",
     "QA_ADMIN_PASSWORD",
-    # Also the wrapping key for every tenant's sealed PAT (`LocalKeyWrapper`
-    # derives from it), and -- since P5-05 -- what run tokens are signed with. A
-    # sandbox holding it could mint itself a token for any run of any tenant,
-    # which would undo the whole of this phase in one variable.
+    # Since P5-05, what run tokens are signed with. A sandbox holding it could
+    # mint itself a token for any run of any tenant, which would undo the whole
+    # of this phase in one variable.
+    #
+    # It was *also* the wrapping key for every tenant's sealed PAT until the
+    # follow-up 21 fix, which moved that job to `QA_ENVELOPE_KEY` -- so what
+    # this entry guards is now narrower, and there is a second entry below for
+    # the other half. Both are still forbidden, for different reasons.
     "QA_SECRET_KEY",
     "QA_RUN_TOKEN_KEY",
+    # The wrapping key for every tenant's sealed PAT (`envelope.LocalKeyWrapper`
+    # derives from it). A sandbox holds sealed ciphertext it can do nothing
+    # with, which is the property the envelope buys; this key is precisely what
+    # would turn that back into a readable credential. Forbidden in compose for
+    # the same reason as `QA_SECRET_KEY`: a real deployment supplies it through
+    # its own secret mechanism rather than a file in the repository, and a dev
+    # stack needs no value at all (`QA_ENV=dev` falls back to
+    # `envelope.DEV_ENVELOPE_KEY`).
+    "QA_ENVELOPE_KEY",
 )
 
 # The store credentials P5-05 removed. Kept as their own list rather than folded

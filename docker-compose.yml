@@ -107,6 +107,13 @@ services:
       # production configuration -- see that module and README 6.5. A key
       # *identifier* is not a credential; the IAM grant is what authorises it.
       QA_KMS_KEY_ID: "${QA_KMS_KEY_ID:-}"
+      # This stack is a development stack, and says so. `app/config.py`
+      # defaults to "prod" on purpose: that is what makes the session cookies
+      # `Secure` and makes a missing envelope key refuse to boot, so a real
+      # deployment that forgets this variable gets the safe arrangement rather
+      # than the convenient one. The dev stack is the thing that has to opt
+      # out, because it is served over plain HTTP and has no envelope key.
+      QA_ENV: "${QA_ENV:-dev}"
       QA_FAKE_DELAY: "${QA_FAKE_DELAY:-0}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       # The per-run limits (host-overridable, .env.example documents them). The
@@ -122,9 +129,13 @@ services:
       # origin: it is the one address a run can resolve, and app/sandbox/env.py
       # forwards it into every container and keeps it off the egress proxy.
       QA_CONTROL_PLANE_URL: "${QA_CONTROL_PLANE_URL:-http://api:8000}"
-      # `QA_SECRET_KEY` is deliberately **not** here, and that is enforced:
-      # server/tests/test_sandbox_credentials.py asserts no compose service
-      # carries it. It signs the portal's session cookies and, since P5-05, the
+      # `QA_SECRET_KEY` and `QA_ENVELOPE_KEY` are deliberately **not** here,
+      # and that is enforced: server/tests/test_sandbox_credentials.py asserts
+      # no compose service carries either. `QA_SECRET_KEY` signs the portal's
+      # session cookies and, since P5-05, the run-scoped tokens;
+      # `QA_ENVELOPE_KEY` is the key that unwraps every tenant's sealed PAT
+      # where no cloud KMS is configured. They must not be set to the same
+      # value, and the API refuses to start if they are (app/envelope.py). It signs the portal's session cookies and, since P5-05, the
       # run-scoped tokens -- so a dev stack falls back to app/auth.py's
       # `dev-secret-change-me` and a real deployment supplies it through its own
       # secret mechanism rather than through a file in the repository. What

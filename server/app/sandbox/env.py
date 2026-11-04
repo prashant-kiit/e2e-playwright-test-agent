@@ -19,11 +19,15 @@ Never in the sandbox:
                           PAT lives sealed on its target's row, and the sandbox
                           is handed a `TargetConfig`, which has no field for one
     QA_SECRET_KEY         the session-cookie signing key, or any portal
-                          credential -- and, where no cloud KMS is configured,
-                          the key that would unwrap every tenant's sealed PAT.
-                          It is also what run tokens are signed with, so a
-                          sandbox holding it could mint a token for any run of
-                          any tenant
+                          credential. It is also what run tokens are signed
+                          with, so a sandbox holding it could mint a token for
+                          any run of any tenant
+    QA_ENVELOPE_KEY       where no cloud KMS is configured, the key that would
+                          unwrap every tenant's sealed PAT. A sandbox holds
+                          ciphertext it can do nothing with, and this is the one
+                          value that would change that. It used to be
+                          `QA_SECRET_KEY`'s second job; the follow-up 21 fix
+                          split them
     QA_KMS_KEY_ID         the sandbox has no business naming the wrapping key
     a repo mount          or any path into the control plane
     the control plane's own configuration

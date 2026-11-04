@@ -62,13 +62,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import os
 import secrets
 from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, Response
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
+from . import config
 from .domain.roles import UserRole
 from .tenancy import set_current_actor, set_current_tenant
 
@@ -109,7 +109,9 @@ class CurrentUser:
 
 
 def _secret() -> str:
-    return os.environ.get("QA_SECRET_KEY", "dev-secret-change-me")
+    """The signing key, from `config` -- which is the one place that knows what
+    it and its development fallback are. See `config.secret_key`."""
+    return config.secret_key()
 
 
 def _serializer(salt: str) -> URLSafeTimedSerializer:
@@ -209,6 +211,24 @@ def read_refresh(token: str) -> CurrentUser | None:
 # else: a route that set one of these itself could get the path wrong and leave
 # a logout that does not log out, or re-issue the refresh cookie and turn the
 # hard cap into a sliding window by accident.
+#
+# **`Secure` outside development**, from `config.cookies_secure()`. Both
+# cookies carry it, including the renewed access cookie -- a flag set at login
+# but not at refresh would protect only the first fifteen minutes.
+#
+# The two deletes carry it as well, for a smaller reason than an earlier
+# version of this comment claimed. A browser keys cookie *identity* on name,
+# domain and path only, so a delete matches regardless of this flag -- unlike
+# the refresh cookie's `Path`, which really must match and is why
+# `clear_session_cookies` repeats it. `Secure` is on the deletes so the
+# expiring `Set-Cookie` itself does not travel in clear, and so the contract
+# is one rule rather than a rule with an exception somebody has to remember.
+# It is conditional rather than unconditional because a development stack
+# reached over a LAN address or a tunnel has no TLS, and there a `Secure`
+# cookie is a login that silently never persists; `http://localhost` would
+# have been fine either way, since browsers treat it as a secure context.
+# `samesite="lax"` is not a substitute: it bounds which *sites* may cause the
+# cookie to be sent, not which *protocol* carries it.
 
 def set_access_cookie(response: Response, user: CurrentUser) -> None:
     """Issue a fresh access cookie. Login and refresh both end here."""
@@ -217,6 +237,7 @@ def set_access_cookie(response: Response, user: CurrentUser) -> None:
         mint_access(user),
         max_age=ACCESS_MAX_AGE,
         httponly=True,
+        secure=config.cookies_secure(),
         samesite="lax",
         path="/",
     )
@@ -234,6 +255,7 @@ def set_refresh_cookie(response: Response, user: CurrentUser) -> None:
         mint_refresh(user),
         max_age=REFRESH_MAX_AGE,
         httponly=True,
+        secure=config.cookies_secure(),
         samesite="lax",
         path=REFRESH_PATH,
     )
@@ -246,8 +268,9 @@ def clear_session_cookies(response: Response) -> None:
     "/" does not match a cookie scoped to "/auth", and the leftover would let
     the next `/auth/refresh` mint a new session out of a logged-out browser.
     """
-    response.delete_cookie(ACCESS_COOKIE, path="/")
-    response.delete_cookie(REFRESH_COOKIE, path=REFRESH_PATH)
+    secure = config.cookies_secure()
+    response.delete_cookie(ACCESS_COOKIE, path="/", secure=secure)
+    response.delete_cookie(REFRESH_COOKIE, path=REFRESH_PATH, secure=secure)
 
 
 # --- the dependencies ----------------------------------------------------

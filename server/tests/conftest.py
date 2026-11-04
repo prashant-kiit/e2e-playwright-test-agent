@@ -292,3 +292,17 @@ def session_factory(pg_engine):
         yield Session
     finally:
         _truncate_all(pg_engine)
+
+
+# The suite is a development stack, and says so rather than relying on a
+# default. `config.is_dev_deployment()` defaults to "prod" on purpose (see its
+# docstring), which means `Secure` session cookies -- and httpx, correctly,
+# will not store a `Secure` cookie received over `http://testserver`, so every
+# login in this suite would hand back a jar with no session in it.
+#
+# Set at import rather than in an autouse fixture so it also covers module-level
+# code and any TestClient a test builds itself. The tests that assert the
+# deployment branch (`tests/test_auth.py`, `tests/test_deployment_env.py`,
+# `tests/test_envelope.py`) override it with monkeypatch, which is what makes
+# the production behaviour covered rather than merely configured away.
+os.environ.setdefault("QA_ENV", "dev")
