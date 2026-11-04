@@ -12,17 +12,24 @@ fakes, and what was deliberately deferred.
 
 > ## P5 is OPEN. This record is partial.
 >
-> Five of seven tickets are complete **in the tree** and closed on the tracker; two are not
-> started. Tree state and tracker state are two separate facts and the tracker is the source
-> of the second one (`docs/agents/issue-tracker.md`): #31, #32 and #34 are closed
-> `completed` — #34's two-axis review was re-run and acted on (§Follow-ups items 27 and 27b),
-> which is what its close was waiting on. **#35 is closed `completed` too.** **#33 is closed
-> `completed` as well**: its two-axis review ran, found one real authorization gap (blob
-> reads and writes authorized by tenant prefix rather than by a row and a content hash) plus
-> six smaller items, and all of them are fixed in the slice they reviewed — see §"What the
-> two-axis review found". Of the seven tickets, **#37 is now implemented in the tree too** —
-> see §"Verified on 2026-11-04" below — which leaves #30, the parent spec issue, as the one
-> that stays open until the record and the tracker agree.
+> **All six implementable tickets are complete in the tree and closed on the tracker**, and
+> #30, the parent spec issue, is the only one of the seven still open. Tree state and tracker
+> state are two separate facts and the tracker is the source of the second one
+> (`docs/agents/issue-tracker.md`): #31, #32 and #34 are closed `completed` — #34's two-axis
+> review was re-run and acted on (§Follow-ups items 27 and 27b), which is what its close was
+> waiting on. **#35 is closed `completed` too.** **#33 is closed `completed` as well**: its
+> two-axis review ran, found one real authorization gap (blob reads and writes authorized by
+> tenant prefix rather than by a row and a content hash) plus six smaller items, and all of
+> them are fixed in the slice they reviewed — see §"What the two-axis review found". **#37 is
+> closed `completed`** as of 2026-11-04, with a comment carrying its evidence, its accepted
+> gaps and its follow-ups.
+>
+> Two pieces of work in this record are **not** tickets of the seven. The **credential pair**
+> — follow-ups 2 and 21, the missing `Secure` flag and `QA_SECRET_KEY` doubling as the key
+> that decrypts every stored PAT — was the largest hole P5 had left, and it is closed; see
+> §"Verified on 2026-11-04 — follow-ups 2 and 21". And **#39**, the prompt-history read
+> surface #36 deliberately left out, is implemented; see its own §Verified section. Neither
+> changes what #30 is waiting on.
 >
 > | Ticket | State in the tree |
 > |---|---|
@@ -32,7 +39,9 @@ fakes, and what was deliberately deferred.
 > | #35 P5-04 — per-tenant concurrency cap and monthly run quota at enqueue | **Complete, and the first P5 slice seen in a real browser.** The two columns, the typed 429 rejection above the `AppLock` trio, the usage endpoint and the portal gauges. Both breaches driven over HTTP against the live stack, leaving no run row. The three gaps it shipped with were all closed in later passes: an untested portal surface, caps that bounded only a configured tenant (follow-ups 28 and 29), and — found by the browser check itself — `/usage` missing from both proxy lists, which made the panel invisible in the real app while 84 frontend tests passed |
 > | #33 P5-05 — run-scoped internal control-plane API | **Complete, reviewed and closed.** The token, the service, the routes, both gateways, and the whole run path rewired onto them. `DATABASE_URL` and `S3_*` are gone from a sandbox and the stores are off its network. Proven in a **real container** and then **against the real compose stack** — the only slice of P5 whose central claim is checked end to end against the deployed arrangement. Four real bugs, and none of them was found by the suite: three by running a container (a client that verified a token it holds no key for, a liveness gate that ate the end of every log, a flusher raced on close) and the fourth by the review (blob authorization by prefix, so a run could read *or overwrite* a sibling target's revision blobs). All fixed here. **Two gaps accepted and recorded rather than fixed** — `record_cost`'s liveness exemption, and the whole API being sandbox-reachable rather than only `/internal` (§Follow-ups 32–34) |
 > | #36 P5-06 — prompts into Postgres, tenant-overridable and versioned | Implemented (`8b5aec3`). **Not verified in this record** — no §Verified section was written for it, so this record does not vouch for it. It left the "see what changed and when" half of story 24 open deliberately, which is [issue #39](https://github.com/prashant-kiit/e2e-playwright-test-agent/issues/39) |
-> | #37 P5-07 — immutable `audit_log` for every control-plane mutation | **Implemented, and verified only by the suite plus a by-hand migration run.** The table, the trigger, seven recorded mutations, the tenant-scoped read and `GET /audit`. **Never seen against the live stack or a browser, and there is no portal surface for it** — see §"Verified on 2026-11-04". Two of the mutations #37 lists are not recorded because they do not exist: user add/remove has no code path at all |
+> | #37 P5-07 — immutable `audit_log` for every control-plane mutation | **Complete and closed**, and verified by the suite plus a by-hand migration run. The table, the trigger, seven recorded mutations, the tenant-scoped read and `GET /audit`. **Never seen against the live stack or a browser, and there is no portal surface for it** — see §"Verified on 2026-11-04". Two of the mutations #37 lists are not recorded because they do not exist: user add/remove has no code path at all |
+> | #39 — the prompt-history read surface (not one of the seven; #36's deliberate remainder) | **Implemented.** `prompt_store.history` with a `PromptRevision` type and `created_at`, `GET /prompts/{name:path}/history`, and the Prompts panel showing revisions with a line diff. Both proxy lists checked and needing no entry. **Seen only by its suite — no browser**, which is the gap P5-04's lesson is about |
+> | follow-ups 2 and 21 — the credential pair (not a ticket) | **Done.** `Secure` on both cookies outside development, and `QA_ENVELOPE_KEY` separated from `QA_SECRET_KEY` with a boot-time refusal. **Observed against a real `uvicorn` boot in four configurations**, which found a defect the suite could not see (follow-up 43). Still no real KMS and no real browser |
 >
 > **P5-05's claims were checked against a real container and then against the real compose
 > stack**, which is a stronger kind of evidence than the four slices before it had, and the
@@ -875,6 +884,238 @@ most needs to see.
 
 ---
 
+## Verified on 2026-11-04 — follow-ups 2 and 21 (the credential pair)
+
+Not a ticket. Two follow-ups this record already carried, taken together because they compound:
+the missing `Secure` flag (item 2, which this file called "the highest-value item in the list")
+and `QA_SECRET_KEY` doing double duty as the key that decrypts every stored customer PAT
+(item 21). They were the only items on the list where the gap was live in a deployment rather
+than theoretical, and the second is why the first mattered more than it looked: a leak of that
+one variable forged any user's session **and** opened every customer's GitHub credential.
+
+**Suite, run as `make test` runs it** (ruff clean, **1148 backend tests**, **89
+frontend tests** — unchanged, this slice has no frontend — all passing). New coverage: 14 tests
+in the new `tests/test_deployment_env.py`, 4 in `test_auth.py` for the flag, 9 in
+`test_envelope.py` for the key (three of them added by the review below), and one more entry in
+`test_sandbox_credentials.py`'s `FORBIDDEN` list, which is parametrized over several of its
+assertions.
+
+**One signal, defaulting to the safe side.** The repo had no notion of dev versus deployment,
+and both fixes need one: `Secure` has to be off for a dev stack on plain HTTP, and the local
+envelope key has to exist offline. `config.is_dev_deployment()` reads `QA_ENV`, and
+**`QA_ENV` defaults to `prod`** — only the exact string `dev` opts out, so `devv`, `staging`
+and `""` are all deployments. The asymmetry is the fix applied to itself: item 21's complaint
+was a fallback nothing warned about, so here the convenient branch is the one you have to ask
+for by name. `docker-compose.yml` asks for it, and so does `tests/conftest.py` — explicitly,
+because httpx will not store a `Secure` cookie received over `http://testserver` and every
+login in the suite would otherwise hand back an empty jar.
+
+**Follow-up 2.** Both cookies now carry `Secure` outside development: the access cookie, the
+refresh cookie, **the renewed access cookie from `/auth/refresh`**, and **both deletes in
+`clear_session_cookies`**. The renewed cookie is the one a narrower fix
+would have missed: a flag set at login but not at refresh protects only the first fifteen
+minutes of a session. The deletes are a smaller point, and the first draft of this section got
+the reason wrong — a browser keys cookie *identity* on name, domain and path, not on `Secure`,
+so a delete matches either way. They carry it so the expiring `Set-Cookie` does not itself
+travel in clear, and so the contract has no exception to remember. The attribute that genuinely
+must match is the refresh cookie's `Path=/auth`, which `clear_session_cookies` already repeats. Asserted on the
+`Set-Cookie` headers rather than through the client's jar: the jar is what stores a cookie,
+and the flag is an instruction about when to send it.
+
+**Follow-up 21.** `QA_ENVELOPE_KEY` is now the local wrapper's key and **`app/envelope.py` no
+longer reads `QA_SECRET_KEY` at all**. Three refusals go with it, because the separation is
+only real if the fallbacks are:
+
+* a deployment with neither `QA_KMS_KEY_ID` nor `QA_ENVELOPE_KEY` **does not start**. Falling
+  back to a constant published in `envelope.py` would be strictly worse than the arrangement
+  being fixed, since `QA_SECRET_KEY` was at least secret;
+* the two keys set to the *same value* is refused everywhere, development included. It is
+  item 21 reintroduced by hand and the likeliest way to satisfy this check by copying a line
+  in a deployment config, and the only other place it would be discovered is an incident;
+* `QA_ENV=dev` falls back to `DEV_ENVELOPE_KEY`, a constant of its own. A dev fallback that
+  read `QA_SECRET_KEY` would have left the dev stack in exactly the arrangement being fixed
+  and made the whole change real only where somebody had already set the new variable.
+
+The behavioural proof is the one item 21 asked for, stated as the thing that was broken: a
+seal taken with one `QA_SECRET_KEY`, the variable rotated, and the seal still opens.
+
+**`QA_ENVELOPE_KEY` joins `FORBIDDEN`** in `test_sandbox_credentials.py` — the list applied to
+every sandbox environment *and* every compose service. A sandbox holds sealed ciphertext it can
+do nothing with, which is the property the envelope buys, and this key is precisely what would
+turn that back into a readable credential. It is absent from compose for the same reason
+`QA_SECRET_KEY` is: a dev stack needs no value, and a deployment supplies it through its own
+secret mechanism rather than a file in this repository.
+
+**Observed against a real `uvicorn` boot, not inferred from `TestClient`**, because "refuses to
+start" is a claim about a process and the suite asserts it through a lifespan:
+
+```
+no QA_ENV, no QA_ENVELOPE_KEY, no QA_KMS_KEY_ID
+  CredentialConfigError: no key is configured to protect stored customer credentials...
+  ERROR:    Application startup failed. Exiting.          exit 3
+QA_ENVELOPE_KEY set, no KMS
+  stored credentials are protected by: local (in-process key; not a production configuration)
+  INFO:     Application startup complete.
+QA_ENVELOPE_KEY == QA_SECRET_KEY
+  CredentialConfigError: ...must not be the same value    exit 3
+QA_ENV=dev, nothing else
+  INFO:     Application startup complete.                 (no warning)
+```
+
+**And that boot found the one real defect in this slice.** The startup line was written at
+`INFO`, and the API process installs no logging configuration at all — uvicorn configures its
+own loggers and leaves the root logger without a handler, so an `app.*` record below `WARNING`
+is dropped before it reaches a terminal. The line whose entire purpose is that *a deployment
+running the in-process key can be seen to be running it* printed nothing, in exactly the
+deployment it is about, while its test passed: `caplog` installs a handler, so the suite
+structurally could not see this. It is now `WARNING` when a deployment is on the local wrapper
+and `INFO` in development — the honest levels anyway, and `KeyWrapper.production` carries the
+distinction rather than the caller matching on `describe`'s prose. The same oversight applies
+to every other `logger.info` in this process, which is **follow-up 43** and not fixed here.
+
+**So the narrow claim, stated exactly.** What a deployment is now guaranteed to see is the
+*warning*: that this process is storing customer PATs under a key in its own process. A
+deployment on a real KMS logs its line at `INFO` and will therefore see **nothing** until
+follow-up 43 is fixed — so "`describe` says which wrapper was built" is true of the case that
+matters and not yet of the other one. That is the weaker claim and the correct one; the review
+caught this section asserting the stronger.
+
+### What the two-axis review found
+
+Run as `/code-review` against `b8a3971` with the work uncommitted: a Standards axis against the
+repo's conventions plus the Fowler smell baseline, and a Spec axis against follow-ups 2 and 21
+as `b8a3971` stated them. **One real defect, and it was this slice's own central claim.**
+
+**The equal-keys refusal did not refuse the case it was most likely to meet.** The guard
+compared `QA_ENVELOPE_KEY` against `os.environ.get("QA_SECRET_KEY", "")`, while `app/auth.py`
+resolved the same variable with a *real* default, `dev-secret-change-me`. So with
+`QA_SECRET_KEY` unset — every dev stack, and any deployment that forgot it —
+`QA_ENVELOPE_KEY=dev-secret-change-me` meant the two keys were genuinely identical, and the
+guard compared one of them to the empty string and allowed it. That is follow-up 21
+reintroduced, inside its own fix, in the one configuration this record, `envelope.py`'s
+docstring and `.env.example` all said was refused. Reproduced by hand before fixing, because a
+guard that refuses the wrong input is worse than no guard: it is a guard somebody trusts.
+
+The cause was not the comparison but the arrangement behind it. **Three modules each re-derived
+these keys, with two different defaults between them** — `auth.py`, `run_token.py` and the new
+line in `envelope.py` — which is the "one place that knows a thing" rule broken in the most
+expensive place in the tree. `config.secret_key()` and `config.run_token_key()` are now that
+one place, both older readers delegate to them, and the guard compares against the keys that
+are **in effect** rather than against raw variables. The second finding fell out of the same
+move: `QA_ENVELOPE_KEY == QA_RUN_TOKEN_KEY` is the same smell and was unrefused. Both are now
+refused, by name, with three tests — two of which fail on the old code.
+
+**The record was also wrong twice, which matters here because the record is the deliverable.**
+It justified `Secure` on the two cookie *deletes* by saying a delete must match the cookie it
+replaces "on every attribute the browser keys on" — true of `Path`, which is why
+`clear_session_cookies` repeats it, and false of `Secure`, which is not part of cookie
+identity. And it claimed `describe` lets a deployment see which wrapper was built, when a KMS
+deployment logs that at `INFO` and follow-up 43 says this process drops `INFO`. Both now state
+the narrower true thing. The Spec axis also found that this slice owed §Decisions its rows and
+had argued its choices only in prose; six rows are now there.
+
+Smaller Standards items, all applied: `log_credential_config` renamed to
+`check_credential_config` (its first job is to stop the process, and the name hid that),
+`verify_credential_config` returning the wrapper instead of a two-tuple of its own fields, an
+inlined single-caller `config.deployment_env()`, a `promptPath` helper for the encode dance
+`api.js` had three times, `savedAt` renamed `savedLabel` (it returns "shipped default", not a
+time), a dead exported `hasChanges` deleted, and a `docker-compose.yml` comment whose "It" had
+two antecedents.
+
+**What this does not claim.** `Secure` has been asserted on response headers under `TestClient`
+and never against a real browser over real TLS, and the envelope's production path is still
+`StubKms` — no real KMS key has ever wrapped anything. The fix moves the key out of the wrong
+variable; it does not make `QA_KMS_KEY_ID` set anywhere, which remains the thing a real
+deployment must do. There is also **no migration**: changing the local wrapper's key means
+every PAT already sealed under `QA_SECRET_KEY` in a dev database stops decrypting and must be
+re-saved. `decrypt_pat` fails loud (`CredentialError`), so it surfaces as a clear refusal
+rather than as corruption — and it is item 21's own cost, paid once, deliberately, instead of
+indefinitely.
+
+---
+
+## Verified on 2026-11-04 — `#39` (the prompt history read surface)
+
+The change: `prompt_store.history` gains a type and a timestamp, `GET /prompts/{name:path}/history`
+exposes it, and the portal's Prompts panel shows a prompt's revisions with a diff. P5-06 built
+the versioning and the run recording and left the "so that I can **see what changed and when**"
+half of #30's story 24 with no surface at all — the rows were append-only and carried
+`created_at`, `history()` was called by nothing outside the tests, and `ResolvedPrompt` dropped
+the timestamp, so even a caller that wanted one could not get it through the type.
+
+**Suite** (ruff clean, **1157 backend tests**, **102 frontend tests**, all
+passing). New coverage: 5 tests in `test_agent_prompts.py` for the read path, 4 in
+`test_api.py` for the route, 7 in the new `web/src/diff.test.js`, and 6 in `Settings.test.jsx`
+for the panel.
+
+**`PromptRevision`, not a widened `ResolvedPrompt`.** #39 left the choice open and the ticket's
+own reasoning decides it: only one of the two is ever sent to an agent. Widening the first
+would put a timestamp nothing renders on the type the runner consumes, and — the reason that
+matters — would let a historical revision be passed wherever the live prompt is expected, which
+is how a run comes to be given revision 2 of a prompt it recorded as revision 5.
+
+**`created_at` is nullable, and that is the fourth acceptance criterion's trap.** A tenant who
+has never overridden a prompt has **no rows**, so the obvious `history()` answers an empty
+tuple — a page told "no history" about a prompt whose current body it is displaying. It reports
+the shipped default at `SEED_REV` instead, exactly as `current_all` does, **without seeding
+it**: this is a GET's path and a read that wrote would have no transaction of its own to commit
+with, which is the bug `read_prompts` already carries a paragraph about. Those bytes became the
+tenant's at no particular moment, so the timestamp is `None` rather than "now" — a date that
+changed on every page load would be an invented fact in the one surface whose job is to say
+when things changed. The portal renders it as "shipped default".
+
+**An unknown name is a 404**, the answer the `PUT` gives. An empty list would read as "this
+prompt has never been edited", which is a different statement and a wrong one.
+
+**Both proxy lists were checked first, per P5-04's lesson, and need no entry.** `/prompts` is
+already in `docker/nginx.conf` and `web/vite.config.js`, both of which match on the first path
+segment, so the sub-path is forwarded by what is already there. `test_api_proxy_paths.py`
+asserts first segments and stays green on its own terms — which means it would *not* have
+caught a genuinely new prefix here, and the check was done by reading the two configs.
+
+**The diff is forty lines of our own, not a dependency.** "What changed" is a diff question and
+a customer comparing two bodies by eye is doing the work the panel exists to do — but the
+portal has no other use for a diff, so a library would be a build-size and supply-chain cost
+carried for one caller. `web/src/diff.js` is the textbook LCS table over lines; prompt bodies
+are a few dozen lines and it runs on a click. Its own module with its own tests, including the
+two cases that make a line diff wrong in practice: a trailing newline must not read as a
+changed last line (prompt bodies are files and all end with one), and a blank line *inside* a
+body must still be a line, because it is a paragraph break in a prompt.
+
+**The history is fetched when it is opened, not with the page.** Three prompts on screen and
+one request each on load would pull every superseded body of all of them, and a prompt body is
+the largest column in this schema. Revisions are listed newest first although the API answers
+oldest first — "what did I just change" is the question a customer opens this with — while each
+diff still compares against the *previous* revision, so an entry answers "what did this edit
+change". The first revision has nothing before it, so it shows its body rather than a diff.
+
+**A failed fetch is reported, never swallowed.** P5-04's quota panel shipped invisible because
+it degraded to nothing with 84 tests passing; a `.catch` that set empty state here would do the
+same thing to this one.
+
+### What is covered only by the suite
+
+- **No browser.** The panel, the revision list and the diff have been exercised in jsdom
+  alone. That is the gap P5-04's lesson is specifically about, and the two slices in this phase
+  that were checked in a real browser each found something the suite could not see.
+- **The route has been driven by `TestClient` only**, like `GET /audit` before it.
+- **Tenant scoping is inherited, and asserted.** `Prompt` is `TenantOwned`, so the read guard
+  filters the history query; there is a behavioural test that one tenant's revisions are
+  invisible to another, which is #39's third criterion.
+
+### What #39 asked and this does not do
+
+- **No rollback.** "Restore revision 2" is append-only-friendly — it saves revision 2's body as
+  revision 5 — and the ticket named it as the obvious next ask, out of scope unless wanted. The
+  endpoint shape does not make it awkward: it would be a `POST` beside this `GET`.
+- **The actor question was already settled**, by #37 rather than here: a prompt save is a
+  control-plane mutation, so `prompt.save` is an audit row and the actor is not a new column on
+  `prompts`. This surface shows *what* changed and *when*; *who* is a join away in `audit_log`
+  and is deliberately not shown on the page, which would be a second read surface for a second
+  table.
+
+---
+
 ## Decisions recorded during this phase
 
 | Decision | Why |
@@ -883,6 +1124,12 @@ most needs to see.
 | **Login takes a tenant slug** | The direct cost of the above: an email alone no longer names an account. The alternatives considered and rejected were resolving across tenants and demanding a slug only on collision (a login whose required fields change with other tenants' data), and keeping email globally unique (declining the change) |
 | **The slug is globally unique** | A handle that named two tenants would move the ambiguity up one level rather than remove it |
 | **The seeded slug is a constant, not an env knob** | A `QA_SEED_TENANT_SLUG` was written and then removed in review: only the migration read it, so setting it prefilled the login form with a slug no tenant had and made a test fail from ambient environment. The slug is echoed by the form and the tests, so all three must agree |
+| **`QA_ENV` defaults to `prod`, and only the exact string `dev` opts out** | The signal both credential fixes read. A default of `dev` would mean a deployment that forgot the variable got no `Secure` flag and a silent envelope-key fallback — which is follow-up 21's own failure mode, reintroduced by the fix for it. So the convenient branch is the one you ask for by name, `devv` and `staging` are deployments, and the dev stack and the suite each say `QA_ENV=dev` out loud. The cost is a bare `uvicorn` over plain HTTP needing the variable set |
+| **The envelope's development key is a constant published in `app/envelope.py`** | `DEV_ENVELOPE_KEY`, not a read of `QA_SECRET_KEY`. A dev fallback that read the cookie secret would have left the dev stack in exactly the arrangement follow-up 21 describes, and made the separation real only where somebody had already set the new variable. Being well-known is what forces the companion decision: a deployment may not reach it, so one with no key refuses to boot rather than quietly using it |
+| **`QA_ENVELOPE_KEY` may not equal either signing key, in development too** | Setting them to one value is follow-up 21 reintroduced by hand, and the likeliest way to satisfy the boot check by copying a line in a deployment config. Refused for `QA_SECRET_KEY` *and* `QA_RUN_TOKEN_KEY`, and compared against the keys that are **in effect** rather than the raw variables — a review found the first version comparing against a bare `os.environ.get(..., "")`, and therefore allowing the development default, which is a real key that really signs cookies. `config` is now the one place that resolves all three |
+| **A historical prompt revision is its own type** | `PromptRevision`, not a widened `ResolvedPrompt` (#39 left the choice open). Only one of the two is ever sent to an agent, so widening would have put a timestamp nothing renders on the type the runner consumes — and, the reason that decides it, would let a historical revision be passed where the live prompt is expected, which is how a run comes to be given revision 2 of a prompt it recorded as revision 5 |
+| **A prompt with no overrides has a history of one, not of none** | The shipped default at `SEED_REV`, reported and **not seeded**, with `created_at` as `None`. An empty history reads as "never edited" about a prompt whose body the page is displaying; a seeded row would make a GET a write with no transaction to commit it; and a timestamp of "now" would change on every page load, in the one surface whose job is to say when things changed |
+| **The line diff is ours, not a dependency** | Forty lines of LCS in `web/src/diff.js`. "What changed" is a diff question, but the portal has no other use for one, so a library would be a build-size and supply-chain cost carried for a single caller — the same reasoning as hashing with PBKDF2 from the standard library rather than adding passlib |
 | **The refresh token is stateless — no token table** | Chosen over a DB-backed rotating design. It keeps "a portal speed bump, not a revocation system" true and adds no migration. The cost is item 1 of §Follow-ups, and it is what forces the access cookie to be short |
 | **Refreshing does not re-issue the refresh cookie** | 30 days from *login* is a hard cap. A sliding window on a token nothing can revoke is a session that never ends |
 | **Distinct signing salts for the two tokens** | Without it the split is decorative: presenting the 30-day refresh token as a session cookie would restore the old week-long behaviour, worse |
@@ -980,10 +1227,12 @@ hygiene.
    token table is marked in `app/auth.py`. **Revisit if P5 ever needs to kick out a user, or
    alongside #37's audit log** — an audit trail of actions nobody can interrupt is half a
    control.
-2. **Neither cookie sets `Secure`.** Pre-existing (P5-01 set none either), but it now guards
-   a 30-day credential rather than a week-long one, and `samesite="lax"` does not substitute.
-   Needs an env-conditional flag so dev over plain HTTP still works. **This is the highest-value
-   item in the list.**
+2. ~~**Neither cookie sets `Secure`.**~~ **Done**, with item 21, in the credential-pair pass
+   above. Both cookies carry it outside development, including the renewed access cookie and
+   both deletes in `clear_session_cookies` — the two a narrower fix would have missed. The
+   env-conditional flag this asked for is `config.cookies_secure()`, reading a `QA_ENV` that
+   **defaults to `prod`**, so a deployment that forgets the variable gets the flag rather than
+   going without it. Still never seen against a real browser over real TLS.
 3. **Artifacts bypass the refresh entirely.** `/artifacts/:id/content` is rendered straight
    into `<img src>` and `<a href>` (`RunDetail.jsx`), and the route is auth-gated
    (`router = APIRouter(dependencies=[AuthDep])`). The browser fetches those itself, so
@@ -1040,7 +1289,17 @@ hygiene.
 
 ### Introduced by the per-tenant PATs
 
-21. **Rotating `QA_SECRET_KEY` destroys every stored PAT**, wherever `QA_KMS_KEY_ID` is unset
+21. ~~**Rotating `QA_SECRET_KEY` destroys every stored PAT**~~ — **done**, in the
+    credential-pair pass above. `QA_ENVELOPE_KEY` is now the local wrapper's key and
+    `app/envelope.py` does not read `QA_SECRET_KEY` at all, so rotating the cookie secret costs
+    sessions and nothing else, and a leak of it no longer opens every customer's credential. A
+    deployment with neither key refuses to boot; the two keys set to the same value are refused
+    everywhere. The cost, paid once and deliberately: a PAT already sealed under
+    `QA_SECRET_KEY` in a dev database must be re-saved, which `decrypt_pat` reports as a loud
+    `CredentialError`. **Setting `QA_KMS_KEY_ID` is still the production answer** and still
+    unset everywhere. The original text follows.
+
+    **Rotating `QA_SECRET_KEY` destroys every stored PAT**, wherever `QA_KMS_KEY_ID` is unset
     — which is every deployment today, including the dev stack. The local wrapper derives its
     wrapping key from that secret, so the key that signs session cookies is also the key that
     protects credentials, and item 1 already says a leak of it forges any user's session.
@@ -1322,7 +1581,11 @@ hygiene.
     #31's comment says in as many words that closing it does **not** upgrade this record's
     refusal to vouch for it — the tracker had simply fallen behind the tree, and that is
     what the close fixes. #34 is closed too, its review having been re-run (items 27 and 27b).
-    Still open: #30 (the parent spec), #33 and #35–#37, all `ready-for-agent`.
+    **Now effectively done:** #33, #35 and #36 are closed, and #37 was closed in this pass with
+    a comment carrying its evidence, its two accepted gaps and its remaining follow-ups.
+    **Still open: #30 (the parent spec) alone**, plus #39 while its slice above is in review.
+    So the tracker and the tree finally agree, and what keeps P5 open is the parent and the
+    verification gaps below rather than a ticket nobody closed.
 14. **The README still says P4's closeout is pending**, in two places — the P4 paragraph
     near the top and the phase list near the bottom both call the real agent run outstanding
     and say "P4 is implemented and not closed". `VERIFICATION-P4.md`'s own banner records
@@ -1373,6 +1636,46 @@ hygiene.
     effect of writing an audit row. Constrained by convention and a docstring rather than by
     the code. A separate session would fix it and would cost the row its ability to see the
     mutation's own state; not worth it until something needs it.
+
+### Introduced by the credential pair
+
+43. **This process logs nothing below `WARNING`, and nothing noticed until now.** The API
+    installs no logging configuration: uvicorn configures its own loggers and leaves the root
+    logger without a handler, so every `app.*` `logger.info` in the API process — in
+    `reaper.py`, `launcher.py`, `sandbox/dispatch.py`, `orchestrator/bus.py` and now
+    `main.py` — is dropped before it reaches a terminal. The startup line was written at
+    `INFO` and printed nothing at all against a real `uvicorn` boot, which is how this was
+    found; that one line is now `WARNING` where it matters, and **the general problem is
+    untouched**. It is the sibling of the `fileConfig` bug P5-03's review found (`alembic/env.py`
+    disabling every `app.*` logger): both fail *open*, so no log assertion anywhere in this
+    suite means what a reader would assume it means. The fix is a `dictConfig` at startup or
+    a `--log-config` on the container's uvicorn, and it wants doing before anyone debugs a
+    production run by its logs.
+
+44. **A `QA_ENV` typo is silent in the other direction now.** `QA_ENV=prod` is correct and
+    `QA_ENV=prdo` behaves identically, which is the safe direction and therefore invisible: a
+    deployment that meant to say `dev` and misspelled it gets `Secure` cookies and a boot
+    refusal, which it will notice, and one that misspelled `prod` gets the right behaviour by
+    accident. Worth knowing before a third value is ever added, at which point the variable
+    should be validated against a known set rather than compared to one string.
+
+### Introduced by the prompt history surface
+
+45. **`history` reads every revision in full, and there is no paging.** One query, one row per
+    revision, each carrying a whole prompt body — the largest column in this schema. It is
+    bounded by how often a customer edits one prompt, so it is fine today and would not be for
+    a tenant who has tuned one prompt two hundred times. The route takes no `limit`, which is
+    the same shape `GET /audit` has and the same note item 36 makes about it; the fix, when
+    something needs it, is to answer the bodies for a page of revs rather than all of them.
+46. **The panel has only ever been seen by jsdom.** `web/src/diff.test.js` and
+    `Settings.test.jsx` cover the diff and the list, and nothing has opened this in a browser.
+    Both P5 slices that *were* checked in a real browser found something the suite could not
+    see, one of them the `/usage` proxy omission that made a whole panel invisible. The
+    proxy lists were checked by reading them here, which closes that specific hole and not
+    the class.
+47. **No rollback, by decision.** "Restore revision 2" saves revision 2's body as revision 5,
+    which is append-only-friendly, and #39 named it as the obvious next ask once history is
+    visible. Deliberately out of scope; the `GET` does not make a sibling `POST` awkward.
 
 ---
 
@@ -1428,6 +1731,25 @@ next to a secret that also decrypts customer credentials (follow-up 21). The env
 real; the key is in the wrong place until that variable is set.
 
 **P5 is open.** Six of seven tickets are implemented in the tree (#31–#37 less #30's parent
-role); #37's slice is the one below. What keeps the phase open is not missing code: it is that
-#36 has no verification section, #37 has been seen only by the suite, and the follow-up list
-below has grown rather than shrunk.
+role), all six are now closed on the tracker, and #39 — a read surface #36 deliberately left
+out — is in with them. What keeps the phase open is not missing code: it is that **#36 still
+has no verification section**, that #37 and #39 have been seen only by their suites, and that
+the follow-up list below has grown rather than shrunk.
+
+Two things changed in the closing paragraph above rather than in the list. The largest hole
+this phase left was **not in the code** — `QA_SECRET_KEY` protecting every stored PAT as well
+as every session cookie — and that one is now closed: the key moved to `QA_ENVELOPE_KEY`, a
+deployment with no key refuses to boot, and follow-up 2's missing `Secure` flag went with it,
+because the two compounded. The envelope was always real; the key is no longer in the wrong
+place. **`QA_KMS_KEY_ID` is still unset everywhere**, and that is still the production answer.
+
+The lesson of this pass is the same one P5-02, P5-03 and P5-05 each recorded in their own
+terms, and it arrived again from a direction nobody was watching. The suite proved the startup
+check refused a misconfigured deployment and that it logged which key arrangement it had built.
+Booting the thing under a real `uvicorn` showed the log line printed **nothing at all**: this
+process installs no logging configuration, so an `app.*` record below `WARNING` never reaches
+a terminal, and `caplog` installs a handler, which is why the test passed. A line whose entire
+purpose was "a deployment running the in-process key can be seen to be running it" was
+invisible in precisely that deployment. That is follow-up 43, it is the sibling of the
+`fileConfig` bug P5-03's review found, and it is the fourth time in this phase that **running
+the real thing found what the suite structurally could not**.
