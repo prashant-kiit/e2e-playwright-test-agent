@@ -41,6 +41,7 @@ failing a run that can still finish.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import logging
 import os
@@ -93,8 +94,7 @@ def save(
             # archive is one artifact written deliberately rather than twice by
             # accident.
             path = Path(tmp) / ARCHIVE_NAME
-            with tarfile.open(path, "w:gz") as tar:
-                tar.add(source, arcname=".")
+            _write_archive(source, path)
             digest = _sha256(path)
             store.put_file(key, path, "application/gzip")
         control.index_artifact(
@@ -148,6 +148,29 @@ def restore(
         return False
     emit("=== session: restored; the agent remembers what it explored ===")
     return True
+
+
+def _write_archive(source: Path, path: Path) -> None:
+    """Tar `source` into `path` as gzip, with a **fixed** gzip header.
+
+    `tarfile.open(path, "w:gz")` writes the current time into the gzip
+    header's MTIME field, which made the archive's digest a function of the
+    clock rather than of the session. `index_artifact` versions on that
+    digest, so an untouched session directory bumped its version once per
+    wall-clock second -- the whole of #50, and the reason
+    `test_a_resume_that_changes_nothing_does_not_manufacture_a_version`
+    passed inside one second and failed across a tick.
+
+    `mtime=0` and an empty `filename` are the two header fields that are not
+    content. The tar members keep their own mtimes: a restored session's
+    files should carry the times the agent left them with, and nothing in the
+    archive path rewrites a file it did not change, so they are stable across
+    a resume.
+    """
+    with path.open("wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+            with tarfile.open(fileobj=gz, mode="w") as tar:
+                tar.add(source, arcname=".")
 
 
 def _sha256(path: Path) -> str:

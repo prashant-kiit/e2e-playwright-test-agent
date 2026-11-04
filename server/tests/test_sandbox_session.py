@@ -30,7 +30,9 @@ the moment its run becomes terminal and a terminal run cannot be resumed anyway.
 
 from __future__ import annotations
 
+import logging
 import tarfile
+import time
 
 import pytest
 
@@ -86,6 +88,25 @@ def _drive(session_factory, run_id, store, runner=None, bus=None):
         bus=bus,
     )
     return bus.read_from(run_id, 0)[0]
+
+
+def _resume_from_pause(session_factory, run_id):
+    """Resume a run, having first insisted it actually paused.
+
+    Every resume in this file goes through here, because the alternative --
+    `repo.resume_run` straight after a drive -- cannot tell a pause that was
+    honoured from one that was not. When it is not, the run drove on to
+    COMPLETED and the resume, the second drive and the assertion are all
+    measuring a run that never stopped; the failure then surfaces several
+    calls later in the token's liveness gate, blaming the authorization check
+    (#50). Asserting here makes a missed pause fail at the pause and name
+    itself.
+    """
+    with session_factory() as s:
+        assert repo.get_run(s, run_id).status is RunStatus.PAUSED, (
+            "the pause requested at the step boundary was not honoured"
+        )
+        repo.resume_run(s, run_id)
 
 
 def _session_artifacts(session_factory, run_id):
@@ -173,8 +194,7 @@ def test_the_archive_is_rewritten_rather_than_duplicated_on_resume(
     assert len(paused) == 1, "the interrupted attempt left one archive"
     before = paused[0].version
 
-    with session_factory() as s:
-        repo.resume_run(s, run_id)
+    _resume_from_pause(session_factory, run_id)
 
     class ExploresFurther(FakeRunner):
         """Writes into the session store, as the CLI does while it works."""
@@ -204,8 +224,7 @@ def test_a_resume_that_changes_nothing_does_not_manufacture_a_version(
     _drive(session_factory, run_id, store, _PausesAfter(Step.PLAN, session_factory))
     before = _session_artifacts(session_factory, run_id)[0].version
 
-    with session_factory() as s:
-        repo.resume_run(s, run_id)
+    _resume_from_pause(session_factory, run_id)
     _drive(session_factory, run_id, store)  # the plain fake writes no session state
 
     artifacts = _session_artifacts(session_factory, run_id)
@@ -269,9 +288,7 @@ def test_a_resumed_run_gets_its_session_back_before_the_first_step(
 ):
     run_id, _run_key, _target_id, store = run_env
     _drive(session_factory, run_id, store, _PausesAfter(Step.PLAN, session_factory))
-    with session_factory() as s:
-        assert repo.get_run(s, run_id).status is RunStatus.PAUSED
-        repo.resume_run(s, run_id)
+    _resume_from_pause(session_factory, run_id)
     # The next container starts with an empty session directory, as a fresh
     # container does.
     (config_dir / "projects" / "qa" / "session.json").unlink()
@@ -292,8 +309,7 @@ def test_a_resume_whose_restore_fails_still_completes_and_says_so(
 ):
     run_id, _run_key, _target_id, store = run_env
     _drive(session_factory, run_id, store, _PausesAfter(Step.PLAN, session_factory))
-    with session_factory() as s:
-        repo.resume_run(s, run_id)
+    _resume_from_pause(session_factory, run_id)
     # The archive is gone from the store: a lost blob, a pruned bucket.
     for key in [k for k in store.objects if k.endswith(agent_session.ARCHIVE_NAME)]:
         del store.objects[key]
@@ -313,8 +329,8 @@ def test_a_failed_restore_stops_the_cli_being_told_to_resume_a_lost_session(
     continuing without continuity means continuing without the flag."""
     run_id, _run_key, _target_id, store = run_env
     _drive(session_factory, run_id, store, _PausesAfter(Step.PLAN, session_factory))
+    _resume_from_pause(session_factory, run_id)
     with session_factory() as s:
-        repo.resume_run(s, run_id)
         assert repo.get_run(s, run_id).claude_session_id is not None
     for key in [k for k in store.objects if k.endswith(agent_session.ARCHIVE_NAME)]:
         del store.objects[key]
@@ -340,3 +356,82 @@ def test_a_first_run_restores_nothing_and_says_nothing(
     lines = _drive(session_factory, run_id, store)
 
     assert not any("session continuity" in line for line in lines)
+
+
+# --- versioned on content, and content is not the clock ------------------
+
+def test_an_unchanged_session_archives_to_the_same_bytes_a_second_later(
+    run_env, session_factory, config_dir
+):
+    """The premise the whole versioning rule rests on, asserted directly.
+
+    `index_artifact` bumps a version when the digest changes, so "identical
+    bytes are not a new version" is only true if identical *contents* produce
+    identical bytes. They did not: `tarfile.open(path, "w:gz")` writes the
+    current time into the gzip header, so the digest of an untouched session
+    directory changed once per wall-clock second. Two saves inside one second
+    agreed and two either side of a tick did not, which is exactly the shape of
+    a test that passes in isolation and fails in a full suite (#50).
+
+    A second of real time, because that is the granularity of the field that
+    was wrong -- a faked clock here would assert the fix against the mechanism
+    it replaced rather than against the behaviour.
+    """
+    run_id, run_key, _target_id, store = run_env
+    control = control_for(run_id, session_factory, store)
+    key = agent_session.archive_key(run_key)
+
+    control.begin_run()
+    agent_session.save(control, run_key, store, emit=lambda line: None)
+    first = store.objects[key][0]
+    time.sleep(1.1)
+    agent_session.save(control, run_key, store, emit=lambda line: None)
+
+    assert store.objects[key][0] == first, (
+        "an untouched session directory archives to the same bytes"
+    )
+    assert _session_artifacts(session_factory, run_id)[0].version == 1
+
+
+def test_a_changed_session_still_archives_to_different_bytes(
+    run_env, session_factory, config_dir
+):
+    """The other direction, so the fix cannot be "make every archive equal":
+    a session the agent wrote into is a new version."""
+    run_id, run_key, _target_id, store = run_env
+    control = control_for(run_id, session_factory, store)
+    key = agent_session.archive_key(run_key)
+
+    control.begin_run()
+    agent_session.save(control, run_key, store, emit=lambda line: None)
+    first = store.objects[key][0]
+    (config_dir / "projects" / "qa" / "explored.json").write_text('{"more": 1}')
+    agent_session.save(control, run_key, store, emit=lambda line: None)
+
+    assert store.objects[key][0] != first
+    assert _session_artifacts(session_factory, run_id)[0].version == 2
+
+
+def test_a_run_that_ends_normally_logs_no_failure_about_its_session(
+    run_env, session_factory, config_dir, caplog
+):
+    """`_persist_session` skips a run that is no longer live, and says it
+    checks "rather than attempted-and-swallowed so that a run ending normally
+    does not log a failure every time". It did both: the check itself went
+    through `control.run_state()`, which is behind the token's liveness gate,
+    so on every successful run the guard raised `RunNotLive` and was caught by
+    the `except` it was written to avoid -- a WARNING with a traceback on the
+    way out of every run that worked.
+
+    `run_status` is the read that is deliberately exempt from the gate for
+    exactly this reason (app/control/service.py names it first), so the guard
+    asks it instead.
+    """
+    run_id, _run_key, _target_id, store = run_env
+
+    with caplog.at_level(logging.WARNING, logger="app.launcher"):
+        _drive(session_factory, run_id, store)
+
+    with session_factory() as s:
+        assert repo.get_run(s, run_id).status is RunStatus.COMPLETED
+    assert [r.getMessage() for r in caplog.records if "persist" in r.getMessage()] == []

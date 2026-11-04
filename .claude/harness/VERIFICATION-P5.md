@@ -1738,6 +1738,42 @@ documentation, and none of them is fixed.
     status, and that this flake was found by a full-suite run rather than by the targeted
     run — the test passes in isolation every time.
 
+    **Answered and closed on 2026-11-04 (#50).** The diagnosis above is wrong in its
+    conclusion and right about the symptom: the pause is honoured, every time. Routing all
+    five of the file's resumes through a helper that asserts `PAUSED` first — the one-line
+    piece of work this item asked for — the assertion has never fired, in the targeted run
+    or the full suite.
+
+    The real cause is that **the session archive was not versioned on its content**.
+    `agent_session.save` built the archive with `tarfile.open(path, "w:gz")`, and that
+    writes the *current time* into the gzip header's MTIME field. The digest it then hands
+    `index_artifact` is therefore a function of the clock at one-second granularity: two
+    saves inside the same second produce identical bytes and two either side of a tick do
+    not. So `assert artifacts[0].version == before` fails exactly when the run's last two
+    archives straddle a second boundary — reproducible here on the targeted run, which is
+    why "passes in isolation every time" stopped being true as soon as the machine was a
+    little slower. The fix writes the gzip header with `mtime=0` and an empty filename, the
+    only two fields in it that are not content; the tar members keep their own mtimes, so a
+    restored session's files still carry the times the agent left them with.
+
+    `RunNotLive` was a red herring, and chasing it found a second real defect.
+    `launcher._persist_session` skips a run that is no longer live, and its docstring says
+    it checks "rather than attempted-and-swallowed so that a run ending normally does not
+    log a failure every time". It did both: the check went through `control.run_state()`,
+    which is *behind* the liveness gate, so the guard raised `RunNotLive` for precisely the
+    runs it exists to skip and was caught by the `except` it was written to avoid. Every
+    successful run logged a WARNING with that traceback — which is what appears in this
+    item's captured output, and what the report read as the failure. It now asks
+    `control.run_status()`, the first of the four operations the service exempts from the
+    gate, for the reason the service gives: a read of one field, made after the run ended.
+
+    Lesson, and it is item 53's own: **a digest is only a version if it is a digest of the
+    content.** The test said "identical bytes are not a new version" and the bytes were
+    never identical; nothing in the suite asserted the premise, so the rule was tested
+    against an archive format that quietly disagreed with it. There is now a test that
+    saves an unchanged session directory twice a real second apart and asserts the bytes
+    match, and its mirror asserting that a session written into *does* bump the version.
+
 ---
 
 ## Closing

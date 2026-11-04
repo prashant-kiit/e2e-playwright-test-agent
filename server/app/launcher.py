@@ -49,7 +49,7 @@ from .artifacts import ArtifactCollector
 from .control import factory
 from .control.gateway import GatewayStorage, RunGateway
 from .control.model import TrackedBlob
-from .domain.status import is_live
+from .domain.status import RunStatus, is_live
 from .domain.steps import Step
 from .orchestrator.bus import LogBus, bus_from_env
 from .orchestrator.claude import ClaudeRunner
@@ -347,9 +347,17 @@ def _persist_session(control: RunGateway, run_key: str, emit: Emit) -> None:
     each step boundary and the one on the way out of a pause, and a paused run is
     live. Checked rather than attempted-and-swallowed so that a run ending
     normally does not log a failure every time.
+
+    **Through `run_status`, which is exempt from the token's liveness gate.**
+    The obvious read, `run_state()`, is not: it goes through `authorized_run`
+    and raises `RunNotLive` for exactly the runs this guard exists to skip, so
+    the guard against logging a failure logged one -- with a traceback -- on
+    the way out of every run that succeeded. `run_status` is the first of the
+    four operations app/control/service.py exempts, and the reason it gives is
+    this one: a read of one field, made after the run has ended.
     """
     try:
-        if not is_live(control.run_state().status):
+        if not is_live(RunStatus(control.run_status())):
             return
         agent_session.save(control, run_key, GatewayStorage(control), emit=emit)
     except Exception:  # pragma: no cover - never lose a run over its session
