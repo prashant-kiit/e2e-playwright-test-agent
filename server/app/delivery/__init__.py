@@ -51,6 +51,10 @@ _EXPORTS: dict[str, str] = {
     "CredentialRejected": "errors",
     "DeliveryError": "errors",
     "GitError": "errors",
+    # The message sanitiser. Safe to re-export -- unlike `decrypt_pat`, which
+    # is deliberately absent from this table (a name here is a string anything
+    # in a sandbox could `getattr`), `redact` only ever removes a credential.
+    "redact": "errors",
     "Git": "git",
     "GitHubClient": "github",
     "PullRequest": "github",

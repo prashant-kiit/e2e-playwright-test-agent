@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from . import (
     apphub,
+    audit,
     authoring,
     delivery,
     envelope,
@@ -39,12 +40,14 @@ from .auth import AdminDep, AuthDep
 from .db import SessionLocal, get_session
 from .delivery import credentials as pats
 from .domain import quotas
+from .domain.credentials import CredentialState
 from .domain.status import RunStatus, is_live, is_terminal
 from .models import Artifact
 from .orchestrator.bus import LogBus, bus_from_env
 from .sandbox import dispatch, egress
 from .schemas import (
     ArtifactOut,
+    AuditEntryOut,
     CredentialOut,
     DeliverBody,
     DeliveryOut,
@@ -221,7 +224,7 @@ def save_prompt(
     sent -- which is a worse outcome than being told the name is wrong.
     """
     try:
-        return apphub.save_prompt(session, name, body.content)
+        saved = apphub.save_prompt(session, name, body.content)
     except prompt_store.PromptNotFound as exc:
         raise HTTPException(status_code=404, detail=f"no such prompt: {name}") from exc
     except IntegrityError as exc:
@@ -233,6 +236,68 @@ def save_prompt(
             status_code=409,
             detail="another save recorded a revision first; reload and try again",
         ) from exc
+
+    # Not one of the mutations #37 enumerates, and audited deliberately: #39
+    # asks where a prompt revision's *actor* lives, since `prompts` records
+    # when a revision was saved but not by whom. It lives here, so the two
+    # tickets are one answer rather than two halves. The revision, not the
+    # body: the body is already in `prompts` at that rev, and copying it would
+    # put an unbounded blob in a table nothing prunes.
+    audit.record(
+        session,
+        action=audit.Action.PROMPT_SAVE,
+        target=audit.prompt_ref(name),
+        after={"rev": saved["rev"]},
+    )
+    return saved
+
+
+# --- the audit trail (P5-07) ---------------------------------------------
+
+# How much program output an audit row will carry. Bounded because `audit_log`
+# is the one table nothing may prune, so an unbounded field on it is unbounded
+# growth that cannot be reclaimed.
+_AUDIT_TEXT_LIMIT = 2000
+
+
+def _audit_text(text: str) -> str:
+    """Make program output safe to store in the trail: redacted, then bounded.
+
+    `infra.sync` is the only audited action whose payload is built from a
+    subprocess and an exception rather than from values we chose, and a failing
+    git push echoes the argv that failed -- which carries the PAT. `redact` is
+    the same choke point `app/delivery/credentials.py` puts in front of every
+    message bound for a human (DESIGN.md §8); this table deserves it more than
+    a log line does, because nothing here can be deleted afterwards.
+    """
+    cleaned = delivery.redact(text or "")
+    if len(cleaned) <= _AUDIT_TEXT_LIMIT:
+        return cleaned
+    return cleaned[:_AUDIT_TEXT_LIMIT] + "… (truncated)"
+
+@router.get("/audit", response_model=list[AuditEntryOut], dependencies=[AdminDep])
+def list_audit_entries(
+    limit: int = Query(default=200, ge=1, le=1000),
+    session: Session = Depends(get_session),
+):
+    """This tenant's control-plane mutations, most recent first.
+
+    **Tenant-admin only.** Every surface that writes these rows is already
+    admin-gated, and the trail collects them: who approved which delivery into
+    the customer's repo, who rotated which credential. That is an admin's view
+    of their own organisation rather than something every member reads.
+
+    Scoped to the caller's tenant by `tenancy.install_read_guard`, like every
+    other read -- there is no `.where(tenant_id == ...)` here because a filter
+    a route remembers is a filter a route can forget (P5-02, #32).
+
+    `limit` is a plain cap rather than a cursor, and is itself bounded: the
+    trail is append-only and read newest-first, so "the last 200 things that
+    happened" is the question the page asks, while an unbounded `limit` would
+    let one request ask for a table that only ever grows. Paginating back
+    through it is a different feature and no portal surface asks for it yet.
+    """
+    return audit.entries(session, limit=limit)
 
 
 @router.get("/settings")
@@ -298,10 +363,23 @@ def create_target(
             status_code=409, detail=f"a target named {body.app!r} already exists"
         ) from exc
 
+    bootstrap = run_sync(target.app) if body.sync_infra else None
+    if bootstrap is not None:
+        # An audited mutation even though the route it rides on is a create:
+        # the create writes our database, the sync writes the *customer's*
+        # repo. Recorded whether or not it succeeded, with the outcome in the
+        # row -- a failed push is something an operator may well be asked
+        # about later, and it is not what the create's own 201 reports.
+        audit.record(
+            session,
+            action=audit.Action.INFRA_SYNC,
+            target=audit.target_ref(target.app),
+            after={"ok": bootstrap.ok, "output": _audit_text(bootstrap.output)},
+        )
     return TargetCreatedOut(
         target=target,
         revision=_revision_out(revision, revisions.count_files(session, revision.id)),
-        bootstrap=run_sync(target.app) if body.sync_infra else None,
+        bootstrap=bootstrap,
     )
 
 
@@ -492,6 +570,16 @@ def target_delivery_state(
 # *Reading* the state is not, because a member has to be able to see why
 # delivery is refused.
 
+def _credential_audit_state(state) -> dict:
+    """A credential's state as an audit payload. **Never the token.**
+
+    Named once because both PAT routes build it, on both sides of their
+    mutation, and the one thing that must stay true of all four is that it
+    carries the *state* and nothing else (app/audit.py).
+    """
+    return {"credential_state": CredentialState(state).value}
+
+
 def _credential_out(target, status, *, login: str | None = None) -> CredentialOut:
     return CredentialOut(
         app=target.app,
@@ -540,12 +628,31 @@ def save_target_pat(
     rotation leaves the working credential in place rather than a broken one.
     """
     target = _target_or_404(session, target_id)
+    # Read before the write: `before` is what distinguishes a first save from a
+    # rotation, and after `save_pat` has run the old state is gone.
+    previous_state = target.credential_state
     try:
         info = pats.save_pat(
             session, target, body.token, validate=validate, wrapper=wrapper
         )
     except pats.CredentialRejected as exc:
+        # No row: the rejection left the stored credential untouched, so there
+        # is no mutation to record. A row here would report a rotation that did
+        # not happen.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # The token is never in this row -- only the state either side of the save,
+    # and the login GitHub reported. See app/audit.py.
+    audit.record(
+        session,
+        action=audit.Action.PAT_SAVE,
+        target=audit.target_ref(target.app),
+        before=_credential_audit_state(previous_state),
+        after={
+            **_credential_audit_state(target.credential_state),
+            "login": info.login,
+            "expires_at": info.expires_at.isoformat() if info.expires_at else None,
+        },
+    )
     return _credential_out(
         target, pats.credential_status(target), login=info.login
     )
@@ -560,7 +667,15 @@ def clear_target_pat(target_id: int, session: Session = Depends(get_session)):
     """Remove this target's credential. Delivery then cannot run until a new
     one is saved, which is what `absent` says and what the portal shows."""
     target = _target_or_404(session, target_id)
+    previous_state = target.credential_state
     pats.clear_pat(session, target)
+    audit.record(
+        session,
+        action=audit.Action.PAT_CLEAR,
+        target=audit.target_ref(target.app),
+        before=_credential_audit_state(previous_state),
+        after=_credential_audit_state(target.credential_state),
+    )
     return _credential_out(target, pats.credential_status(target))
 
 
@@ -595,6 +710,33 @@ def deliver_story(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except delivery.DeliveryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # The audit row P5-07 exists for, written *after* the push succeeded: a
+    # trail that recorded an approval before the work would claim deliveries
+    # that never happened, and a missing row is a gap an auditor can see where
+    # a false one is not (app/audit.py).
+    #
+    # **A dry run writes no row.** It touches nothing in the customer's repo,
+    # so it is not the mutation story 26 asks about, and recording it under the
+    # same action would make `delivery.approve` a filter whose rows a reader
+    # has to check a flag on before believing -- which is the question the
+    # table exists to answer plainly. An earlier version of this did record
+    # them, flagged; the flag was the tell that they did not belong.
+    if not body.dry_run:
+        audit.record(
+            session,
+            action=audit.Action.DELIVERY_APPROVE,
+            target=audit.target_ref(target.app),
+            after={
+                "story_id": body.story_id,
+                "run_id": body.run_id,
+                "branch": result.branch,
+                "committed": result.committed,
+                "delivered_sha": result.delivered_sha,
+                "pr_url": result.pr_url,
+                "pr_number": result.pr_number,
+            },
+        )
     return DeliveryOut(
         ok=True,
         message=result.message,
@@ -633,6 +775,25 @@ def reset_target_repo(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except delivery.DeliveryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Recorded after the fact, like the delivery approval above, and with what
+    # was destroyed rather than just that a reset happened: "which branches did
+    # that wipe take?" is the question this row has to answer on its own. A dry
+    # run deletes nothing and writes no row, for the reason given there.
+    if not body.dry_run:
+        audit.record(
+            session,
+            action=audit.Action.TARGET_RESET,
+            target=audit.target_ref(target.app),
+            after={
+                "repo": result.repo,
+                "branch": result.branch,
+                "already_empty": result.already_empty,
+                "reset_branch": result.reset_branch,
+                "deleted_branches": list(result.deleted_branches),
+                "failed_branches": list(result.failed_branches),
+            },
+        )
     return DeliveryOut(
         ok=True,
         message=result.message,

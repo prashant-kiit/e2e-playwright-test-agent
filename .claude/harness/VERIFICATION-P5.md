@@ -20,8 +20,9 @@ fakes, and what was deliberately deferred.
 > `completed` as well**: its two-axis review ran, found one real authorization gap (blob
 > reads and writes authorized by tenant prefix rather than by a row and a content hash) plus
 > six smaller items, and all of them are fixed in the slice they reviewed — see §"What the
-> two-axis review found". Of the seven tickets, two are open: #36 and #37. #30 is the parent
-> spec issue and stays open until they are.
+> two-axis review found". Of the seven tickets, **#37 is now implemented in the tree too** —
+> see §"Verified on 2026-11-04" below — which leaves #30, the parent spec issue, as the one
+> that stays open until the record and the tracker agree.
 >
 > | Ticket | State in the tree |
 > |---|---|
@@ -30,7 +31,8 @@ fakes, and what was deliberately deferred.
 > | #34 P5-03 — per-tenant KMS-encrypted PATs, scope/expiry/fail-loud | **Complete, reviewed and closed.** The envelope, the per-target `Tools` binding, the save-time scope check, the portal surface and the structural credential tests. The two-axis review found two real credential leaks (the PAT in `Tools.__repr__`, a data key reachable in a `SealError`) and one half-true acceptance criterion (a git-transport 401/403 did not mark the credential invalid); all fixed — see §Follow-ups 27b. **Still not seen against a real KMS, a real GitHub token or a browser** — see §"What is covered only by fakes" |
 > | #35 P5-04 — per-tenant concurrency cap and monthly run quota at enqueue | **Complete, and the first P5 slice seen in a real browser.** The two columns, the typed 429 rejection above the `AppLock` trio, the usage endpoint and the portal gauges. Both breaches driven over HTTP against the live stack, leaving no run row. The three gaps it shipped with were all closed in later passes: an untested portal surface, caps that bounded only a configured tenant (follow-ups 28 and 29), and — found by the browser check itself — `/usage` missing from both proxy lists, which made the panel invisible in the real app while 84 frontend tests passed |
 > | #33 P5-05 — run-scoped internal control-plane API | **Complete, reviewed and closed.** The token, the service, the routes, both gateways, and the whole run path rewired onto them. `DATABASE_URL` and `S3_*` are gone from a sandbox and the stores are off its network. Proven in a **real container** and then **against the real compose stack** — the only slice of P5 whose central claim is checked end to end against the deployed arrangement. Four real bugs, and none of them was found by the suite: three by running a container (a client that verified a token it holds no key for, a liveness gate that ate the end of every log, a flusher raced on close) and the fourth by the review (blob authorization by prefix, so a run could read *or overwrite* a sibling target's revision blobs). All fixed here. **Two gaps accepted and recorded rather than fixed** — `record_cost`'s liveness exemption, and the whole API being sandbox-reachable rather than only `/internal` (§Follow-ups 32–34) |
-> | #36 P5-06, #37 P5-07 | Not started |
+> | #36 P5-06 — prompts into Postgres, tenant-overridable and versioned | Implemented (`8b5aec3`). **Not verified in this record** — no §Verified section was written for it, so this record does not vouch for it. It left the "see what changed and when" half of story 24 open deliberately, which is [issue #39](https://github.com/prashant-kiit/e2e-playwright-test-agent/issues/39) |
+> | #37 P5-07 — immutable `audit_log` for every control-plane mutation | **Implemented, and verified only by the suite plus a by-hand migration run.** The table, the trigger, seven recorded mutations, the tenant-scoped read and `GET /audit`. **Never seen against the live stack or a browser, and there is no portal surface for it** — see §"Verified on 2026-11-04". Two of the mutations #37 lists are not recorded because they do not exist: user add/remove has no code path at all |
 >
 > **P5-05's claims were checked against a real container and then against the real compose
 > stack**, which is a stronger kind of evidence than the four slices before it had, and the
@@ -687,6 +689,192 @@ test suite had its own copy of the service's borrow-don't-close shim.
   change, not a code one. **Follow-up, not done here.**
 - **Not seen in a browser**, and nothing in this slice has a portal surface to see.
 
+
+---
+
+## Verified on 2026-11-04 — `#37` / P5-07 (the immutable audit log)
+
+The change: `audit_log(id, tenant_id, actor, action, target, before, after, at)`, append-only,
+written by seven control-plane mutations and read back through the enforced read path. The
+acting user joins the acting tenant in `app/tenancy.py` as a second `ContextVar`, bound by
+`require_auth`.
+
+**Suite, run as `make test` runs it** (ruff clean, **1120 backend tests**, **89 frontend
+tests**, all passing). New coverage: 27 tests in the new `tests/test_audit.py`, 3 more in
+`test_delivery_cli.py` for the CLI's rows, plus one line added to
+`test_tenant_isolation_repo.py`'s enumerated listings — the file whose standing rule
+is that "a read added later is a line here", and `audit.entries` is a read added later.
+
+**The trigger, observed on a throwaway database** rather than inferred from the suite, because
+"append-only" is the one claim in this ticket that application code cannot make. `alembic
+upgrade head` from zero → the two refusals → `downgrade -1` → `upgrade head` again, reading
+`information_schema`, `pg_trigger` and `pg_proc` at each stop:
+
+```
+after upgrade head     table=1 trigger=1 function=1 head=b7e04c91a2d5
+  UPDATE refused: (psycopg.errors.RestrictViolation) audit_log is append-only: UPDATE is not permitted (row id 1)
+  DELETE refused: (psycopg.errors.RestrictViolation) audit_log is append-only: DELETE is not permitted (row id 1)
+  TRUNCATE allowed, rows left=0
+after downgrade -1     table=0 trigger=0 function=0 head=a3f70c2e8b91
+after re-upgrade       table=1 trigger=1 function=1 head=b7e04c91a2d5
+```
+
+Three things that matters for, beyond the two refusals themselves. The downgrade drops the
+**function** as well as the table — a trigger goes with its table but a function does not, so
+without that line a downgrade/upgrade cycle would meet an existing function (which is also why
+the revision uses `CREATE OR REPLACE`). `TRUNCATE` is **still permitted**, deliberately: the
+trigger is row-level, and a statement-level one would leave the test fixture unable to reset
+the table between tests, which would end with the suite not asserting this at all. And the
+error arrives as `restrict_violation` rather than a bare `raise`, so a caller can tell this
+refusal from a connection failure.
+
+**What writes a row, each asserted through the surface that performs it** — an HTTP route
+where there is one, the repo function where there is not:
+
+| Mutation | Surface | Row |
+|---|---|---|
+| Delivery approval | `POST /targets/{id}/deliver` **and `python -m app.delivery push`** | `delivery.approve`, with the story, the branch, the `delivered_sha` and the PR URL; the CLI's row carries `via: "cli"` |
+| PAT save / rotate | `PUT /targets/{id}/pat` | `pat.save`, `before`/`after` carrying the credential *state* — one action for both, because `before` is what distinguishes them |
+| PAT clear | `DELETE /targets/{id}/pat` | `pat.clear` |
+| Infra sync / re-sync | `POST /projects/{id}/targets` with `sync_infra` (the first sync) **and `python -m app.delivery bootstrap`** (the re-sync) | `infra.sync`, with the outcome — recorded even when the push failed, and **redacted and length-bounded**, because this is the one payload built from program output |
+| Target reset | `POST /targets/{id}/reset` **and `python -m app.delivery reset`** | `target.reset`, with the branches it deleted |
+| Quota change | `repo.set_tenant_caps` (no route by design) | `quota.change`, both caps on both sides |
+| Prompt save | `PUT /prompts/{name}` | `prompt.save`, with the rev |
+
+**A dry run writes no row.** `--dry-run` and `dry_run: true` touch nothing in the customer's
+repo, so neither `delivery.approve` nor `target.reset` records one. The first cut *did* record
+them with a `dry_run` flag, on the reasoning that an admin exercising the surface should not be
+invisible; the review was right that the flag was the tell. `delivery.approve` has to mean "a
+push happened", or every compliance query over it has to be filtered by hand before it can be
+believed.
+
+**The CLI is audited, and its actor is `system`.** `make deliver` binds no user, so the row
+says `system` rather than naming one. "A human at a console did this and we cannot say which"
+is a far better answer than silence — and the fix for the rest of it is the `--tenant` option
+follow-up 20 already wants, which should grow an actor option at the same time.
+
+Follow-up 24 is closed by the second and third rows: it asked that #37 cover
+`PUT`/`DELETE /targets/{id}/pat` rather than let P5-03 grow a bespoke log line, and it does.
+
+**The prompt save is not in #37's list, and is recorded on purpose.** [#39](https://github.com/prashant-kiit/e2e-playwright-test-agent/issues/39)
+asks where a prompt revision's *actor* lives, since `prompts` records when a revision was
+saved but not by whom, and asks that it be settled when #37 lands so the two do not become two
+half-answers. It is settled here: a prompt steers an unattended agent against the customer's
+own application, so changing one is a control-plane mutation, and the actor is an audit row
+rather than a new column on `prompts`. #39's remaining scope is unaffected — it is a read
+surface for the revision bodies, which this does not provide.
+
+**Two of the mutations #37 lists are not recorded, because there is nothing to record.**
+`user add/remove` has no code path in the tree at all — no route, no repo function, nothing
+but the migration that seeds the single operator. An `Action` member for it would read as
+covered while nothing could write it, so there is none, and
+`test_the_two_mutations_with_no_surface_are_recorded_as_a_gap` fails the moment a
+user-administration route or repo function appears. That is the point at which the row has to
+be written. `quota change` **is** recorded, at `repo.set_tenant_caps`, even though it has no
+route either: it has a code path, reachable from a console, and a mutation with no HTTP
+surface is still a mutation.
+
+**The actor is a scope, not an argument**, and it lives in `app/tenancy.py` beside the tenant
+rather than in `app/audit.py`. Two reasons, the second found while writing it: the mutations
+include two with no request behind them (`set_tenant_caps`, the delivery CLI), so there is
+nothing to thread an argument from; and `app/auth.py` binds both, so an actor owned by the
+audit module would have made the auth module import the ORM. Outside any scope it is
+`SYSTEM_ACTOR` (`"system"`), which is a real answer for the CLI and a console rather than a
+missing one — and `require_auth` binds it for *every* authenticated request precisely so it
+can never be a stand-in for a user a route forgot to resolve.
+
+### What the two-axis review found
+
+Run as `/code-review` against `8b5aec3` with the work uncommitted: a Standards axis against
+the repo's documented conventions plus the Fowler smell baseline, and a Spec axis against #37,
+#30 and #39. **Ten findings, four of them real defects**, all fixed in the slice they
+reviewed.
+
+**The serious one: `make deliver` left no trail at all.** The audit writes were on the HTTP
+routes only, and `app/delivery/__main__.py` calls `push_artifacts`, `reset_target` and
+`bootstrap` directly — a path `Makefile` documents as the *only* way to deliver today
+("delivering and resetting are CLI- or API-only"). So the first version of this slice could
+push a commit into a customer's repo and record nothing, which is precisely the question #37
+exists to answer, missed on the path an operator is most likely to use. Worse, `app/audit.py`
+*claimed* the CLI was covered by `SYSTEM_ACTOR` while nothing there wrote a row. Now audited,
+with three tests.
+
+**"Infra re-sync" was not the audited path.** `infra.sync` was recorded only in
+`create_target`'s `sync_infra` flag — the *first* sync. A re-sync is `python -m app.delivery
+bootstrap`, which was unrecorded. The spec's word is "re-sync".
+
+**A credential could have reached the one table nothing may delete.**
+`apphub.run_bootstrap` returns `BootstrapOutcome(ok=False, output=str(exc))`, and a git failure
+is built from the argv that failed — which carries the PAT in the remote URL. That went into
+`infra.sync`'s `after.output` unredacted and unbounded, in direct contradiction of this
+module's own "never record a credential" rule, and
+`test_no_audit_row_ever_carries_the_token` did not cover the path because it exercises the PAT
+routes. Now through `delivery.redact` and bounded to 2000 characters, with a test that plants
+a token in a simulated git failure.
+
+**And a latent trap the suite could not see.** Auditing the CLI meant the CLI opens its own
+session, via `app.db.SessionLocal` — which points at the *developer's* `qa` database, not
+`qa_test`. The three CLI mutation tests passed only because the dev database had never had
+this migration applied: the write failed and the CLI's deliberate "a missing audit row must
+not fail a push that already happened" swallowed it. The next `make up` would have turned them
+into tests that write rows into the developer's database. `conftest._no_dev_database` now
+blocks that seam as the fourth sibling of `_no_real_blob_storage`, `_no_real_kms` and
+`_no_real_dns`, and `_record` re-raises `AssertionError` specifically so a guard cannot be
+swallowed by its own error handling.
+
+**Two overclaiming docstrings, which matter here more than usual**, because this slice's
+docstrings are what a reader will trust about where the actor lives and how durable a row is.
+`app/auth.py` said it binds `audit.current_actor`; after the actor moved to `tenancy.py` that
+name does not exist, and the import two lines below contradicted it. And `app/audit.py` said
+the row "commits in its own transaction" when `record` commits **the session it is handed** —
+a second commit on the request's session, not an independent one. Both corrected, the second
+with the constraint it implies for callers.
+
+**Accepted rather than fixed**, each now stated where it belongs:
+
+- **`quota.change` always records `actor: "system"`.** `repo.set_tenant_caps` is console-only,
+  so nothing binds an actor; "naming the acting user" is structurally unmet for that one
+  mutation rather than merely untested. It is honest (a console operator *is* not an
+  authenticated user) and it becomes answerable when the tenant-admin surface arrives.
+- **`tenancy.actor_scope` has no production caller** — only `require_auth`'s
+  `set_current_actor` does. Kept for symmetry with `tenant_scope`, which does, and because the
+  alternative is tests binding and unbinding a ContextVar by hand.
+- **Immutability is partial by design.** The trigger is row-level, so `TRUNCATE` passes, and
+  `ALTER TABLE ... DISABLE TRIGGER` needs only table ownership. #37's "never updated or
+  deleted" is a stronger claim than the database enforces; the gap is the test fixture's
+  reset, and closing it would end with the suite unable to assert immutability at all.
+- **`prompt.save` is beyond #37's enumerated list.** Deliberate and user-approved before
+  implementation, and it closes #39's actor question rather than leaving it for a third
+  ticket. Recorded here as added behaviour so the next reader knows it was a decision.
+
+The smaller Standards findings — an unused `actor=` hook on `record` (deleted; the scope *is*
+the design), `was` as a variable name, a duplicated credential-state dict, `__all__` splitting
+an import block, `AuditEntryOut.action` typed `str` where `Action` exists, and an unbounded
+`limit` on `GET /audit` — were all applied. The five near-identical `audit.record` call sites
+were **left alone**: each records a different payload, and collapsing them behind a helper
+would hide what each mutation actually writes, which is the thing a reader of those routes
+most needs to see.
+
+
+### What is covered only by the suite
+
+- **No live stack, no browser, no portal surface.** `GET /audit` has been exercised only by
+  `TestClient`. There is no Audit page, so nothing a customer can read — the trail is
+  queryable by an admin over HTTP and by SQL, and that is all. P5-04's lesson was that a
+  route missing from both proxy lists is invisible in the real app while the frontend suite
+  passes; `/audit` has not been checked against either proxy list, and a portal page added
+  later must check them first.
+- **The seven mutations are driven against fakes.** Delivery and reset are stubbed
+  (`monkeypatch` over `push_artifacts` / `reset_target`), the bootstrap runner returns a
+  canned success, the PAT validator accepts any token and the wrapper is `LocalKeyWrapper`.
+  What is proven is that each route records what it did; what is not proven is any of those
+  routes against a real remote — which is the same standing gap P5-03 and P5-05 record.
+- **`before`/`after` are asserted per mutation, not schema-checked.** They are free-form
+  JSON by design (what is worth recording differs per action), so nothing structurally
+  prevents a later action from writing a shape no reader expects.
+
+---
+
 ## Decisions recorded during this phase
 
 | Decision | Why |
@@ -1142,6 +1330,50 @@ hygiene.
     ticket #28). Not touched here because it is P4's claim to correct, not P5's; noted so it
     is not mistaken for a live blocker.
 
+### Introduced by the audit log
+
+35. **There is no read surface a customer can reach.** `GET /audit` is admin-gated and
+    JSON-only; the question #30's story 26 poses — "who authorized writing this commit into
+    our repo?" — is now answerable, but only by someone willing to call the API. A portal
+    page is the obvious next step and is deliberately not in this slice (#37 names no portal
+    surface). **Check both proxy lists when it is built**, per P5-04's lesson above.
+36. **`limit` is a cap, not a cursor.** `GET /audit` answers the most recent 200 rows and
+    there is no way to page back. Fine while the trail is young and read newest-first;
+    a tenant with a year of deliveries cannot reach the start of it.
+37. **Nothing prunes the trail, and nothing may.** `audit_log` grows without bound by
+    design — it is the one table whose rows must not be deleted — so the retention story that
+    `run_log` has (`prune_run_logs`) has no counterpart here and must not be given one
+    casually. A real retention policy is a legal question before it is a technical one.
+38. **Tenant purge will meet the trigger.** The spec's one permitted exception (#30, story 32,
+    unbuilt) cannot delete these rows: the purge must
+    `ALTER TABLE audit_log DISABLE TRIGGER audit_log_append_only` inside its transaction. That
+    is noted in `app/audit.py` and in the revision, and it is deliberately an explicit,
+    reviewable line rather than a quiet capability — but it does mean the purge is the one
+    write that can erase part of the trail, and whoever builds it is choosing how much.
+39. **`action` is `VARCHAR(20)` and `delivery.approve` is 16 characters.**
+    `models._enum_col` is shared by every domain enum here, so the width is not this table's
+    to pick freely. `test_every_action_fits_the_enum_column` turns a would-be runtime refusal
+    on the first write of a longer action name into a failing test instead.
+40. **Still nothing can be revoked.** Follow-up 1 said an audit trail of actions nobody can
+    interrupt is half a control, and said to revisit it alongside #37. It was not revisited:
+    the trail now records who did what, and a stolen access cookie still cannot be cut short
+    inside its 15 minutes. The audit log makes the gap *visible* rather than smaller, which
+    is worth something and is not the control.
+41. **The CLI and the console cannot name a user, so their rows say `system`.** Three of the
+    seven actions are reachable that way — `delivery.approve`, `infra.sync` and `target.reset`
+    from `python -m app.delivery`, and `quota.change` from a console — and for those,
+    #37's "naming the acting user" is met only in the sense that `system` is the honest name
+    for "nobody was authenticated". **The fix belongs with follow-up 20's `--tenant` option**:
+    the CLI needs to say who and as whom in one change, because a `--tenant` that did not also
+    record an actor would make the trail *more* misleading, not less — attributing a named
+    tenant's delivery to nobody.
+42. **`audit.record` commits the session it is given.** Not its own transaction: at every call
+    site the mutation has already committed, so the row is a second commit on the same
+    session, and a caller with unrelated pending ORM work would have that committed as a side
+    effect of writing an audit row. Constrained by convention and a docstring rather than by
+    the code. A separate session would fix it and would cost the row its ability to see the
+    mutation's own state; not worth it until something needs it.
+
 ---
 
 ## Closing
@@ -1195,4 +1427,7 @@ cookie**, so follow-up 2's missing `Secure` flag and follow-up 1's unrevocable t
 next to a secret that also decrypts customer credentials (follow-up 21). The envelope is
 real; the key is in the wrong place until that variable is set.
 
-**P5 is open: three of seven tickets are done (#31, #32, #34), and four are not started.**
+**P5 is open.** Six of seven tickets are implemented in the tree (#31–#37 less #30's parent
+role); #37's slice is the one below. What keeps the phase open is not missing code: it is that
+#36 has no verification section, #37 has been seen only by the suite, and the follow-up list
+below has grown rather than shrunk.

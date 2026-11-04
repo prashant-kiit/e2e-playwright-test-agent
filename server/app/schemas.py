@@ -6,6 +6,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .domain.audit import Action
 from .domain.credentials import CredentialState
 from .domain.status import RunStatus
 from .domain.steps import Step
@@ -181,6 +182,31 @@ class PromptOut(BaseModel):
 
 class PromptSave(BaseModel):
     content: str
+
+
+class AuditEntryOut(BaseModel):
+    """One row of the audit trail, for `GET /audit` (P5-07).
+
+    `before`/`after` are passed through as the arbitrary JSON they are rather
+    than modelled per action: what is worth recording differs by mutation, and
+    a typed union here would have to be extended in lockstep with every new
+    action -- turning a row the database already holds into one the API cannot
+    show.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    actor: str
+    # The enum, not a bare `str`: it is a closed vocabulary (`app/domain/audit.py`)
+    # and saying so puts the values in the OpenAPI schema instead of leaving a
+    # client to discover them from data. Serialises to the member's value,
+    # because `Action` is `(str, Enum)` like every other domain enum here.
+    action: Action
+    target: str
+    before: dict | None
+    after: dict | None
+    at: datetime
 
 
 class ArtifactOut(BaseModel):

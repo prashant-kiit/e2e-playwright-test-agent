@@ -23,11 +23,17 @@ from pathlib import Path
 import pytest
 from sqlalchemy.orm import sessionmaker
 
-from app import repo, revisions
+from app import audit, repo, revisions
 from app.db import Base
+from app.domain.audit import Action
 from app.models import Artifact, FileIndex, Revision, RunLog, Tenant, TenantOwned
 from app.orchestrator.bus import PostgresLogBus
-from app.tenancy import DEFAULT_TENANT_ID, current_tenant_id, tenant_scope
+from app.tenancy import (
+    DEFAULT_TENANT_ID,
+    actor_scope,
+    current_tenant_id,
+    tenant_scope,
+)
 from tests.target_helpers import create_target
 
 OTHER = 2  # the tenant that owns nothing here
@@ -104,6 +110,16 @@ def theirs(session):
         )
     )
     session.commit()
+    # A control-plane mutation of theirs (P5-07): the trail says who approved a
+    # delivery into *their* repo, so it is one of the reads that must come up
+    # empty for anyone else.
+    with actor_scope("admin@theirs.example"):
+        audit.record(
+            session,
+            action=Action.DELIVERY_APPROVE,
+            target=audit.target_ref(target.app),
+            after={"story_id": "SCRUM-1"},
+        )
     return {
         "project": project,
         "target": target,
@@ -132,6 +148,7 @@ def test_listings_are_empty_for_a_tenant_that_owns_nothing(mine, theirs):
         assert revisions.list_revisions_with_file_counts(
             mine, theirs["target"].id
         ) == []
+        assert audit.entries(mine) == []
 
 
 def test_direct_id_reads_fail_closed_for_another_tenants_rows(mine, theirs):

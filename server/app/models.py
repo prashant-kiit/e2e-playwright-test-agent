@@ -39,6 +39,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 
 from .db import Base
+from .domain.audit import Action
 from .domain.credentials import CredentialState
 from .domain.quotas import DEFAULT_MAX_CONCURRENT_RUNS, DEFAULT_MONTHLY_RUN_QUOTA
 from .domain.roles import UserRole
@@ -551,6 +552,63 @@ class Prompt(TenantOwned, Base):
     rev: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class AuditLog(TenantOwned, Base):
+    """One control-plane mutation: what was done, to what, by whom, when.
+
+    P5-07 / #37. The table that makes "who authorized writing this commit into
+    our repo, and when?" a query instead of a grep through logs that rotate,
+    are not tenant-scoped, and cannot be shown to the customer asking.
+
+    **Append-only, enforced by a trigger rather than by convention.** The
+    migration installs `BEFORE UPDATE OR DELETE` on this table so an UPDATE or
+    a DELETE raises -- from application code, from psql, from a future bulk
+    write that did not know. `app/audit.py` has no update and no delete
+    function, but that alone would make immutability a property of one module's
+    API surface, and the trail's whole value is that it cannot be quietly
+    altered afterwards (#30, story 28). The one exception the spec allows,
+    tenant purge, must disable the trigger explicitly; see `app/audit.py`.
+
+    Row-level triggers do not fire on TRUNCATE, so the test fixture's
+    `TRUNCATE` still works -- deliberate, and not a hole worth closing with a
+    statement-level trigger: TRUNCATE needs table-owner rights, and a suite
+    that could not reset its own tables would simply stop asserting this.
+
+    **`actor` is a string, not a foreign key to `users`.** The email of the
+    authenticated user, copied in at write time. An FK would make the trail
+    depend on a row that is allowed to disappear -- removing a user would
+    either be blocked by the audit log (`RESTRICT`) or would erase who did
+    what (`SET NULL`), and a trail that forgets the actor when the actor leaves
+    the company is the opposite of a trail. The cost is that a renamed address
+    reads as two actors, which is honest: that is what the rows recorded.
+
+    **`before`/`after` are state, never a credential.** A PAT save records
+    `absent` -> `valid`, not the token, not a redaction of it. See
+    `app/audit.py`.
+
+    **`target` is a string**, prefixed by kind (`target:saucedemo`,
+    `tenant:1`, `prompt:steps/4-generate.md`), for the same reason `actor` is:
+    the rows outlive the things they name. `app/audit.py`'s `*_ref` helpers own
+    the spelling so a prefix filter means something.
+    """
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor: Mapped[str] = mapped_column(String(320), nullable=False)
+    action: Mapped[Action] = mapped_column(_enum_col(Action), nullable=False)
+    target: Mapped[str] = mapped_column(String(500), nullable=False)
+    # The state either side of the mutation, as far as it is worth recording:
+    # null where a mutation has no meaningful before (a first PAT save) or no
+    # meaningful after (a clear). JSON rather than two typed columns because
+    # what matters differs per action, and a column per action would be mostly
+    # nulls.
+    before: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    after: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
 
 

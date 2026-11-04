@@ -1,4 +1,4 @@
-"""Who "we" are for the current request.
+"""Who "we" are for the current request: the tenant, and the acting user.
 
 Every table carries `tenant_id` from P2 onward (DESIGN.md §13). P2 bought, by
 carrying the column even while there was one tenant, that P5 is a data backfill
@@ -22,6 +22,16 @@ constant did before P5.
 
 Do not inline the constant at call sites, and do not thread a tenant argument
 through them. The indirection is the point.
+
+**The acting user lives here too** (`current_actor`, P5-07), resolved the same
+way and bound by the same dependency. It is here rather than in `app/audit.py`
+because this module is the one that answers "who is acting", and because
+`app/auth.py` -- which binds both -- would otherwise have to import the ORM to
+reach the audit module. `audit.record` reads it; nothing else needs to.
+
+The two are deliberately *not* one object. A tenant is resolved on every path
+including the ones with no user at all (a run, a background sweep), and
+collapsing them would mean inventing a user for those.
 """
 
 from __future__ import annotations
@@ -82,6 +92,53 @@ def tenant_scope(tenant_id: int) -> Iterator[None]:
         yield
     finally:
         _current_tenant.reset(token)
+
+
+# --- the acting user ------------------------------------------------------
+#
+# The audit log's `actor` (P5-07, #37). Scoped exactly like the tenant above,
+# and for the same two reasons: the request path is async, so a ContextVar is
+# what carries the value into the threadpooled endpoint; and threading an
+# acting user through every call site would make every new call site a chance
+# to pass the wrong one.
+
+# What the actor is when nobody is logged in: the delivery CLI (`make
+# deliver`), a console session, a background sweep. A real answer rather than a
+# missing one -- those genuinely are not a user, and `system` says so. What it
+# must never become is a stand-in for a user the code failed to resolve, which
+# is why `auth.require_auth` binds the actor for every authenticated request
+# rather than each route remembering to.
+SYSTEM_ACTOR = "system"
+
+_current_actor: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_actor", default=None
+)
+
+
+def current_actor() -> str:
+    """Who is acting: the authenticated user's email, or `SYSTEM_ACTOR`."""
+    actor = _current_actor.get()
+    return SYSTEM_ACTOR if actor is None else actor
+
+
+def set_current_actor(actor: str) -> None:
+    """Bind the acting user for the rest of this context, with no unbinding.
+
+    The sibling of `set_current_tenant`, used by `require_auth` for the reason
+    given there: a dependency cannot wrap the request in a `finally`, and
+    nothing leaks because each request has its own `Context`.
+    """
+    _current_actor.set(actor)
+
+
+@contextmanager
+def actor_scope(actor: str) -> Iterator[None]:
+    """Bind the acting user for the duration of a block, then restore it."""
+    token = _current_actor.set(actor)
+    try:
+        yield
+    finally:
+        _current_actor.reset(token)
 
 
 # --- the enforced read path -----------------------------------------------

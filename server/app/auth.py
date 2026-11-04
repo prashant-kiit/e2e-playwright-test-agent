@@ -46,9 +46,10 @@ week-long-cookie behaviour, worse.
 Two dependencies:
 
 * `require_auth` resolves the current user from the access cookie and --
-  because it is async -- sets `tenancy.current_tenant_id` for the rest of the
-  request, so the sync endpoint and every repo call it makes insert and read as
-  that tenant. A missing, bad or **expired** cookie is a 401.
+  because it is async -- sets `tenancy.current_tenant_id` **and
+  `tenancy.current_actor`** for the rest of the request, so the sync endpoint and
+  every repo call it makes insert and read as that tenant, and every audit row
+  names that user. A missing, bad or **expired** cookie is a 401.
 * `require_tenant_admin` is `require_auth` plus a role check: a non-admin acting
   on a tenant-admin surface (delivery approval, PAT rotation, quota/user
   changes) is a 403.
@@ -69,7 +70,7 @@ from fastapi import Depends, HTTPException, Request, Response
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from .domain.roles import UserRole
-from .tenancy import set_current_tenant
+from .tenancy import set_current_actor, set_current_tenant
 
 # The access cookie keeps the original name: it is still "the session cookie"
 # from the browser's point of view, just a short-lived one now.
@@ -266,6 +267,13 @@ async def require_auth(request: Request) -> CurrentUser:
     if user is None:
         raise HTTPException(status_code=401, detail="authentication required")
     set_current_tenant(user.tenant_id)
+    # The acting user, for the audit log (P5-07), bound in the same breath as
+    # the tenant and for the same reason: a route that had to remember to pass
+    # the actor is a route that can forget, and an audit row attributing a
+    # customer's delivery to "system" is worse than no row -- it is a wrong
+    # answer to the question the table exists to answer. There is no route that
+    # could forget, because none of them does it.
+    set_current_actor(user.email)
     return user
 
 

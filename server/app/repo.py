@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from . import prompt_store, target_config
+from . import audit, prompt_store, target_config
 from .domain import lease, quotas
 from .domain.status import LIVE, TERMINAL, RunStatus, assert_transition, is_live
 from .domain.steps import Step
@@ -388,6 +388,17 @@ def set_tenant_caps(
     tenant = session.get(Tenant, current_tenant_id())
     if tenant is None:  # pragma: no cover - a session always has its tenant
         raise NotFound(f"no such tenant {current_tenant_id()}")
+
+    def caps_of(row: Tenant) -> dict:
+        # Both caps on both sides of the change, not only the one that moved:
+        # a row that recorded just the delta would need every earlier row
+        # replayed to answer "what were this tenant's limits afterwards?".
+        return {
+            "max_concurrent_runs": row.max_concurrent_runs,
+            "monthly_run_quota": row.monthly_run_quota,
+        }
+
+    before = caps_of(tenant)
     for name, value in (
         ("max_concurrent_runs", max_concurrent_runs),
         ("monthly_run_quota", monthly_run_quota),
@@ -399,6 +410,17 @@ def set_tenant_caps(
         setattr(tenant, name, value)
     session.commit()
     session.refresh(tenant)
+    # Audited here rather than at a route because there is no route (P5-07):
+    # this function is reached from a console today and from whatever
+    # tenant-admin surface arrives later, and auditing the function covers
+    # both. The actor is `system` for a console session, which is honest.
+    audit.record(
+        session,
+        action=audit.Action.QUOTA_CHANGE,
+        target=audit.tenant_ref(tenant.id),
+        before=before,
+        after=caps_of(tenant),
+    )
     return tenant
 
 

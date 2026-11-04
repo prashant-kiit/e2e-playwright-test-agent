@@ -148,6 +148,46 @@ def _no_real_kms(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_dev_database(monkeypatch):
+    """No test may open a session against the *developer's* database.
+
+    `app.db.SessionLocal` is bound to `DATABASE_URL`, which defaults to the dev
+    stack's `qa` database -- not the `qa_test` one these fixtures build. Code
+    that opens its own session (rather than taking one) therefore writes to the
+    wrong database from a test, and on a machine with the stack up it succeeds,
+    silently, leaving rows behind.
+
+    That is not hypothetical: P5-07 added an audit write to the delivery CLI
+    (`app/delivery/__main__.py`), which has no session to be handed and opens
+    one. The three CLI mutation tests passed only because the dev database had
+    not had the migration applied yet -- the write failed and the CLI's
+    deliberate "a missing audit row must not fail a push that already
+    happened" swallowed it. The next `make up` would have turned them into
+    tests that write to the developer's database.
+
+    So the seam is blocked, and a test that needs it points it at the fixture's
+    engine (see `tests/test_delivery_cli.py`). The fourth sibling of
+    `_no_real_blob_storage`, `_no_real_kms` and `_no_real_dns`: the suite is
+    designed around the test database, so reaching for the default one is
+    always the bug.
+
+    Only callers that resolve `SessionLocal` at call time are affected, which
+    is the set that matters: a module capturing it as a default argument did so
+    at import and is unaffected, and every such caller in the tree already
+    takes an injectable `session_factory`.
+    """
+
+    def refuse(*args, **kwargs):
+        raise AssertionError(
+            "a test opened a session on app.db.SessionLocal, which points at "
+            "the developer's database rather than the test one; pass or patch "
+            "a session factory bound to the fixture's engine"
+        )
+
+    monkeypatch.setattr("app.db.SessionLocal", refuse)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_dns(monkeypatch):
     """No test may resolve a name against real DNS.
 
