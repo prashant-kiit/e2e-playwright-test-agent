@@ -211,7 +211,10 @@ def test_another_tenants_user_cannot_be_removed_by_id(session, second_tenant):
     _tenant, theirs = second_tenant
 
     with tenant_scope(DEFAULT_TENANT_ID), actor_scope(ADMIN):
-        with pytest.raises(accounts.AccountError, match="no such user"):
+        # The *type* is what the route turns into a 404, so the type is what
+        # this asserts: matching the message would make the test agree with a
+        # status code for a reason neither of them states.
+        with pytest.raises(accounts.NoSuchUser, match="no such user"):
             accounts.remove_user(session, theirs.id)
 
     assert session.get(User, theirs.id) is not None

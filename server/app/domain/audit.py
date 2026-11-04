@@ -14,7 +14,7 @@ HTTP surface is still a mutation) and why `user add/remove` was not -- there
 was no user-administration surface at all, no route and no function.
 
 P5-14 (#46) built that surface, so `USER_ADD` and `USER_REMOVE` are here now
-and #37's list of seven is complete. Both are written by `app/accounts.py`,
+and #37's list of seven is complete. Both are written by `app/accounts/`,
 which is the only module that adds or removes a user; the first admin of a new
 tenant is a `USER_ADD` too, recorded against the tenant being created with
 `system` as the actor, because the operator CLI that creates a tenant binds no

@@ -352,18 +352,28 @@ def authorize_blob_key(scope: RunScope, key: str) -> None:
         raise NotAuthorized(f"blob key {key!r} is not this tenant's to name")
 
 
-def authorize_artifact_key(scope: RunScope, run_key: str, key: str) -> None:
+def authorize_artifact_key(
+    scope: RunScope, run_key: str, key: str, *, allow_legacy: bool = False
+) -> None:
     """Refuse an artifact key that is not this run's.
 
     Artifact keys are `tenant/<id>/runs/<run_key>/<path>` since P5-10
     (app/domain/store_keys.py), so one run's evidence is one prefix and a run
     may read and write only its own.
 
-    **The legacy `<run_key>/<path>` shape is accepted on read-side paths and is
-    written nowhere**, which is the expand-then-contract half of #42: a
-    deployment's existing objects keep resolving until `python -m app.artifacts
-    rekey` has moved them. It is safe to accept because the run key is what
-    both shapes are authorized against -- the old shape carries no tenant, but
+    **The legacy `<run_key>/<path>` shape is accepted only with
+    `allow_legacy`**, which the read-side operations pass and the write-side
+    ones do not. That is the expand-then-contract half of #42: a deployment's
+    existing objects must keep *resolving* until `python -m app.artifacts
+    rekey` has moved them, but nothing may *create* another one -- an object
+    written under the old shape would land outside the tenant prefix, which is
+    the prefix "this tenant's storage" now means and the one a purge sweeps.
+    (The purge also sweeps each run's legacy prefix, so such an object would
+    not actually survive offboarding; it would still be invisible to an
+    operator listing the tenant, which is half of what #42 is for.)
+
+    Accepting it on the read side is safe because the run key is what both
+    shapes are authorized against: the old shape carries no tenant, but
     `run_key` here comes from the run row the token already authorized, so a
     key naming another run is refused either way.
 
@@ -378,9 +388,10 @@ def authorize_artifact_key(scope: RunScope, run_key: str, key: str) -> None:
     current = store_keys.run_artifacts_prefix(scope.tenant_id, run_key)
     if key.startswith(current):
         return
-    # The legacy shape, and only for this run. `== run_key` is the run's own
-    # prefix, which this function has always accepted.
-    if key == run_key or key.startswith(f"{run_key}/"):
+    # The legacy shape, and only for this run, and only where the caller is
+    # reading. `== run_key` is the run's own prefix, which this function has
+    # always accepted.
+    if allow_legacy and (key == run_key or key.startswith(f"{run_key}/")):
         return
     raise NotAuthorized(f"artifact key {key!r} is not this run's to name")
 
@@ -413,7 +424,9 @@ def blob_exists(session: Session, scope: RunScope, store: Storage, key: str) -> 
     """
     run = authorized_run(session, scope)
     if _is_artifact_key(run.run_key, key):
-        authorize_artifact_key(scope, run.run_key, key)
+        authorize_artifact_key(
+            scope, run.run_key, key, allow_legacy=True
+        )
     else:
         authorize_blob_key(scope, key)
     return store.exists(key)
@@ -430,7 +443,9 @@ def read_blob(
     """
     run = authorized_run(session, scope)
     if _is_artifact_key(run.run_key, key):
-        authorize_artifact_key(scope, run.run_key, key)
+        authorize_artifact_key(
+            scope, run.run_key, key, allow_legacy=True
+        )
     else:
         authorize_blob_key(scope, key)
         if not revisions.blob_is_referenced_by_target(session, scope.target_id, key):

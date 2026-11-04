@@ -1752,8 +1752,13 @@ documentation, and none of them is fixed.
     story, and no ticket of the seven covered it. Offboarding today is raw SQL plus an
     un-swept object-store prefix. **This is the largest missing piece of #30.**
 
-    **Its storage precondition landed on 2026-11-04 (#40 and #42).** The purge itself is
-    still unbuilt (#47), but the two things it could not have been written against are done:
+    **Closed on 2026-11-04. Read the two paragraphs below in order**: the storage
+    precondition (#40, #42) first, then the purge itself (#47). The first says "the
+    purge is still unbuilt" because it was at that commit — a reader skimming should
+    not stop there.
+
+    **The storage precondition landed first (#40 and #42).** The two things the purge
+    could not have been written against are done:
     `Storage` can delete a key and list a prefix with paging (#40, nothing calls either
     yet), and **artifacts have moved under the tenant prefix** (#42), so "that tenant's
     entire storage prefix" is now a true description rather than half of one.
@@ -1830,6 +1835,46 @@ documentation, and none of them is fixed.
     sweep is driven through `FakeStorage`, and `ALTER TABLE ... DISABLE TRIGGER` needs
     table-owner rights — which the suite's role has and a reduced-privilege production role
     may not. Both belong to UAT 3 (#54).
+
+    **The two-axis review of the wave, applied the same day.** It found one defect that
+    would have shipped and several documents claiming more than the code did.
+
+    The defect: `app/accounts/__main__.py` had its `if __name__ == "__main__"` block
+    *above* `_purge_tenant`, so `python -m app.accounts purge-tenant` raised `NameError` —
+    the only documented path to story 32, broken, with a green suite, because every test
+    calls `main()` after the import has finished. Worth recording how it is caught now,
+    because the obvious test does not work: `--help`, on the parser or on a subcommand,
+    exits inside argparse before any handler is referenced, so the module runs and exits 0
+    with the defect in place. `tests/test_cli_entrypoints.py` asserts the invariant itself
+    through the AST — the entry block is the last top-level statement — and was checked by
+    reintroducing the bug.
+
+    Two places where the purge claimed more than it did, both now true rather than
+    reworded. It swept only `tenant/<id>/`, so an object still under the **pre-P5-10 key
+    shape** — a deployment that never ran `rekey`, or one interrupted between updating a row
+    and deleting the old object — would have stayed in the bucket for ever, with nothing
+    left to derive its key from afterwards. The purge now reads its own run keys *before*
+    deleting the rows and sweeps those prefixes too, which is also why `rekey`'s docstring
+    no longer promises a `--prune-orphans` pass that did not exist. And the object count it
+    recorded was the number **listed**, not the number deleted — and `Storage.delete`
+    swallows failures by design, so `purge_log` could have claimed objects that were still
+    in the bucket, in the one operation with no undo. Each key is re-checked now, survivors
+    are logged by name, and the count is what actually went.
+
+    One authorization gap: `authorize_artifact_key` accepted the legacy shape on **writes**
+    as well as reads, so a run could still have created an object outside the tenant
+    prefix. It takes `allow_legacy`, passed only by `blob_exists` and `read_blob`. The
+    two-transport gateway test failed on that change, because it had been spelling a legacy
+    key by hand and passing — which is the test doing its job a release late.
+
+    Smaller, and each a case of one rule in two places: an empty `PUT /usage/caps` wrote a
+    `QUOTA_CHANGE` row whose `before` equalled its `after` (no-ops are no longer audited,
+    fixed in `set_tenant_caps` so the console path gets it too); the user-removal route
+    picked 404 versus 409 by matching the exception's *message*, which is simultaneously
+    user-facing prose, so rewording it for a human would have flipped a status code (there
+    is a `NoSuchUser` type now); and the role probe was copied into two pages, with the
+    first page's comment still saying it was the only one that wanted it (one `useIsAdmin`
+    hook).
 49. **Stories 1, 2 and 5 — no tenant or user administration.** `app/domain/audit.py` states
     there is no user-administration surface at all, which is why `Action` has no
     `USER_ADD`/`USER_REMOVE` and why #37 could not record two of the mutations its own spec

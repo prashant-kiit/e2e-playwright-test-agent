@@ -70,6 +70,21 @@ class AccountError(Exception):
     """
 
 
+class NoSuchUser(AccountError):
+    """The acting tenant has no user with that id. The route answers 404.
+
+    A subclass rather than the route matching on the message, which is what it
+    did first: `status = 404 if message.startswith("no such user") else 409`
+    made an HTTP status code depend on prose that is *simultaneously*
+    user-facing text, so rewording the sentence for a human would silently
+    change the status for a caller. The distinction belongs on the exception,
+    where it is a decision rather than a coincidence.
+
+    Deliberately the same answer for an id that does not exist and one that
+    belongs to another tenant -- see `remove_user`.
+    """
+
+
 @dataclass(frozen=True)
 class AddedUser:
     """A new account, and the one and only time its password exists in the clear.
@@ -184,7 +199,7 @@ def remove_user(session: Session, user_id: int) -> None:
     # must not be distinguishable by someone trying ids.
     user = session.scalars(select(User).where(User.id == user_id)).one_or_none()
     if user is None:
-        raise AccountError(f"no such user {user_id}")
+        raise NoSuchUser(f"no such user {user_id}")
 
     if UserRole(user.role) is UserRole.ADMIN and _admin_count(session) == 1:
         raise AccountError(

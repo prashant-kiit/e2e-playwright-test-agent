@@ -157,10 +157,6 @@ def _create_tenant(
     return EXIT_OK
 
 
-if __name__ == "__main__":  # pragma: no cover - exercised via main()
-    raise SystemExit(main())
-
-
 def _purge_tenant(*, slug: str, confirm_slug: str, store, session_factory) -> int:
     """Offboard a tenant. Prints what it removed, which is the only receipt
     the operator gets at the terminal -- the durable one is the `purge_log`
@@ -182,3 +178,14 @@ def _purge_tenant(*, slug: str, confirm_slug: str, store, session_factory) -> in
         "survives this. Nothing else of this tenant remains."
     )
     return EXIT_OK
+
+
+# **Last in the file, and that is not cosmetic.** This block executes at import
+# when the module is run as `python -m app.accounts`, so every function it can
+# reach must already be bound. It sat above `_purge_tenant` for one commit, and
+# `purge-tenant` -- the only documented path to story 32 -- raised `NameError`
+# in production while the suite stayed green, because the tests call `main()`
+# after the import has finished. `test_the_module_runs_as_a_module` is the
+# assertion that notices.
+if __name__ == "__main__":  # pragma: no cover - exercised via main()
+    raise SystemExit(main())

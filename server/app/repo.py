@@ -418,6 +418,15 @@ def set_tenant_caps(
         setattr(tenant, name, value)
     session.commit()
     session.refresh(tenant)
+    after = caps_of(tenant)
+    if after == before:
+        # **A no-op writes no audit row.** The spec asks that "each change" be
+        # recorded, and nothing changed: a caller that passed no caps, or
+        # passed the values already stored, has not made a mutation. Rows for
+        # those would pollute the one column a compliance reader filters on,
+        # with entries whose `before` and `after` are identical -- and the
+        # trail's value is that every row in it is something that happened.
+        return tenant
     # Audited here rather than at a route because there is no route (P5-07):
     # this function is reached from a console today and from whatever
     # tenant-admin surface arrives later, and auditing the function covers
@@ -427,7 +436,7 @@ def set_tenant_caps(
         action=audit.Action.QUOTA_CHANGE,
         target=audit.tenant_ref(tenant.id),
         before=before,
-        after=caps_of(tenant),
+        after=after,
     )
     return tenant
 

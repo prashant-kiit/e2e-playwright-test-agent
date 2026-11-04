@@ -1030,19 +1030,23 @@ def remove_user(user_id: int, session: Session = Depends(get_session)):
     Two refusals, kept apart because the remedies are different and only one
     of them is the operator's to fix:
 
-    * **404** -- no such user *in this tenant*. Deliberately the same answer
-      for an id that does not exist and one that belongs to somebody else: the
-      ids are small integers, and a 403 on another tenant's id would confirm
-      the account exists, which is exactly what someone trying ids wants.
+    * **404** -- `accounts.NoSuchUser`, meaning no such user *in this tenant*.
+      Deliberately the same answer for an id that does not exist and one that
+      belongs to somebody else: the ids are small integers, and a 403 on
+      another tenant's id would confirm the account exists, which is exactly
+      what someone trying ids wants. Chosen by the exception's **type** rather
+      than by matching its message, which is what this did first -- a status
+      code that depended on prose a human also reads would have flipped the
+      next time somebody improved the sentence.
     * **409** -- the last admin. The body carries the sentence, because "make
       another admin first" is the remedy and a status code cannot say it.
     """
     try:
         accounts.remove_user(session, user_id)
+    except accounts.NoSuchUser as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except accounts.AccountError as exc:
-        message = str(exc)
-        status = 404 if message.startswith("no such user") else 409
-        raise HTTPException(status_code=status, detail=message) from exc
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/usage", response_model=UsageOut)

@@ -3,6 +3,7 @@ import { api } from "../api.js";
 import { Spinner } from "../components.jsx";
 import { lineDiff } from "../diff.js";
 import Users from "./Users.jsx";
+import { useIsAdmin } from "../useIsAdmin.js";
 
 /** How to label when a revision was saved -- a time, or the words "shipped
  * default", which is why this is a label and not a date. `null` for a
@@ -132,10 +133,9 @@ export default function Settings() {
   // only one prompt is open at a time, and `openPrompt` closes the history
   // with it.
   const [showHistory, setShowHistory] = useState(false);
-  // Whether to render the user-administration panel. Presentation only: the
-  // server's admin dependency is what enforces it, and the panel itself
-  // renders a refusal if it is ever shown to somebody who cannot use it.
-  const [isAdmin, setIsAdmin] = useState(false);
+  // Whether to render the user-administration panel. Presentation only, and
+  // the panel renders a refusal anyway -- see `useIsAdmin`.
+  const isAdmin = useIsAdmin();
 
   function openPrompt(p) {
     if (open === p.name) {
@@ -174,12 +174,6 @@ export default function Settings() {
         setPrompts(p);
       })
       .catch((e) => setError(String(e.message || e)));
-    // Separately and quietly: not knowing the role hides a panel, which is
-    // not a reason to fail the page the operator came to for prompts.
-    api
-      .me()
-      .then((who) => setIsAdmin(who.role === "admin"))
-      .catch(() => setIsAdmin(false));
   }, []);
 
   if (error) return <div className="error">{error}</div>;

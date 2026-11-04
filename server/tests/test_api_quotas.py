@@ -349,3 +349,28 @@ def test_a_quota_change_cannot_reach_another_tenants_caps(session, admin_client)
     assert (theirs.max_concurrent_runs, theirs.monthly_run_quota) == (1, 2)
     with tenant_scope(DEFAULT_TENANT_ID):
         assert repo.tenant_caps(session).max_concurrent_runs == 50
+
+
+def test_a_change_that_changes_nothing_writes_no_audit_row(session, admin_client):
+    """The spec asks that "each change" be audited, and this is not one.
+
+    A row whose `before` equals its `after` says nothing happened, in the one
+    column a compliance reader filters on. Two shapes of no-op: a body with no
+    caps in it at all, and a body repeating what is already stored.
+    """
+    from app import audit
+    from app.domain.audit import Action
+
+    repo.set_tenant_caps(session, max_concurrent_runs=3, monthly_run_quota=10)
+    before = len([e for e in audit.entries(session) if e.action is Action.QUOTA_CHANGE])
+
+    assert _set_caps(admin_client, {}).status_code == 200
+    assert _set_caps(admin_client, {"max_concurrent_runs": 3}).status_code == 200
+
+    after = len([e for e in audit.entries(session) if e.action is Action.QUOTA_CHANGE])
+    assert after == before, "neither no-op is in the trail"
+    # And a real change still is, so the rule has not swallowed the feature.
+    _set_caps(admin_client, {"max_concurrent_runs": 4})
+    assert len(
+        [e for e in audit.entries(session) if e.action is Action.QUOTA_CHANGE]
+    ) == before + 1

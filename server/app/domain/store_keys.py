@@ -82,6 +82,17 @@ def artifact_key(tenant_id: int, run_key: str, rel: str) -> str:
     return f"{run_artifacts_prefix(tenant_id, run_key)}{rel}"
 
 
+def legacy_run_prefix(run_key: str) -> str:
+    """`<run_key>/` -- where a run's artifacts lived before P5-10.
+
+    Needed by the tenant purge rather than by anything that writes: an object
+    left under the old shape sits *outside* the tenant prefix, so a purge that
+    swept only `tenant/<id>/` would leave it behind for ever. The purge derives
+    these from its own `runs` rows while they still exist.
+    """
+    return f"{run_key}/"
+
+
 def legacy_artifact_key(run_key: str, rel: str) -> str:
     """The pre-P5-10 shape. **Only for tests and the rekey command.**
 

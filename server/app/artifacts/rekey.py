@@ -24,9 +24,12 @@ one is fixed:
 
 Interrupted between 1 and 2, the next pass finds the new object already present
 and skips to 2. Between 2 and 3 it finds the row already migrated and skips the
-whole row -- leaving one orphaned old object, which the `--prune-orphans` pass
-is for and which is harmless in the meantime: nothing references it, and it is
-outside the tenant prefix that is about to become meaningful.
+whole row -- leaving one orphaned old object. Nothing references it, so it is
+harmless to read, and there is deliberately **no prune pass**: an orphan sits
+outside the tenant prefix, so the thing that must not miss it is the tenant
+purge, and `accounts.purge` sweeps each of a tenant's run prefixes as well as
+the tenant prefix for exactly this reason. A separate prune command would be
+one more thing to remember at the moment it matters least.
 
 **Per tenant, inside each tenant's scope**, rather than one unfiltered read
 across all of them. That is the shape `reaper._for_each_tenant` established and

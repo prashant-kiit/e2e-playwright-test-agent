@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api.js";
 import { Spinner, UsageMeter } from "../components.jsx";
+import { useIsAdmin } from "../useIsAdmin.js";
 import Revisions from "./Revisions.jsx";
 import Stories from "./Stories.jsx";
 import TargetConfig from "./TargetConfig.jsx";
@@ -20,11 +21,8 @@ export default function Projects() {
   const [newProject, setNewProject] = useState("");
   const [error, setError] = useState("");
   const [usage, setUsage] = useState(null);
-  // Whether to offer the quota editor. Presentation only: the server's admin
-  // dependency is what enforces it, and a member who got to the route anyway
-  // is refused there (P5-13). Read here rather than threaded down from App,
-  // which discards the role, because this is the only page that wants it.
-  const [isAdmin, setIsAdmin] = useState(false);
+  // Whether to offer the quota editor. Presentation only -- see `useIsAdmin`.
+  const isAdmin = useIsAdmin();
 
   async function load() {
     const [p, t] = await Promise.all([api.listProjects(), api.listTargets()]);
@@ -35,12 +33,6 @@ export default function Projects() {
     // failed would be trading the thing the operator came for against a
     // nice-to-have. The enqueue enforces the caps either way.
     api.usage().then(setUsage).catch(() => setUsage(null));
-    // Quietly, for the same reason: not knowing the role hides a button, and
-    // hiding a button is not an error worth failing the page over.
-    api
-      .me()
-      .then((who) => setIsAdmin(who.role === "admin"))
-      .catch(() => setIsAdmin(false));
   }
   useEffect(() => {
     load().catch((e) => setError(String(e.message || e)));

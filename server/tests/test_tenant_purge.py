@@ -213,7 +213,7 @@ def test_a_tenant_whose_id_is_a_prefix_of_anothers_is_safe(session, tmp_path):
     keep = store_keys.blob_key(high, "b" * 64)
     store.put_file(keep, blob)
 
-    removed = purge_mod._sweep_storage(store, low)
+    removed = purge_mod._sweep_storage(store, low, [])
 
     assert removed == 1
     assert keep in store.objects
@@ -229,7 +229,7 @@ def test_a_purge_interrupted_before_the_tenant_row_is_finished_by_a_re_run(
     store, (doomed, _run), _keeper = two_tenants
     with actor_scope(OPERATOR):
         # Exactly the state an interruption after step 3 leaves.
-        purge_mod._sweep_storage(store, doomed)
+        purge_mod._sweep_storage(store, doomed, [])
         with tenant_scope(doomed):
             for table in purge_mod._owned_tables():
                 purge_mod._delete_table(session, table)
@@ -245,7 +245,7 @@ def test_a_purge_interrupted_before_the_tenant_row_is_finished_by_a_re_run(
         select(purge_mod.Tenant).where(purge_mod.Tenant.slug == "doomed")
     ).one_or_none() is None
     # And it still recorded the completion, which is what the re-run is for.
-    assert [row.slug for row in purge_mod.purged(session)] == ["doomed"]
+    assert [row.slug for row in session.scalars(select(PurgeLog)).all()] == ["doomed"]
 
 
 def test_purging_a_slug_that_is_already_gone_says_so_rather_than_half_running(
@@ -327,7 +327,7 @@ def test_the_purge_records_what_it_did_somewhere_that_survives_it(
             session, store, slug="doomed", confirm_slug="doomed"
         )
 
-    (logged,) = purge_mod.purged(session)
+    (logged,) = session.scalars(select(PurgeLog)).all()
     assert logged.purged_tenant_id == doomed
     assert logged.slug == "doomed"
     assert logged.name == "Doomed Ltd"
@@ -411,3 +411,69 @@ def test_the_table_list_is_every_tenant_owned_table_in_a_safe_order(two_tenants)
     assert tables.index("run_steps") < tables.index("runs")
     assert tables.index("targets") < tables.index("projects")
     assert tables.index("file_index") < tables.index("revisions")
+
+
+# --- objects outside the tenant prefix (the pre-P5-10 shape) -------------
+
+def test_a_purge_sweeps_artifacts_left_under_the_old_key_shape(
+    two_tenants, session, tmp_path
+):
+    """"Leaves nothing behind" has to be true of a deployment that never ran
+    `python -m app.artifacts rekey`, or whose run was interrupted between
+    updating a row and deleting the old object.
+
+    Those objects are keyed `<run_key>/<path>` -- outside the tenant prefix --
+    so a sweep of `tenant/<id>/` alone would leave them in the bucket for
+    ever, and after the purge there is nothing left to derive their keys from.
+    """
+    store, (doomed, doomed_run), (keeper, keeper_run) = two_tenants
+    blob = tmp_path / "legacy"
+    blob.write_bytes(b"old")
+    stale = store_keys.legacy_artifact_key(doomed_run.run_key, "trace.zip")
+    store.put_file(stale, blob)
+    # The neighbour has one too, and it must survive.
+    theirs = store_keys.legacy_artifact_key(keeper_run.run_key, "trace.zip")
+    store.put_file(theirs, blob)
+
+    with actor_scope(OPERATOR):
+        purge_mod.purge_tenant(session, store, slug="doomed", confirm_slug="doomed")
+
+    assert stale not in store.objects, "the old-shape object went too"
+    assert theirs in store.objects, "and the neighbour's did not"
+
+
+def test_the_reported_object_count_is_what_was_really_deleted(
+    two_tenants, session, monkeypatch
+):
+    """`purge_log` must not claim objects that are still in the bucket.
+
+    `Storage.delete` swallows failures, by design, because a purge has to be
+    re-runnable past an object that is already gone -- which makes "how many
+    did we list?" the wrong number to record in the one operation with no
+    undo. So each key is re-checked and only counted if it is really gone.
+    """
+    store, (_doomed, _run), _keeper = two_tenants
+
+    kept = sorted(store.list_keys(store_keys.tenant_prefix(_doomed)))[0]
+    real_delete = store.delete
+
+    def delete(key):
+        if key == kept:
+            return  # as a swallowed AccessDenied looks from here
+        real_delete(key)
+
+    monkeypatch.setattr(store, "delete", delete)
+
+    with actor_scope(OPERATOR):
+        report = purge_mod.purge_tenant(
+            session, store, slug="doomed", confirm_slug="doomed"
+        )
+
+    assert kept in store.objects, "the undeletable object is still there"
+    assert not any(
+        key == kept for key in store.list_keys(store_keys.tenant_prefix(_doomed))
+    ) or kept in store.objects
+    logged = session.scalars(
+        select(PurgeLog).order_by(PurgeLog.id.desc())
+    ).first()
+    assert logged.removed["objects"] == report.objects

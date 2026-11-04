@@ -353,3 +353,70 @@ def test_a_run_cannot_overwrite_a_sibling_targets_blob(
 
     # ...and the sibling's blob is untouched.
     assert store.objects[sibling["blob_key"]][0] != poison.read_bytes()
+
+
+# --- the legacy artifact key shape: readable, not writable (P5-10 / #42) --
+
+def test_a_legacy_artifact_key_is_still_readable(session, world, tmp_path):
+    """Expand then contract. An object written before P5-10 keeps resolving
+    until `python -m app.artifacts rekey` has moved it, which is what lets a
+    deployment take that pass at leisure instead of during a deploy."""
+    from app.domain import store_keys
+
+    built, store = world
+    demo = built["demo"]
+    legacy = store_keys.legacy_artifact_key(demo["run_key"], "trace.zip")
+    blob = tmp_path / "o"
+    blob.write_bytes(b"old evidence")
+    store.put_file(legacy, blob)
+
+    with service.acting_as(demo["scope"]):
+        assert service.blob_exists(session, demo["scope"], store, legacy) is True
+        chunks, _ct = service.read_blob(session, demo["scope"], store, legacy)
+
+    assert b"".join(chunks) == b"old evidence"
+
+
+def test_a_legacy_artifact_key_cannot_be_written_any_more(session, world, tmp_path):
+    """The contract half, at the boundary rather than only in the source.
+
+    A structural test already asserts no application module *builds* the old
+    shape, but a sandbox sends keys over the wire: if the service accepted one
+    on a write, a compromised or stale run could still create an object
+    outside the tenant prefix -- invisible to an operator listing the tenant,
+    which is half of what #42 is for.
+    """
+    from app.domain import store_keys
+
+    built, store = world
+    demo = built["demo"]
+    legacy = store_keys.legacy_artifact_key(demo["run_key"], "new.zip")
+    blob = tmp_path / "o"
+    blob.write_bytes(b"new")
+
+    with service.acting_as(demo["scope"]), pytest.raises(service.NotAuthorized):
+        service.write_blob(session, demo["scope"], store, legacy, blob)
+
+    with service.acting_as(demo["scope"]), pytest.raises(service.NotAuthorized):
+        service.index_artifact(
+            session, demo["scope"], key=legacy, sha256="abc", kind="other", step=None
+        )
+
+    assert legacy not in store.objects
+
+
+def test_another_runs_legacy_key_is_refused_even_on_a_read(session, world, tmp_path):
+    """Accepting the old shape is scoped to *this* run. The run key is what
+    both shapes are authorized against, so the legacy branch is no wider than
+    the current one."""
+    from app.domain import store_keys
+
+    built, store = world
+    demo, other = built["demo"], built["other"]
+    theirs = store_keys.legacy_artifact_key(other["run_key"], "trace.zip")
+    blob = tmp_path / "o"
+    blob.write_bytes(b"theirs")
+    store.put_file(theirs, blob)
+
+    with service.acting_as(demo["scope"]), pytest.raises(service.NotAuthorized):
+        service.read_blob(session, demo["scope"], store, theirs)

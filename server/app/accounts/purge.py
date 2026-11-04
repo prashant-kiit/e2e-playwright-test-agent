@@ -52,7 +52,7 @@ from sqlalchemy.orm import Session
 
 from .. import db
 from ..domain import store_keys
-from ..models import AuditLog, Base, PurgeLog, Tenant, TenantOwned
+from ..models import AuditLog, Base, PurgeLog, Run, Tenant, TenantOwned
 from ..storage import Storage
 from ..tenancy import current_actor, tenant_scope
 
@@ -153,7 +153,11 @@ def purge_tenant(
     #    doing them first means an interrupted purge leaves rows pointing at
     #    missing bytes -- which is recoverable (re-run) -- rather than objects
     #    nothing can name, which is not.
-    report.objects = _sweep_storage(store, tenant.id)
+    #
+    #    The tenant prefix, **and** this tenant's runs under the pre-P5-10
+    #    artifact shape. Those are read from the `runs` rows, so they have to
+    #    be collected before step 2 deletes them.
+    report.objects = _sweep_storage(store, tenant.id, _legacy_prefixes(session, tenant.id))
 
     with tenant_scope(tenant.id):
         # 2. and 3. Every owned table, with the audit log's trigger off for
@@ -217,31 +221,65 @@ def _model_for(table: str):
     raise AssertionError(f"no mapped class for {table!r}")  # pragma: no cover
 
 
-def _sweep_storage(store: Storage, tenant_id: int) -> int:
-    """Delete every object under this tenant's one prefix.
+def _legacy_prefixes(session: Session, tenant_id: int) -> list[str]:
+    """`<run_key>/` for each of this tenant's runs. Pre-P5-10 artifact keys.
 
-    The prefix is a true description of "everything this tenant owns" only
-    since P5-10 moved artifacts under it (#42); before that, run artifacts were
-    keyed by run and this sweep would have missed all of them. The listing is
-    materialised before deleting because deleting while iterating a paginator
-    is asking the store to be consistent about something it does not promise.
+    The tenant prefix is a true description of "everything this tenant owns"
+    only for objects written since P5-10 (#42) moved artifacts under it. A
+    deployment that has not run `python -m app.artifacts rekey`, or whose run
+    was interrupted between updating a row and deleting the old object, still
+    has objects keyed by run alone -- outside the tenant prefix, and therefore
+    outside what the sweep below would find.
+
+    Leaving them would make "offboarding leaves nothing behind" false for
+    exactly the deployments that have been running longest. So the purge reads
+    its own run keys and sweeps those prefixes too. Read **before** step 2
+    deletes the `runs` rows, because afterwards there is nothing left to derive
+    them from -- which is also why this is not a separate pass somebody could
+    forget to run.
     """
-    prefix = store_keys.tenant_prefix(tenant_id)
-    keys = list(store.list_keys(prefix))
-    for key in keys:
-        store.delete(key)
-    return len(keys)
+    with tenant_scope(tenant_id):
+        run_keys = session.scalars(select(Run.run_key)).all()
+    return [store_keys.legacy_run_prefix(key) for key in run_keys]
 
 
-def purged(session: Session) -> list[PurgeLog]:
-    """Every purge this deployment has performed, newest first.
+def _sweep_storage(store: Storage, tenant_id: int, extra_prefixes: list[str]) -> int:
+    """Delete every object under this tenant's prefixes. Returns the count
+    **actually deleted**, which is not the same as the count listed.
 
-    A read of the platform log, not a customer's: `purge_log` is not
-    tenant-owned, so this is deliberately not reachable from the portal.
+    A `delete` that fails -- `AccessDenied` on a misconfigured bucket, say --
+    is swallowed by `Storage.delete`, by design, because a purge must be
+    re-runnable past an object that is already gone. That makes "how many did
+    we list?" the wrong number to report: `purge_log` would record objects
+    removed that are still in the bucket, in the one operation with no undo.
+    So each key is re-checked with `exists` and only counted if it is really
+    gone, and anything left is logged and reported.
+
+    The listing is materialised before deleting because deleting while
+    iterating a paginator is asking the store to be consistent about something
+    it does not promise.
     """
-    return list(
-        session.scalars(select(PurgeLog).order_by(PurgeLog.at.desc(), PurgeLog.id.desc()))
-    )
+    deleted = 0
+    survived: list[str] = []
+    for prefix in [store_keys.tenant_prefix(tenant_id), *extra_prefixes]:
+        for key in list(store.list_keys(prefix)):
+            store.delete(key)
+            if store.exists(key):
+                survived.append(key)
+            else:
+                deleted += 1
+    if survived:
+        # Not raised: the rows still have to go, or the tenant is half-purged
+        # with no way to finish. Reported loudly instead, and the purge is
+        # re-runnable -- but the `tenants` row is gone by then, so this line is
+        # the only thing that will say which objects to chase.
+        log.error(
+            "purge of tenant %s left %d object(s) in the store: %s",
+            tenant_id,
+            len(survived),
+            ", ".join(survived[:20]),
+        )
+    return deleted
 
 
 def purge_with_own_session(

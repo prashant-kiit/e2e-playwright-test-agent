@@ -27,6 +27,7 @@ from app.control.local import LocalGateway
 from app.control.model import TrackedBlob
 from app.control.service import NotAuthorized, RunNotLive
 from app.db import get_session
+from app.domain import store_keys
 from app.domain.steps import Step
 from app.main import app as fastapi_app
 from app.run_token import RunScope
@@ -292,7 +293,14 @@ def test_a_revision_naming_a_blob_nobody_uploaded_is_refused(gateway, world):
 
 def test_a_run_indexes_an_artifact_and_versions_it_on_change(gateway, world, tmp_path):
     store = GatewayStorage(gateway)
-    key = f"{world['run_key']}/trace.zip"
+    # Asked of the key builder rather than spelled out. It was spelled out, in
+    # the pre-P5-10 shape, and kept passing after #42 moved artifacts under the
+    # tenant prefix -- because the service still accepted the old shape on
+    # writes. Tightening that to reads only is what made this test fail, which
+    # is the test doing its job a release late.
+    key = store_keys.artifact_key(
+        world["scope"].tenant_id, world["run_key"], "trace.zip"
+    )
     source = tmp_path / "trace.zip"
     source.write_bytes(b"first")
     store.put_file(key, source)
