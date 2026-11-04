@@ -30,7 +30,7 @@ from fastapi.testclient import TestClient
 
 from app import apphub
 from app.api import get_bootstrap_runner, get_launcher, get_resolver, get_storage
-from app.auth import hash_password
+from app.auth import hash_password, require_auth
 from app.db import get_session
 from app.domain.roles import UserRole
 from app.main import app
@@ -288,3 +288,51 @@ def test_a_project_id_from_another_tenant_cannot_be_built_under(client_b, estate
         json=target_body(app="smuggled", name="Smuggled"),
     )
     assert r.status_code == 404
+
+
+# --- a route that forgot its auth dependency -----------------------------
+
+@pytest.mark.unscoped_tenant
+def test_a_route_without_its_auth_dependency_fails_instead_of_serving_tenant_one(
+    _overrides, session, store, client_a
+):
+    """The fail-closed guarantee at the boundary (P5-11, story 6).
+
+    Story 6 asks to be "structurally unable to read another tenant's data even
+    by guessing an id, so that a missing filter is a bug that fails closed
+    rather than a leak". The resolver used to answer the seeded default outside
+    any scope, so this exact mistake -- a route whose auth dependency is absent,
+    or present but binding nothing -- served the *first customer's* rows to an
+    unauthenticated caller and looked like a working endpoint. There is no
+    error to notice, no empty result, nothing in a log: just tenant 1's data.
+
+    Simulated by overriding `require_auth` with a dependency that resolves and
+    binds nothing, which is what a forgotten dependency leaves behind as far as
+    the resolver can tell. Marked `unscoped_tenant` because the realism is the
+    whole point: in production a request begins with no tenant bound, and the
+    harness's autouse scope would otherwise supply the very thing whose absence
+    is under test.
+
+    The assertion is "not tenant 1's rows", not merely "an error": a 500 that
+    arrived for some other reason would pass a test that only checked the
+    status, so the estate is built first and its payload is what must not come
+    back.
+    """
+    estate = _build_estate(client_a, session, store, tenant_id=1, app_slug="alpha")
+
+    app.dependency_overrides[require_auth] = lambda: None
+    try:
+        # raise_server_exceptions=False so this observes what a client observes
+        # from uvicorn -- a 500 -- rather than the exception re-raised in-process.
+        unauthed = TestClient(app, raise_server_exceptions=False)
+        response = unauthed.get(f"/targets/{estate.target_id}/revisions")
+    finally:
+        app.dependency_overrides.pop(require_auth, None)
+
+    assert response.status_code == 500, (
+        f"an unscoped read answered {response.status_code}; a route with no "
+        f"tenant bound must fail rather than resolve one"
+    )
+    # And it leaked nothing on the way: no revision id, no app slug.
+    assert "alpha" not in response.text
+    assert str(estate.revision_id) not in response.text

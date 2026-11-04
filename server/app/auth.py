@@ -46,9 +46,10 @@ week-long-cookie behaviour, worse.
 Two dependencies:
 
 * `require_auth` resolves the current user from the access cookie and --
-  because it is async -- sets `tenancy.current_tenant_id` for the rest of the
-  request, so the sync endpoint and every repo call it makes insert and read as
-  that tenant. A missing, bad or **expired** cookie is a 401.
+  because it is async -- sets `tenancy.current_tenant_id` **and
+  `tenancy.current_actor`** for the rest of the request, so the sync endpoint and
+  every repo call it makes insert and read as that tenant, and every audit row
+  names that user. A missing, bad or **expired** cookie is a 401.
 * `require_tenant_admin` is `require_auth` plus a role check: a non-admin acting
   on a tenant-admin surface (delivery approval, PAT rotation, quota/user
   changes) is a 403.
@@ -61,15 +62,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import os
 import secrets
 from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, Response
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
+from . import config
 from .domain.roles import UserRole
-from .tenancy import set_current_tenant
+from .tenancy import set_current_actor, set_current_tenant
 
 # The access cookie keeps the original name: it is still "the session cookie"
 # from the browser's point of view, just a short-lived one now.
@@ -108,7 +109,9 @@ class CurrentUser:
 
 
 def _secret() -> str:
-    return os.environ.get("QA_SECRET_KEY", "dev-secret-change-me")
+    """The signing key, from `config` -- which is the one place that knows what
+    it and its development fallback are. See `config.secret_key`."""
+    return config.secret_key()
 
 
 def _serializer(salt: str) -> URLSafeTimedSerializer:
@@ -208,6 +211,24 @@ def read_refresh(token: str) -> CurrentUser | None:
 # else: a route that set one of these itself could get the path wrong and leave
 # a logout that does not log out, or re-issue the refresh cookie and turn the
 # hard cap into a sliding window by accident.
+#
+# **`Secure` outside development**, from `config.cookies_secure()`. Both
+# cookies carry it, including the renewed access cookie -- a flag set at login
+# but not at refresh would protect only the first fifteen minutes.
+#
+# The two deletes carry it as well, for a smaller reason than an earlier
+# version of this comment claimed. A browser keys cookie *identity* on name,
+# domain and path only, so a delete matches regardless of this flag -- unlike
+# the refresh cookie's `Path`, which really must match and is why
+# `clear_session_cookies` repeats it. `Secure` is on the deletes so the
+# expiring `Set-Cookie` itself does not travel in clear, and so the contract
+# is one rule rather than a rule with an exception somebody has to remember.
+# It is conditional rather than unconditional because a development stack
+# reached over a LAN address or a tunnel has no TLS, and there a `Secure`
+# cookie is a login that silently never persists; `http://localhost` would
+# have been fine either way, since browsers treat it as a secure context.
+# `samesite="lax"` is not a substitute: it bounds which *sites* may cause the
+# cookie to be sent, not which *protocol* carries it.
 
 def set_access_cookie(response: Response, user: CurrentUser) -> None:
     """Issue a fresh access cookie. Login and refresh both end here."""
@@ -216,6 +237,7 @@ def set_access_cookie(response: Response, user: CurrentUser) -> None:
         mint_access(user),
         max_age=ACCESS_MAX_AGE,
         httponly=True,
+        secure=config.cookies_secure(),
         samesite="lax",
         path="/",
     )
@@ -233,6 +255,7 @@ def set_refresh_cookie(response: Response, user: CurrentUser) -> None:
         mint_refresh(user),
         max_age=REFRESH_MAX_AGE,
         httponly=True,
+        secure=config.cookies_secure(),
         samesite="lax",
         path=REFRESH_PATH,
     )
@@ -245,8 +268,9 @@ def clear_session_cookies(response: Response) -> None:
     "/" does not match a cookie scoped to "/auth", and the leftover would let
     the next `/auth/refresh` mint a new session out of a logged-out browser.
     """
-    response.delete_cookie(ACCESS_COOKIE, path="/")
-    response.delete_cookie(REFRESH_COOKIE, path=REFRESH_PATH)
+    secure = config.cookies_secure()
+    response.delete_cookie(ACCESS_COOKIE, path="/", secure=secure)
+    response.delete_cookie(REFRESH_COOKIE, path=REFRESH_PATH, secure=secure)
 
 
 # --- the dependencies ----------------------------------------------------
@@ -257,15 +281,28 @@ async def require_auth(request: Request) -> CurrentUser:
     Async on purpose: a value a sync dependency sets does not reach the
     threadpooled endpoint, but one an async dependency sets does, so this is
     where `current_tenant_id()` is made to answer the acting user's tenant for
-    the whole request. Tests override this dependency to bypass auth, which
-    leaves the tenant unset and so the default -- exactly what a single-tenant
-    test wants.
+    the whole request.
+
+    **A route that loses this dependency now fails rather than serving the
+    first tenant** (P5-11). It used to leave the tenant unset, and the resolver
+    answered the seeded default -- so the mistake was invisible, and a test that
+    overrode this dependency to bypass auth relied on that fallback. The
+    resolver raises instead, the suite binds its tenant in an autouse fixture
+    (tests/conftest.py), and the failure is asserted at the boundary in
+    tests/test_tenant_isolation.py.
     """
     token = request.cookies.get(ACCESS_COOKIE)
     user = read_access(token) if token else None
     if user is None:
         raise HTTPException(status_code=401, detail="authentication required")
     set_current_tenant(user.tenant_id)
+    # The acting user, for the audit log (P5-07), bound in the same breath as
+    # the tenant and for the same reason: a route that had to remember to pass
+    # the actor is a route that can forget, and an audit row attributing a
+    # customer's delivery to "system" is worse than no row -- it is a wrong
+    # answer to the question the table exists to answer. There is no route that
+    # could forget, because none of them does it.
+    set_current_actor(user.email)
     return user
 
 

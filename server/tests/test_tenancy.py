@@ -17,6 +17,7 @@ from app.domain.roles import UserRole
 from app.models import Project, Revision, Target, Tenant, User
 from app.tenancy import (
     DEFAULT_TENANT_ID,
+    NoTenantScope,
     across_tenants,
     current_tenant_id,
     tenant_scope,
@@ -54,12 +55,41 @@ def test_no_table_keeps_the_backfill_server_default():
             )
 
 
-def test_current_tenant_id_is_the_single_seeded_tenant():
-    """Outside any request/run scope it is the seeded default -- which is what
-    keeps the thread/CI path and every pure-domain test writing tenant 1."""
-    assert current_tenant_id() == DEFAULT_TENANT_ID == 1
+@pytest.mark.unscoped_tenant
+def test_resolving_the_tenant_outside_a_scope_fails_closed():
+    """Story 6's guarantee, at the seam that decides it (P5-11).
+
+    This used to answer `DEFAULT_TENANT_ID`, and that is the opposite of what
+    the spec asks for: a route that forgot its auth dependency, or background
+    work that forgot to bind a scope, read *and wrote* the first customer's
+    rows and looked like it was working. "A missing filter is a bug that fails
+    closed rather than a leak" is only true if the thing every filter is built
+    from refuses to guess.
+
+    Opted out of the harness's autouse scope (P5-09): the claim *is* what the
+    resolver does with nothing bound, so a test of it cannot run inside a
+    binding.
+    """
+    with pytest.raises(NoTenantScope) as excinfo:
+        current_tenant_id()
+
+    # Naming the problem, not just failing: whoever hits this is looking at a
+    # stack with no request and no run in it, and needs to be told what is
+    # missing rather than left to infer it from a KeyError.
+    message = str(excinfo.value)
+    assert "tenant" in message.lower()
+    assert "scope" in message.lower()
 
 
+@pytest.mark.unscoped_tenant
+def test_the_seeded_tenant_is_still_the_constant_the_migrations_use():
+    """The constant does not go away with the fallback: the migrations seed it,
+    the CLI defaults to it and the harness binds it. What goes away is the
+    resolver *guessing* it."""
+    assert DEFAULT_TENANT_ID == 1
+
+
+@pytest.mark.unscoped_tenant
 def test_current_tenant_id_resolves_from_an_active_scope():
     """P5's replacement: inside a scope (a request's authenticated user, or a
     run on the thread path) the resolver answers that tenant, not the constant.
@@ -67,17 +97,20 @@ def test_current_tenant_id_resolves_from_an_active_scope():
     The call sites in repo.py do not change; this one function does."""
     with tenant_scope(42):
         assert current_tenant_id() == 42
-    # and it falls back the moment the scope closes
-    assert current_tenant_id() == DEFAULT_TENANT_ID
+    # and it stops resolving at all the moment the scope closes
+    with pytest.raises(NoTenantScope):
+        current_tenant_id()
 
 
+@pytest.mark.unscoped_tenant
 def test_tenant_scopes_nest_and_restore():
     with tenant_scope(7):
         assert current_tenant_id() == 7
         with tenant_scope(9):
             assert current_tenant_id() == 9
         assert current_tenant_id() == 7
-    assert current_tenant_id() == DEFAULT_TENANT_ID
+    with pytest.raises(NoTenantScope):
+        current_tenant_id()
 
 
 def test_the_migration_seeds_exactly_one_tenant(session):
@@ -97,13 +130,24 @@ def test_the_migration_seeds_the_single_operator_as_a_tenant_admin(session):
     assert admin.credential != "admin"
 
 
-def test_the_thread_path_binds_the_runs_tenant(session):
-    """The background equivalent of `require_auth`: `drive_run` resolves the
-    run's tenant and binds it, so a run's inserts are written as its own tenant
-    and not the resolver's default."""
+@pytest.mark.unscoped_tenant
+def test_the_background_path_binds_the_runs_tenant_from_its_token(session):
+    """The background equivalent of `require_auth`, as P5-05 left it.
+
+    It used to be `launcher._run_tenant_scope`, which read the run across
+    tenants in order to discover whose it was -- a chicken-and-egg that needed a
+    hole in the read guard, and the reason `launcher` was on the bypass
+    allowlist. The token carries the tenant now: it is minted by the control
+    plane while the run's own tenant is acting, and every operation the run
+    performs is bound to it by `service.acting_as`. So the run's inserts are
+    still written as the run's tenant, and nothing on that path reads a row
+    without a scope -- because nothing on that path reads a row at all.
+    """
     from sqlalchemy.orm import sessionmaker
 
-    from app.launcher import _run_tenant_scope
+    from app.control import factory as control_factory
+    from app.control import service
+    from app.run_token import verify
 
     session.add(Tenant(id=2, slug="second", name="second"))
     session.commit()
@@ -111,16 +155,56 @@ def test_the_thread_path_binds_the_runs_tenant(session):
         project = repo.create_project(session, name="t2")
         target = create_target(session, project.id, app="a2", name="A2")
         run = repo.start_run(session, target_id=target.id, story_id="SCRUM-1", mode="full")
+    # A throwaway factory on the same engine, for the reason the deleted
+    # `_run_tenant_scope` test used one: minting opens its own session, and a
+    # session that already created the run would answer `session.get` from its
+    # identity map without ever querying -- so the read guard would not run and
+    # the test would prove nothing about it.
+    factory = sessionmaker(bind=session.get_bind(), expire_on_commit=False, future=True)
+    with tenant_scope(2):
+        # Minted inside the acting tenant's scope, exactly as the two production
+        # call sites do it -- on a request thread, under `require_auth`.
+        token = control_factory.mint_for_run(run.id, session_factory=factory)
     assert run.tenant_id == 2
 
-    # A throwaway factory on the same engine: `_run_tenant_scope` opens and
-    # closes its own session, so it must not be handed the fixture's shared one.
+    scope = verify(token)
+    assert scope.tenant_id == 2
+    assert scope.run_id == run.id
+    assert scope.target_id == target.id
+
+    with pytest.raises(NoTenantScope):  # outside the scope: nothing is acting
+        current_tenant_id()
+    with service.acting_as(scope):
+        assert current_tenant_id() == 2
+    with pytest.raises(NoTenantScope):  # and unbound again after
+        current_tenant_id()
+
+
+def test_a_token_cannot_be_minted_for_another_tenants_run(session):
+    """Minting is a tenant-filtered read, which is why it needs no bypass.
+
+    A control plane acting as tenant 1 cannot mint a token for tenant 2's run:
+    the read simply does not find it. That is the property that let
+    `_run_tenant_scope` -- and `launcher`'s entry in the bypass allowlist -- be
+    deleted rather than replaced.
+    """
+    from sqlalchemy.orm import sessionmaker
+
+    from app.control import factory as control_factory
+
+    session.add(Tenant(id=2, slug="second", name="second"))
+    session.commit()
+    with tenant_scope(2):
+        project = repo.create_project(session, name="t2")
+        target = create_target(session, project.id, app="a2", name="A2")
+        run = repo.start_run(session, target_id=target.id, story_id="SCRUM-1", mode="full")
+
+    # A fresh session, so the read really goes to the database: see the note in
+    # the test above about the identity map.
     factory = sessionmaker(bind=session.get_bind(), expire_on_commit=False, future=True)
 
-    assert current_tenant_id() == DEFAULT_TENANT_ID  # outside the scope
-    with _run_tenant_scope(run.id, factory):
-        assert current_tenant_id() == 2
-    assert current_tenant_id() == DEFAULT_TENANT_ID  # restored after
+    with pytest.raises(repo.NotFound):
+        control_factory.mint_for_run(run.id, session_factory=factory)
 
 
 def test_insert_paths_set_tenant_id_explicitly(session):
@@ -319,3 +403,67 @@ def test_one_tenant_cannot_use_the_same_project_name_twice(session):
     with pytest.raises(IntegrityError):
         repo.create_project(session, name="Checkout")
     session.rollback()
+
+
+# --- the guard asks for a tenant only when one is at stake ---------------
+
+@pytest.mark.unscoped_tenant
+def test_reading_the_tenants_table_needs_no_scope(session):
+    """`tenants` is not tenant-owned, so reading it is not an unscoped read.
+
+    The guard resolves the tenant in order to build its filter, and resolving
+    now raises -- so a guard that resolved for *every* ORM select would demand
+    a scope from statements it then had nothing to filter. That is not
+    hypothetical: `repo.list_tenant_ids` is how the reaper discovers which
+    tenants to sweep, and it necessarily runs before any tenant is bound. A
+    guard that failed there would take the whole maintenance loop down
+    ("reaper pass failed; continuing", once every thirty seconds, forever)
+    while looking like the fail-closed behaviour working as intended.
+
+    So the tenant is resolved only when a tenant-owned entity is actually in
+    the statement. `tenants` carries no `tenant_id` -- its own id *is* the
+    tenant -- and needs no bypass for the same reason it needs no filter.
+    """
+    assert repo.list_tenant_ids(session) == [DEFAULT_TENANT_ID]
+
+
+@pytest.mark.unscoped_tenant
+def test_reading_a_tenant_owned_table_still_needs_one(session):
+    """The other half, so the test above cannot be mistaken for the guard
+    having gone quiet: a select of an owned entity outside a scope still
+    fails."""
+    with pytest.raises(NoTenantScope):
+        list(session.scalars(repo.select(Project)))
+
+
+def test_an_aggregate_over_an_owned_table_is_still_filtered(session):
+    """The fail-closed direction of the guard's "is anything owned here?" check.
+
+    `select(func.count()).select_from(Run)` reports **no** mappers at all, so a
+    check written as "skip unless some mapper is tenant-owned" skips precisely
+    the statements whose entities it cannot see -- and that shape is how
+    `repo.tenant_usage` counts runs for the quota. The first version of that
+    check let one tenant's runs count against another's cap.
+
+    Asserted directly on an aggregate here, as well as through the quota in
+    test_quotas.py, because the quota test says "the cap is wrong" where this
+    one says why.
+    """
+    from sqlalchemy import func
+
+    session.add(Tenant(id=2, slug="second", name="Second"))
+    session.commit()
+
+    with tenant_scope(2):
+        project = repo.create_project(session, name="theirs")
+        target = create_target(session, project.id, app="theirs", name="Theirs")
+        repo.start_run(session, target_id=target.id, story_id="SCRUM-1", mode="full")
+
+    # Counted from the harness's own tenant, which owns none of the above.
+    counted = session.scalar(
+        repo.select(func.count()).select_from(app.models.Run)
+    )
+    assert counted == 0, (
+        f"an aggregate counted {counted} of another tenant's runs; the guard "
+        f"skipped a statement whose mappers it could not read"
+    )

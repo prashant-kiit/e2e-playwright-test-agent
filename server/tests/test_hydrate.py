@@ -10,6 +10,14 @@ only the blob store faked.
 Hydrate is three named parts so P4 can replace them one at a time, and each is
 tested for what a caller can observe: the paths in the worktree, the bytes in
 them, and whether a step ever got to run.
+
+P5-05 changed where the revision and the blobs come from, not what hydrate does
+with them: `materialize` takes the revision as a value (`revisions.revision_view`
+builds one from a row, which is what the control plane's own callers do), and
+`hydrate` takes the run's gateway instead of a session and a target row. The
+round-trip property is unchanged and is still the most valuable test here --
+and it now also covers the blob arriving over the internal API, because the
+gateway's store is the only store a run has.
 """
 
 from __future__ import annotations
@@ -22,6 +30,7 @@ from app import repo, revisions
 from app.delivery import render
 from app.sandbox import hydrate as hyd
 from app.target_config import config_of
+from tests.control_helpers import control_for_session
 from tests.delivery_helpers import make_worktree
 from tests.storage_helpers import FakeStorage
 from tests.target_helpers import create_target, public_resolver
@@ -35,6 +44,45 @@ def target(session):
 
 def _commit(session, target, store, root):
     return revisions.commit_revision(session, target, store, root, author="operator")
+
+
+def _view(session, revision):
+    """The revision as the value `materialize` takes.
+
+    The same converter the control plane's own callers use (authoring's
+    temporary tree, delivery's materialized head), so these tests exercise the
+    one `materialize` rather than a shape only a test produces.
+    """
+    return revisions.revision_view(session, revision)
+
+
+@pytest.fixture()
+def control(session, target, store, monkeypatch):
+    """A gateway for a live run on `target`, holding `store`.
+
+    `hydrate` takes one of these now: it asks for the head revision and the
+    target's configuration, and after P5-05 the blobs come through it too. A
+    real `LocalGateway` rather than a stand-in, so what these tests hydrate from
+    is what a run hydrates from -- including the key authorization, which a raw
+    store would skip.
+
+    It lends this test's own session rather than taking the `session_factory`
+    fixture: a test holding both gets two teardowns, and the second one's
+    `TRUNCATE` waits for ever on the first one's open transaction.
+    """
+    run = repo.start_run(session, target_id=target.id, story_id="SCRUM-1", mode="full")
+    return control_for_session(run.id, session, store, monkeypatch)
+
+
+@pytest.fixture()
+def store():
+    """One fake store per test, shared by the committer and the gateway.
+
+    A fixture rather than a local, because the gateway has to be holding the
+    same one the revision was committed into -- two stores would make every
+    hydrate fail on a missing blob.
+    """
+    return FakeStorage()
 
 
 # --- the round-trip property ---------------------------------------------
@@ -62,7 +110,7 @@ def _tree_shapes() -> list[dict[str, bytes]]:
 
 @pytest.mark.parametrize("shape", _tree_shapes(), ids=lambda s: f"{len(s)}-files")
 def test_commit_then_materialize_then_rescan_reproduces_the_tree_hash(
-    session, target, tmp_path, shape
+    session, target, store, tmp_path, shape
 ):
     """The property parity used to check by comparison, checked by construction."""
     source = tmp_path / "source"
@@ -77,19 +125,18 @@ def test_commit_then_materialize_then_rescan_reproduces_the_tree_hash(
     assert committed is not None, "an unseen tree always commits"
 
     dest = tmp_path / "dest"
-    hyd.materialize(session, committed, store, dest)
+    hyd.materialize(_view(session, committed), store, dest)
 
     assert revisions.scan_tracked_tree(dest).tree_hash == committed.tree_hash
 
 
 def test_materialize_writes_exactly_the_revisions_paths_and_nothing_else(
-    session, target, tmp_path
+    session, target, store, tmp_path
 ):
-    store = FakeStorage()
     committed = _commit(session, target, store, make_worktree(tmp_path / "source"))
 
     dest = tmp_path / "dest"
-    hyd.materialize(session, committed, store, dest)
+    hyd.materialize(_view(session, committed), store, dest)
 
     on_disk = {
         p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()
@@ -98,14 +145,13 @@ def test_materialize_writes_exactly_the_revisions_paths_and_nothing_else(
     assert on_disk == in_revision
 
 
-def test_materialize_reproduces_the_bytes_exactly(session, target, tmp_path):
+def test_materialize_reproduces_the_bytes_exactly(session, target, store, tmp_path):
     source = make_worktree(tmp_path / "source")
     (source / "tests" / "checkout" / "binary.spec.ts").write_bytes(b"\x00\xff\xfe\n")
-    store = FakeStorage()
     committed = _commit(session, target, store, source)
 
     dest = tmp_path / "dest"
-    hyd.materialize(session, committed, store, dest)
+    hyd.materialize(_view(session, committed), store, dest)
 
     for path, on_disk in render.tracked_tree(source):
         assert (dest / path).read_bytes() == on_disk.read_bytes(), path
@@ -113,52 +159,52 @@ def test_materialize_reproduces_the_bytes_exactly(session, target, tmp_path):
 
 # --- a blob that is missing or does not match its key ---------------------
 
-def test_a_missing_blob_fails_the_hydrate(session, target, tmp_path):
-    store = FakeStorage()
+def test_a_missing_blob_fails_the_hydrate(session, target, store, tmp_path):
     committed = _commit(session, target, store, make_worktree(tmp_path / "source"))
     store.objects.clear()
 
     with pytest.raises(hyd.HydrateError, match="blob"):
-        hyd.materialize(session, committed, store, tmp_path / "dest")
+        hyd.materialize(_view(session, committed), store, tmp_path / "dest")
 
 
 def test_a_blob_whose_bytes_do_not_match_its_key_fails_the_hydrate(
-    session, target, tmp_path
+    session, target, store, tmp_path
 ):
     """The blob key *is* the content hash, so every file is verified as it is
     written. A store that hands back the wrong bytes is caught here rather than
     becoming a worktree the agent then works in."""
-    store = FakeStorage()
     committed = _commit(session, target, store, make_worktree(tmp_path / "source"))
     row = revisions.list_files(session, committed.id)[0]
     _bytes, ct = store.objects[row.blob_key]
     store.objects[row.blob_key] = (b"tampered", ct)
 
     with pytest.raises(hyd.HydrateError, match="does not match"):
-        hyd.materialize(session, committed, store, tmp_path / "dest")
+        hyd.materialize(_view(session, committed), store, tmp_path / "dest")
 
 
-def test_a_failed_hydrate_leaves_no_partial_tree(session, target, tmp_path):
-    store = FakeStorage()
+def test_a_failed_hydrate_leaves_no_partial_tree(
+    session, target, store, control, tmp_path
+):
     committed = _commit(session, target, store, make_worktree(tmp_path / "source"))
     row = revisions.list_files(session, committed.id)[-1]
     del store.objects[row.blob_key]
 
     dest = tmp_path / "dest"
     with pytest.raises(hyd.HydrateError):
-        hyd.hydrate(session, target, store, dest, emit=lambda line: None)
+        hyd.hydrate(control, store, dest, emit=lambda line: None)
 
     assert not dest.exists(), "a half-written worktree is worse than none"
 
 
 # --- hydrate: materialize + render + install ------------------------------
 
-def test_hydrate_builds_the_head_revisions_tree(session, target, tmp_path):
-    store = FakeStorage()
+def test_hydrate_builds_the_head_revisions_tree(
+    session, target, store, control, tmp_path
+):
     _commit(session, target, store, make_worktree(tmp_path / "source"))
 
     dest = tmp_path / "wt"
-    result = hyd.hydrate(session, target, store, dest, emit=lambda line: None)
+    result = hyd.hydrate(control, store, dest, emit=lambda line: None)
 
     assert result.rev == 1
     assert (dest / "seed.spec.ts").is_file()
@@ -166,42 +212,41 @@ def test_hydrate_builds_the_head_revisions_tree(session, target, tmp_path):
 
 
 def test_a_second_hydrate_of_the_same_revision_is_byte_identical(
-    session, target, tmp_path
+    session, target, store, control, tmp_path
 ):
     """Otherwise every run would commit a revision for the hydrate alone."""
-    store = FakeStorage()
     _commit(session, target, store, make_worktree(tmp_path / "source"))
 
     one, two = tmp_path / "one", tmp_path / "two"
-    hyd.hydrate(session, target, store, one, emit=lambda line: None)
-    hyd.hydrate(session, target, store, two, emit=lambda line: None)
+    hyd.hydrate(control, store, one, emit=lambda line: None)
+    hyd.hydrate(control, store, two, emit=lambda line: None)
 
     assert revisions.scan_tracked_tree(one).blobs == revisions.scan_tracked_tree(two).blobs
 
 
 def test_generated_entries_are_rendered_from_the_row_not_copied_from_the_revision(
-    session, target, tmp_path
+    session, target, store, control, tmp_path
 ):
     """The generated config has exactly one author: the target row."""
     source = make_worktree(tmp_path / "source")
     (source / "playwright.config.ts").write_text("// a stale config from the revision\n")
-    store = FakeStorage()
     _commit(session, target, store, source)
 
     dest = tmp_path / "wt"
-    hyd.hydrate(session, target, store, dest, emit=lambda line: None)
+    hyd.hydrate(control, store, dest, emit=lambda line: None)
 
     rendered = (dest / "playwright.config.ts").read_text()
     assert rendered == render.render_playwright_config(config_of(target))
     assert "stale config" not in rendered
 
 
-def test_a_changed_base_url_changes_the_hydrated_config(session, target, tmp_path):
-    store = FakeStorage()
+def test_a_changed_base_url_changes_the_hydrated_config(
+    session, target, store, control, tmp_path
+):
     _commit(session, target, store, make_worktree(tmp_path / "source"))
 
     first = tmp_path / "one"
-    hyd.hydrate(session, target, store, first, emit=lambda line: None)
+    hyd.hydrate(control, store, first, emit=lambda line: None)
     repo.update_target_config(
         session,
         target.id,
@@ -209,7 +254,7 @@ def test_a_changed_base_url_changes_the_hydrated_config(session, target, tmp_pat
         resolve=public_resolver,
     )
     second = tmp_path / "two"
-    hyd.hydrate(session, target, store, second, emit=lambda line: None)
+    hyd.hydrate(control, store, second, emit=lambda line: None)
 
     assert "https://moved.example.com" in (second / "playwright.config.ts").read_text()
     assert (first / "playwright.config.ts").read_text() != (
@@ -217,26 +262,27 @@ def test_a_changed_base_url_changes_the_hydrated_config(session, target, tmp_pat
     ).read_text()
 
 
-def test_a_target_with_no_head_revision_cannot_be_hydrated(session, target, tmp_path):
+def test_a_target_with_no_head_revision_cannot_be_hydrated(
+    session, target, store, control, tmp_path
+):
     """Every target gets revision 1 when it is created, so this is a broken
     target rather than a new one -- and the run must hear the reason."""
     with pytest.raises(hyd.NoHeadRevision, match="no head revision"):
-        hyd.hydrate(session, target, FakeStorage(), tmp_path / "wt", emit=lambda line: None)
+        hyd.hydrate(control, store, tmp_path / "wt", emit=lambda line: None)
 
 
 # --- install: a single named step -----------------------------------------
 
 def test_dependency_install_is_skipped_for_the_fake_runner(
-    session, target, tmp_path, monkeypatch
+    session, target, store, control, tmp_path, monkeypatch
 ):
     """Nothing to install for synthetic steps, and the API image has no node."""
     monkeypatch.setenv("QA_RUNNER", "fake")
-    store = FakeStorage()
     _commit(session, target, store, make_worktree(tmp_path / "source"))
 
     lines: list[str] = []
     dest = tmp_path / "wt"
-    result = hyd.hydrate(session, target, store, dest, emit=lines.append)
+    result = hyd.hydrate(control, store, dest, emit=lines.append)
 
     assert result.installed is False
     assert not (dest / "node_modules").exists()
@@ -260,11 +306,10 @@ def test_a_missing_package_manager_is_a_hard_error_for_the_real_runner(
 
 # --- teardown -------------------------------------------------------------
 
-def test_teardown_removes_the_worktree(session, target, tmp_path):
-    store = FakeStorage()
+def test_teardown_removes_the_worktree(session, target, store, control, tmp_path):
     _commit(session, target, store, make_worktree(tmp_path / "source"))
     dest = tmp_path / "wt"
-    hyd.hydrate(session, target, store, dest, emit=lambda line: None)
+    hyd.hydrate(control, store, dest, emit=lambda line: None)
 
     hyd.teardown(dest)
 

@@ -77,6 +77,14 @@ export class ApiError extends Error {
 }
 export class AuthError extends Error {}
 
+// A prompt's name carries a slash ("steps/2-plan.md") and the routes take it
+// as a path parameter, so the slash must survive: each segment is encoded
+// rather than the whole name. One function because three callers had the same
+// `split/map/join` inline and a fourth would have copied it too.
+function promptPath(name) {
+  return `/prompts/${name.split("/").map(encodeURIComponent).join("/")}`;
+}
+
 export const api = {
   // auth
   me: () => req("GET", "/auth/me"),
@@ -110,8 +118,21 @@ export const api = {
   deleteStory: (targetId, storyId) =>
     req("DELETE", `/targets/${targetId}/stories/${storyId}`),
 
+  // The target's own GitHub credential (P5-03). The token goes up and never
+  // comes back: no response here carries it or its ciphertext, so there is
+  // nothing for this layer to hold on to.
+  targetCredential: (targetId) => req("GET", `/targets/${targetId}/credential`),
+  saveTargetPat: (targetId, token) => req("PUT", `/targets/${targetId}/pat`, { token }),
+  clearTargetPat: (targetId) => req("DELETE", `/targets/${targetId}/pat`),
+
   // delivery: "delivered" or "N revisions ahead", from one Postgres query.
   deliveryState: (targetId) => req("GET", `/targets/${targetId}/delivery`),
+
+  // This tenant's usage against its plan caps (P5-04). One call, because the
+  // panel needs both halves: a count with no denominator cannot be rendered as
+  // "2 of 3". No tenant id in the path -- there is no tenant to ask about but
+  // your own.
+  usage: () => req("GET", "/usage"),
 
   // runs
   listRuns: (targetId) =>
@@ -143,5 +164,12 @@ export const api = {
 
   // prompts + settings
   getPrompts: () => req("GET", "/prompts"),
+  savePrompt: (name, content) =>
+    req("PUT", promptPath(name), { content }),
+  // Every revision of one prompt, oldest first (#39). Fetched when a customer
+  // opens the history rather than with the prompt list: a body is the largest
+  // column in this schema and a page of prompts would otherwise pull every
+  // superseded version of all of them on load.
+  getPromptHistory: (name) => req("GET", `${promptPath(name)}/history`),
   getSettings: () => req("GET", "/settings"),
 };

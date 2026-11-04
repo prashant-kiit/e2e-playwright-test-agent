@@ -36,7 +36,16 @@ def _url() -> str:
 config.set_main_option("sqlalchemy.url", _url())
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # `disable_existing_loggers=False`, and it matters: the default is True,
+    # which switches off every logger alembic.ini does not itself name -- i.e.
+    # every `app.*` logger in the process. Production survives it by accident
+    # (migrations run as their own CLI process), but the suite runs
+    # `alembic upgrade head` *in process* to build the schema, so the default
+    # silently disabled application logging for every test that ran afterwards.
+    # That fails open: a test asserting something *was* logged sees nothing and
+    # fails, and a test asserting nothing was logged passes for the wrong
+    # reason. Alembic has no business reconfiguring the application's loggers.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

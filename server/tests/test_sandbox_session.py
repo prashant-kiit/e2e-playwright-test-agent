@@ -19,6 +19,13 @@ And if the restore fails, the run **continues without session continuity and say
 so in the log**: the tree is the carrier of the work and it is intact, the
 exploration is only context, and losing context loudly beats failing a run that
 can still finish.
+
+P5-05 moved the row-writing out of app/sandbox/session.py -- the archive is
+uploaded through the run's gateway and indexed by the control plane, which owns
+the versioning rule now. One consequence is visible in these tests and is
+deliberate: the archive at the *end* of a run is written at the last step
+boundary, while the run is still live, because a token stops authorizing writes
+the moment its run becomes terminal and a terminal run cannot be resumed anyway.
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ from app.models import Artifact
 from app.orchestrator.bus import InMemoryLogBus
 from app.orchestrator.fake import FakeRunner
 from app.sandbox import session as agent_session
+from tests.control_helpers import control_for
 from tests.delivery_helpers import make_worktree
 from tests.storage_helpers import FakeStorage
 from tests.target_helpers import create_target
@@ -65,13 +73,17 @@ def run_env(session_factory, tmp_path, monkeypatch):
 
 
 def _drive(session_factory, run_id, store, runner=None, bus=None):
+    """The whole of `drive_run`, through the run's own gateway.
+
+    The gateway is built here rather than taken as a parameter because several
+    of these tests vary the *store* -- a restore that fails, an archive that is
+    not there -- and after P5-05 a run reaches a blob only through its gateway.
+    """
     bus = bus or InMemoryLogBus()
     launcher.drive_run(
-        run_id,
+        control_for(run_id, session_factory, store),
         runner=runner or FakeRunner(),
         bus=bus,
-        session_factory=session_factory,
-        store=store,
     )
     return bus.read_from(run_id, 0)[0]
 

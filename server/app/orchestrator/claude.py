@@ -47,16 +47,6 @@ STEP_FILE = {
 _PACKAGE_DIR = Path(__file__).resolve().parents[1]
 
 
-def prompts_dir() -> Path:
-    """The step prompts, shipped with the server package.
-
-    Package data, not a path under a checkout: the whole point of P3 is that an
-    API image can run an agent with nothing mounted. Prompts move into Postgres
-    with tenant overrides in P5 (DESIGN.md §12); code-shipped is this phase.
-    """
-    return _PACKAGE_DIR / "prompts"
-
-
 def runtime_dir() -> Path:
     """The agent's shipped Claude Code config: settings, MCP servers, subagents.
 
@@ -85,6 +75,34 @@ def _agent_notes(notes: tuple[str, ...]) -> str:
     return "\n".join(f"- {note}" for note in notes)
 
 
+def _prompt_body(ctx: StepContext, name: str) -> str:
+    """One prompt's bytes: the version pinned to this run, else the shipped file.
+
+    P5-06 made prompts rows, resolved and pinned at `repo.start_run` and
+    carried here on the context -- so what the agent is sent is the tenant's
+    version, and the runner needs no database to find it.
+
+    **This module reads no prompt file.** Not even as a fallback: a run from
+    before the column is served the shipped defaults by
+    `prompt_store.shipped_at_seed_rev`, so the one place in the application
+    that opens a `.md` is the module that owns seeding. That is what makes "the
+    code-shipped files are the seed source, not a live second author" a fact
+    about the layering rather than a promise -- there is no second reader left
+    to become one.
+
+    A missing name is therefore a hard error. It means this run was given a set
+    of prompts that does not include one the pipeline needs, and an agent sent
+    a step with no instructions is worse than a run that stops.
+    """
+    pinned = ctx.prompts.get(name)
+    if pinned is None:
+        raise KeyError(
+            f"run {ctx.run_key} was given prompts that do not include {name!r}; "
+            f"it has {sorted(ctx.prompts)}"
+        )
+    return pinned.body
+
+
 def build_message(ctx: StepContext) -> str:
     """The prompt for one step: the shared context header, then the step body.
 
@@ -92,9 +110,8 @@ def build_message(ctx: StepContext) -> str:
     a literal `{PLACEHOLDER}` in it would be a prompt the agent has to guess at,
     which in an unattended session means a wrong guess nobody sees.
     """
-    steps = prompts_dir() / "steps"
-    header = (steps / "_context.md").read_text()
-    body = (steps / STEP_FILE[ctx.step]).read_text()
+    header = _prompt_body(ctx, "steps/_context.md")
+    body = _prompt_body(ctx, f"steps/{STEP_FILE[ctx.step]}")
     text = f"{header}\n\n---\n\n{body}"
 
     story = resolve_run_story(ctx)

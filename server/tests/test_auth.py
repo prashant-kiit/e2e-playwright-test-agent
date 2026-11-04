@@ -442,3 +442,77 @@ def test_the_cookies_carry_the_attributes_the_session_depends_on(client):
     assert f"Max-Age={auth.REFRESH_MAX_AGE}" in refresh
     assert f"Path={auth.REFRESH_PATH}" in refresh
     assert "HttpOnly" in refresh
+
+
+# --- the Secure flag ------------------------------------------------------
+#
+# `VERIFICATION-P5.md` follow-up 2, which the record called "the highest-value
+# item in the list": neither cookie set `Secure`, so the 30-day refresh
+# credential travelled over plain HTTP. The flag is env-conditional because
+# development is not always https -- see `config.cookies_secure`.
+
+
+def test_both_cookies_are_secure_in_a_deployment(client, monkeypatch):
+    """The fix. A refresh cookie good for 30 days must not be sent in clear.
+
+    Asserted on the `Set-Cookie` headers rather than through the client's jar,
+    because the jar is what *stores* a cookie and the flag is an instruction to
+    the browser about when to *send* it.
+    """
+    monkeypatch.delenv("QA_ENV", raising=False)  # i.e. a deployment
+    _add_user(client_session(client), email="dev@example.com", password="s3cret")
+
+    headers = _login(client).headers.get_list("set-cookie")
+    access = next(h for h in headers if h.startswith(f"{auth.ACCESS_COOKIE}="))
+    refresh = next(h for h in headers if h.startswith(f"{auth.REFRESH_COOKIE}="))
+
+    assert "Secure" in access
+    assert "Secure" in refresh
+
+
+def test_the_renewed_access_cookie_is_secure_too(client, monkeypatch):
+    """`/auth/refresh` mints a cookie of its own, and a flag set at login but
+    not at refresh would protect only the first fifteen minutes of a session.
+
+    The login happens in development and the refresh in a deployment, because
+    httpx will not *store* a `Secure` cookie received over `http://testserver`
+    -- so logging in under the deployment branch would leave no refresh cookie
+    to present and this would test a 401 instead. The seam under test is what
+    `/auth/refresh` emits, which is unaffected by how the jar was filled.
+    """
+    _add_user(client_session(client), email="dev@example.com", password="s3cret")
+    _login(client)
+    monkeypatch.delenv("QA_ENV", raising=False)
+
+    headers = client.post("/auth/refresh").headers.get_list("set-cookie")
+    access = next(h for h in headers if h.startswith(f"{auth.ACCESS_COOKIE}="))
+
+    assert "Secure" in access
+
+
+def test_the_logout_deletes_carry_the_flag_as_well(client, monkeypatch):
+    """A `Set-Cookie` that expires a cookie must match the one it replaces on
+    every attribute the browser keys on, which is why `clear_session_cookies`
+    already has to repeat the refresh cookie's path. The flag travels with it.
+    """
+    _add_user(client_session(client), email="dev@example.com", password="s3cret")
+    _login(client)
+    monkeypatch.delenv("QA_ENV", raising=False)
+
+    headers = client.post("/auth/logout").headers.get_list("set-cookie")
+
+    assert all("Secure" in h for h in headers if h.startswith("qa_"))
+
+
+def test_development_over_plain_http_still_works(client, monkeypatch):
+    """The other half of the conditional, and the reason it is one: a dev stack
+    on a LAN address or a tunnel has no TLS, and a `Secure` cookie there is a
+    login that silently never persists.
+    """
+    monkeypatch.setenv("QA_ENV", "dev")
+    _add_user(client_session(client), email="dev@example.com", password="s3cret")
+
+    headers = _login(client).headers.get_list("set-cookie")
+
+    assert all("Secure" not in h for h in headers if h.startswith("qa_"))
+    assert client.get("/auth/me").status_code == 200

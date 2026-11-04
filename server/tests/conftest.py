@@ -24,7 +24,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401  (register the ORM tables on Base.metadata)
 from app.db import Base, database_url
-from app.tenancy import DEFAULT_TENANT_ID
+from app.tenancy import DEFAULT_TENANT_ID, tenant_scope
 
 TEST_DB = "qa_test"
 SERVER_DIR = Path(__file__).resolve().parents[1]
@@ -87,6 +87,40 @@ def pg_engine():
     engine.dispose()
 
 
+# The marker a test uses to say it acts outside any tenant scope. Registered
+# in pyproject.toml's `markers`, so a typo is an error rather than a test that
+# quietly runs scoped after all.
+UNSCOPED_MARKER = "unscoped_tenant"
+
+
+@pytest.fixture(autouse=True)
+def _tenant_scope(request):
+    """Every test acts as an explicit tenant, in one place rather than sixty-five.
+
+    The resolver used to answer `DEFAULT_TENANT_ID` outside any scope, and the
+    suite leaned on that: a test wrote tenant 1's rows because nothing had said
+    otherwise. That coupling is what stops the resolver from being made strict
+    -- with the fallback gone, every unscoped test would fail for a reason that
+    has nothing to do with what it tests, and P5-11 would become an edit to
+    every test file instead of an edit to `tenancy.py`.
+
+    So the harness says it: each test runs inside `tenant_scope(
+    DEFAULT_TENANT_ID)`, which is the same tenant the fallback used to supply.
+    Behaviour is unchanged today, and tomorrow an unscoped call is a bug the
+    suite catches rather than a behaviour it depends on.
+
+    A test that deliberately exercises unscoped or cross-tenant resolution opts
+    out with `@pytest.mark.unscoped_tenant`, which is explicit at the test and
+    greppable -- the opt-out has to be visible, or "every test is scoped" stops
+    being true without anything saying so.
+    """
+    if request.node.get_closest_marker(UNSCOPED_MARKER) is not None:
+        yield
+        return
+    with tenant_scope(DEFAULT_TENANT_ID):
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _clear_bus():
     """Keep the in-memory log bus isolated between tests (run ids reset on
@@ -126,6 +160,68 @@ def _no_real_blob_storage(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_kms(monkeypatch):
+    """No test may build a real cloud KMS client.
+
+    `envelope.wrapper_from_env()` builds one as soon as `QA_KMS_KEY_ID` is set,
+    and a test that sets it (or a developer machine that exports it) would then
+    try to wrap a data key against a real key in a real account -- slow where
+    it works, and a confusing authentication failure where it does not. The
+    suite is designed around `LocalKeyWrapper`, so reaching for boto3 here is
+    always the bug. The sibling of `_no_real_blob_storage` and `_no_real_dns`.
+    """
+
+    def refuse(*args, **kwargs):
+        raise AssertionError(
+            "a test built a real KMS client via envelope.kms_client(); pass a "
+            "wrapper explicitly (envelope.LocalKeyWrapper) or substitute "
+            "app.envelope.kms_client"
+        )
+
+    monkeypatch.setattr("app.envelope.kms_client", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _no_dev_database(monkeypatch):
+    """No test may open a session against the *developer's* database.
+
+    `app.db.SessionLocal` is bound to `DATABASE_URL`, which defaults to the dev
+    stack's `qa` database -- not the `qa_test` one these fixtures build. Code
+    that opens its own session (rather than taking one) therefore writes to the
+    wrong database from a test, and on a machine with the stack up it succeeds,
+    silently, leaving rows behind.
+
+    That is not hypothetical: P5-07 added an audit write to the delivery CLI
+    (`app/delivery/__main__.py`), which has no session to be handed and opens
+    one. The three CLI mutation tests passed only because the dev database had
+    not had the migration applied yet -- the write failed and the CLI's
+    deliberate "a missing audit row must not fail a push that already
+    happened" swallowed it. The next `make up` would have turned them into
+    tests that write to the developer's database.
+
+    So the seam is blocked, and a test that needs it points it at the fixture's
+    engine (see `tests/test_delivery_cli.py`). The fourth sibling of
+    `_no_real_blob_storage`, `_no_real_kms` and `_no_real_dns`: the suite is
+    designed around the test database, so reaching for the default one is
+    always the bug.
+
+    Only callers that resolve `SessionLocal` at call time are affected, which
+    is the set that matters: a module capturing it as a default argument did so
+    at import and is unaffected, and every such caller in the tree already
+    takes an injectable `session_factory`.
+    """
+
+    def refuse(*args, **kwargs):
+        raise AssertionError(
+            "a test opened a session on app.db.SessionLocal, which points at "
+            "the developer's database rather than the test one; pass or patch "
+            "a session factory bound to the fixture's engine"
+        )
+
+    monkeypatch.setattr("app.db.SessionLocal", refuse)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_dns(monkeypatch):
     """No test may resolve a name against real DNS.
 
@@ -161,6 +257,19 @@ _PRESERVED_TABLES = frozenset({"tenants", "users"})
 # the P5 users migration's _SEED_ADMIN_ID.
 _SEED_ADMIN_ID = 1
 
+# The caps the P5-04 quota migration gives an already-existing tenant. Kept in
+# step with `e9c41a7d3f28`'s two constants, the same way `_SEED_ADMIN_ID` is
+# kept in step with the users migration.
+#
+# These have to be *restored* rather than just left alone, and that is the
+# whole reason this exists: `tenants` is preserved rather than truncated, so a
+# test that lowers a cap to breach it would otherwise leave every later test
+# running under that cap. The promise this file makes -- "the next test starts
+# from exactly the state the migration left" -- is false for a mutable column
+# on a preserved row unless something puts it back.
+_SEED_TENANT_CONCURRENCY = 3
+_SEED_TENANT_MONTHLY_QUOTA = 500
+
 
 def _truncate_all(engine):
     tables = ", ".join(
@@ -180,6 +289,17 @@ def _truncate_all(engine):
         conn.execute(
             text("DELETE FROM tenants WHERE id <> :seeded").bindparams(
                 seeded=DEFAULT_TENANT_ID
+            )
+        )
+        # Put the seeded tenant's quota caps back (see the constants above).
+        conn.execute(
+            text(
+                "UPDATE tenants SET max_concurrent_runs = :concurrency, "
+                "monthly_run_quota = :monthly WHERE id = :seeded"
+            ).bindparams(
+                concurrency=_SEED_TENANT_CONCURRENCY,
+                monthly=_SEED_TENANT_MONTHLY_QUOTA,
+                seeded=DEFAULT_TENANT_ID,
             )
         )
 
@@ -206,3 +326,17 @@ def session_factory(pg_engine):
         yield Session
     finally:
         _truncate_all(pg_engine)
+
+
+# The suite is a development stack, and says so rather than relying on a
+# default. `config.is_dev_deployment()` defaults to "prod" on purpose (see its
+# docstring), which means `Secure` session cookies -- and httpx, correctly,
+# will not store a `Secure` cookie received over `http://testserver`, so every
+# login in this suite would hand back a jar with no session in it.
+#
+# Set at import rather than in an autouse fixture so it also covers module-level
+# code and any TestClient a test builds itself. The tests that assert the
+# deployment branch (`tests/test_auth.py`, `tests/test_deployment_env.py`,
+# `tests/test_envelope.py`) override it with monkeypatch, which is what makes
+# the production behaviour covered rather than merely configured away.
+os.environ.setdefault("QA_ENV", "dev")

@@ -49,3 +49,66 @@ def test_the_token_is_scrubbed_from_stderr_too():
     err = GitError(("push", "origin"), 128, stderr)
     assert TOKEN not in str(err)
     assert TOKEN not in err.err
+
+
+# --- a bare token, not only one inside a URL (P5-03) ---------------------
+#
+# Through P4 the only way a credential reached a message was inside a clone
+# URL, because there was one operator token and the clone URL was the one place
+# it was used. P5-03 adds a save path that takes a token as an *argument*, and
+# the shapes that carry one into a message are different: a GitHub error body
+# quoting what was sent, a validation message built from the input, a stack
+# frame. Redaction has to recognise the token itself.
+
+
+def test_a_bare_classic_token_is_redacted():
+    from app.delivery.errors import redact
+
+    scrubbed = redact(f"GitHub rejected {TOKEN} for GET /user")
+
+    assert TOKEN not in scrubbed
+    assert "GET /user" in scrubbed, "the diagnosis survives"
+
+
+def test_every_github_token_prefix_is_redacted():
+    """GitHub's documented prefixes. Listed rather than matched by shape: a
+    40-hex-character blob is also a commit sha, and redacting those would make
+    every delivery message useless."""
+    from app.delivery.errors import redact
+
+    for token in (
+        "ghp_" + "a" * 36,
+        "gho_" + "b" * 36,
+        "ghu_" + "c" * 36,
+        "ghs_" + "d" * 36,
+        "ghr_" + "e" * 36,
+        "github_pat_" + "f" * 22 + "_" + "g" * 59,
+    ):
+        scrubbed = redact(f"saving {token} failed")
+        assert token not in scrubbed, token
+        assert "saving" in scrubbed
+
+
+def test_a_commit_sha_is_not_mistaken_for_a_token():
+    """The thing a shape-based rule would have broken: `delivered_sha` is in
+    almost every delivery message."""
+    from app.delivery.errors import redact
+
+    sha = "e492a9d1f0b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7"
+
+    assert sha in redact(f"delivered {sha} to o/r")
+
+
+def test_a_sealed_credential_is_redacted():
+    """The ciphertext is not a secret -- that is the point of the envelope --
+    but a message that quotes a whole column is noise, and a reader who sees
+    one in a log cannot tell it is safe."""
+    from app import envelope
+    from app.delivery.errors import redact
+
+    sealed = envelope.seal("ghp_" + "a" * 36, envelope.LocalKeyWrapper(b"k"))
+
+    scrubbed = redact(f"could not open {sealed} for demo")
+
+    assert sealed not in scrubbed
+    assert "for demo" in scrubbed

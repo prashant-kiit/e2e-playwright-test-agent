@@ -26,10 +26,13 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 
 
 def prompts_dir() -> Path:
-    """The step prompts the runner sends and the portal displays.
+    """The prompt files the `prompts` table is seeded from.
 
-    Prompts move into Postgres with tenant overrides in P5 (DESIGN.md §12);
-    code-shipped is this phase.
+    No longer what the runner sends or the portal displays: P5-06 made a prompt
+    a row, tenant-overridable and versioned, and `app/prompt_store.py` is the
+    one module that reads this directory -- only ever to seed a tenant's
+    missing default. Everything downstream of that reads rows, which is what
+    keeps these files the seed source rather than a second live author.
     """
     return PACKAGE_DIR / "prompts"
 

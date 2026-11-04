@@ -21,33 +21,45 @@ fires after each completed step. The driver keeps exactly one injection point
 Hydrate, ingest and teardown are plain functions composed here rather than
 driver parameters, which is what makes P4's move into a container-per-run a
 change of *where* they run and not of *what* they do.
+
+**P5-05 replaced the pair `(session_factory, store)` with one gateway.** Every
+database read, every database write and every blob a run touches goes through
+`control` (app/control/gateway.py), which is a run-scoped token's worth of
+authority and nothing more. The composition did not move: the same three calls
+in the same order, with the same `finally`. What changed is that a sandbox no
+longer holds `DATABASE_URL` or the `S3_*` credentials, and so the question "what
+can a compromised run reach?" has a readable answer -- the gateway's method list.
+
+The store is **not** a separate parameter any more, deliberately: it is always
+`GatewayStorage(control)`, so a run's only way to a blob is its own token. A
+`store=` beside a `control=` would be a second authority, and the one place it
+would get used is the one place it should not be.
 """
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 
-from . import config, repo, revisions, storage
+from . import config, revisions
 from .artifacts import ArtifactCollector
-from .db import SessionLocal
+from .control import factory
+from .control.gateway import GatewayStorage, RunGateway
+from .control.model import TrackedBlob
+from .domain.status import is_live
 from .domain.steps import Step
 from .orchestrator.bus import LogBus, bus_from_env
 from .orchestrator.claude import ClaudeRunner
-from .orchestrator.driver import SessionFactory, run_pipeline
+from .orchestrator.driver import run_pipeline
 from .orchestrator.fake import FakeRunner
 from .orchestrator.limits import LimitedRunner
 from .orchestrator.runner import Emit, Runner
 from .reaper import heartbeat_during
 from .sandbox import hydrate
 from .sandbox import session as agent_session
-from .storage import Storage
-from .target_config import config_of
-from .tenancy import tenant_scope
 
 log = logging.getLogger(__name__)
 
@@ -74,23 +86,17 @@ def make_runner() -> Runner:
     return LimitedRunner(inner)
 
 
-def make_collector(
-    *, session_factory: SessionFactory = SessionLocal, store: Storage | None = None
-) -> BoundaryHalf:
+def make_collector(control: RunGateway, run_key: str) -> BoundaryHalf:
     """A collect(run_id, step) callback that sweeps the run dir into storage."""
-    collector = ArtifactCollector(store or storage.from_env())
+    collector = ArtifactCollector(GatewayStorage(control), control)
 
     def collect(run_id: int, step: Step) -> None:
-        with session_factory() as s:
-            run = repo.get_run(s, run_id)
-            collector.collect(s, run, config.run_dir(run.run_key), step)
+        collector.collect(run_key, config.run_dir(run_key), step)
 
     return collect
 
 
-def make_ingest(
-    *, session_factory: SessionFactory = SessionLocal, store: Storage | None = None
-) -> BoundaryHalf:
+def make_ingest(control: RunGateway, run_key: str) -> BoundaryHalf:
     """An ingest(run_id, step) callback that commits a revision of the worktree.
 
     Upload the tracked tree's blobs, then commit one revision naming them. A
@@ -107,34 +113,49 @@ def make_ingest(
     tree is decided, so an edit to it is not a tree change and never reaches a
     revision. An edit to a real file in the same step still is one.
 
+    **The scan is here and the row is written there**, which is P5-05's split:
+    the worktree is on the sandbox's disk and the `revisions` row is in a
+    database the sandbox cannot reach. So this scans, uploads the blobs through
+    the gateway, and hands over a manifest; the control plane recomputes the tree
+    hash from that manifest and confirms every blob arrived before it writes
+    anything (app/control/service.py). Neither half can be told what the other
+    found.
+
+    **The target's configuration is read once, here, not per boundary.** It
+    cannot change under a live run -- `repo.assert_no_live_run` refuses a config
+    write while one holds the target -- and `RunFacts` is documented as a run's
+    *immutable* facts, read once. Fetching it inside the closure meant five
+    round trips per run on the container path for a value that cannot have
+    moved.
+
     Raises on failure, and the caller does not catch it. See
     make_step_boundary_hook.
     """
-    store = store or storage.from_env()
+    store = GatewayStorage(control)
+    cfg = control.run_facts().target
 
     def ingest(run_id: int, step: Step) -> None:
-        with session_factory() as s:
-            run = repo.get_run(s, run_id)
-            root = config.worktree_dir(run.run_key)
-            hydrate.render_generated(root, config_of(run.target))
-            revisions.commit_revision(
-                s,
-                run.target,
-                store,
-                root,
-                # Fits Revision.author's 100 chars: run_key is at most 80.
-                author=f"run:{run.run_key}",
-                produced_by_run_id=run.id,
-            )
+        root = config.worktree_dir(run_key)
+        hydrate.render_generated(root, cfg)
+        scan = revisions.scan_tracked_tree(root)
+        revisions.upload_blobs(store, scan, control.scope.tenant_id)
+        control.commit_revision(
+            [
+                TrackedBlob(path=f.path, sha256=f.sha256, size=f.size)
+                for f in scan.files
+            ],
+            # Fits Revision.author's 100 chars: run_key is at most 80.
+            author=f"run:{run_key}",
+        )
 
     return ingest
 
 
 def make_step_boundary_hook(
     emit: Emit,
+    control: RunGateway,
+    run_key: str,
     *,
-    session_factory: SessionFactory = SessionLocal,
-    store: Storage | None = None,
     collect: BoundaryHalf | None = None,
     ingest: BoundaryHalf | None = None,
 ) -> BoundaryHalf:
@@ -164,19 +185,8 @@ def make_step_boundary_hook(
     lets the ingest half still run when the sweep fails, and what lets ingest's
     exception reach the driver rather than being lost behind the first failure.
     """
-    # Both halves talk to the same object store, so build the client once
-    # rather than once per half.
-    if store is None and (collect is None or ingest is None):
-        store = storage.from_env()
-
-    collect_half = (
-        collect if collect is not None
-        else make_collector(session_factory=session_factory, store=store)
-    )
-    ingest_half = (
-        ingest if ingest is not None
-        else make_ingest(session_factory=session_factory, store=store)
-    )
+    collect_half = collect if collect is not None else make_collector(control, run_key)
+    ingest_half = ingest if ingest is not None else make_ingest(control, run_key)
 
     def on_step_boundary(run_id: int, step: Step) -> None:
         try:
@@ -185,7 +195,7 @@ def make_step_boundary_hook(
             emit(f"=== step {step.value}: artifact collection failed: {exc} ===")
 
         # Already swallows its own failures, and already a no-op off a sandbox.
-        _persist_session(run_id, emit, session_factory=session_factory, store=store)
+        _persist_session(control, run_key, emit)
 
         try:
             ingest_half(run_id, step)
@@ -198,13 +208,7 @@ def make_step_boundary_hook(
     return on_step_boundary
 
 
-def hydrate_worktree(
-    run_id: int,
-    emit: Emit,
-    *,
-    session_factory: SessionFactory = SessionLocal,
-    store: Storage | None = None,
-) -> Path:
+def hydrate_worktree(control: RunGateway, run_key: str, emit: Emit) -> Path:
     """Build the run's worktree from its target's head revision. Returns the path.
 
     Raises on anything that would leave the agent working in a tree we cannot
@@ -217,24 +221,20 @@ def hydrate_worktree(
     tree a run inherited; there is no disk to baseline from now, and every target
     gets revision 1 when it is created.
     """
-    store = store or storage.from_env()
-    with session_factory() as s:
-        run = repo.get_run(s, run_id)
-        dest = config.worktree_dir(run.run_key)
-        # A worktree left behind by a crashed previous attempt at this run_key is
-        # not a tree to inherit: hydrate is the only author of this directory.
-        hydrate.teardown(dest)
-        hydrate.hydrate(s, run.target, store, dest, emit=emit)
+    dest = config.worktree_dir(run_key)
+    # A worktree left behind by a crashed previous attempt at this run_key is
+    # not a tree to inherit: hydrate is the only author of this directory.
+    hydrate.teardown(dest)
+    hydrate.hydrate(control, GatewayStorage(control), dest, emit=emit)
     return dest
 
 
 def run_with_worktree(
-    run_id: int,
+    control: RunGateway,
+    run_key: str,
     emit: Emit,
     runner: Runner,
     *,
-    session_factory: SessionFactory = SessionLocal,
-    store: Storage | None = None,
     collect: BoundaryHalf | None = None,
 ) -> None:
     """Hydrate, drive the pipeline in that worktree, then tear it down.
@@ -244,92 +244,45 @@ def run_with_worktree(
     and on pause, so disk use is bounded by live runs rather than by history; a
     resumed run comes back through here and re-hydrates from the head.
     """
-    store = store or storage.from_env()
     try:
-        worktree = hydrate_worktree(
-            run_id, emit, session_factory=session_factory, store=store
-        )
+        worktree = hydrate_worktree(control, run_key, emit)
     except Exception as exc:
         # No tree, so no step may be attempted. Fail the run and free the app.
-        with session_factory() as s:
-            repo.fail_run(s, run_id, f"hydrate failed: {exc}")
+        control.fail_run(f"hydrate failed: {exc}")
         emit(f"=== run failed before it started: {exc} ===")
         return
 
-    hook = make_step_boundary_hook(
-        emit, session_factory=session_factory, store=store, collect=collect
-    )
+    hook = make_step_boundary_hook(emit, control, run_key, collect=collect)
     try:
-        run_pipeline(session_factory, run_id, runner, emit=emit, collect=hook)
+        run_pipeline(control, control.scope.run_id, runner, emit=emit, collect=hook)
     finally:
         hydrate.teardown(worktree)
         emit("=== teardown: worktree removed ===")
 
 
-@contextlib.contextmanager
-def _run_tenant_scope(run_id: int, session_factory: SessionFactory) -> Iterator[None]:
-    """Bind the run's tenant for the duration of the work.
-
-    The thread/CI and sandbox paths have no request behind them, so nothing has
-    set `current_tenant_id()` the way `require_auth` does for a request. This is
-    the background equivalent of that seam: every insert the run makes -- its
-    revisions, its step rows, its log lines -- is written as the run's own
-    tenant rather than the resolver's default.
-
-    If the run cannot be read, the default stands and the work proceeds to fail
-    on its own terms a moment later -- the alternative, raising here, would skip
-    the `finally` in `drive_run` and leave a reader waiting on a stream nobody
-    will close. That is a deliberate trade and the reason it is **logged**: a
-    run that wrote someone else's tenant id must not be something only a
-    database query can discover.
-
-    **The read opts out of the enforced tenant filter** (P5-02), and it is the
-    one place where the reason is the plain chicken-and-egg: the guard filters
-    on `current_tenant_id()`, and establishing what that should answer is
-    precisely what this function is for. Filtered, the lookup would find only
-    tenant 1's runs, every other tenant's run would take the `except` branch
-    above, and the fallback -- deliberately quiet enough to let a run proceed --
-    would execute it as tenant 1. Its revisions, step rows and log lines would
-    be written into another customer's tenant. That is not a read leak but a
-    *write* misattribution, which is worse, and it is why this is a one-row
-    `get` by primary key rather than any wider query.
-    """
-    try:
-        with session_factory() as session:
-            tenant_id = repo.get_run_across_tenants(session, run_id).tenant_id
-    except Exception:
-        log.warning(
-            "could not resolve the tenant of run %s; proceeding as the default "
-            "tenant, which is wrong for any run that is not tenant 1",
-            run_id,
-            exc_info=True,
-        )
-        yield
-        return
-    with tenant_scope(tenant_id):
-        yield
-
-
 def drive_run(
-    run_id: int,
+    control: RunGateway,
     *,
     runner: Runner | None = None,
     bus: LogBus | None = None,
-    session_factory: SessionFactory = SessionLocal,
-    store: Storage | None = None,
 ) -> None:
     """Work the run: heartbeat, runner, the composition, close the stream.
 
-    The one function both call sites use. Its keyword arguments are the things
-    a container otherwise takes from its environment -- the runner, the log bus,
-    the database and the object store -- passed in rather than read from `env`
-    so the entrypoint is testable without a container, exactly as
-    `run_with_worktree` already allows.
+    The one function both call sites use. Its keyword arguments are the things a
+    container otherwise takes from its environment -- the runner and the log bus
+    -- passed in rather than read from `env` so the entrypoint is testable
+    without a container, exactly as `run_with_worktree` already allows. The
+    database and the object store are no longer among them: they arrive as the
+    one `control` gateway, which is the whole of P5-05.
 
-    The whole of the work runs inside the run's tenant scope, so
-    `current_tenant_id()` answers the run's tenant on the background path the
-    way the request's session answers it on the API path -- one resolver, two
-    ways of binding it.
+    **There is no tenant scope opened here any more.** `_run_tenant_scope` used
+    to read the run in order to bind its tenant for the work -- the background
+    equivalent of `require_auth` -- and it needed a cross-tenant read to do it,
+    which is why it was on the bypass allowlist. The token carries the tenant
+    now, and the gateway binds it per operation (`service.acting_as`), so the
+    chicken-and-egg that function existed to resolve does not arise: nothing on
+    this path reads a row without a scope, because nothing on this path reads a
+    row at all.
 
     The heartbeat is taken **here**, inside whichever process does the work, so
     the reaper's crash detection measures the thing that is actually working
@@ -338,39 +291,30 @@ def drive_run(
     and `npm ci` on a cold cache outlasts the TTL easily.
     """
     bus = bus or bus_from_env()
+    run_id = control.scope.run_id
     emit = bus.emitter(run_id)
     runner = runner or make_runner()
     started = time.monotonic()
-    with _run_tenant_scope(run_id, session_factory):
-        try:
-            # Inside the `try`, so a failure here still closes the stream a reader
-            # is waiting on rather than leaving it open on a run nothing is driving.
-            _restore_session(run_id, emit, session_factory=session_factory, store=store)
-            with heartbeat_during(run_id, session_factory=session_factory):
-                run_with_worktree(
-                    run_id,
-                    emit,
-                    runner,
-                    session_factory=session_factory,
-                    store=store,
-                )
-        finally:
-            # Both in a `finally`, so every way out of a run records what it cost
-            # and leaves the agent's session where a resume can find it. A pause
-            # does not come through here at all -- its container is killed outright
-            # -- which is why the session is archived at each step boundary too.
-            _persist_session(run_id, emit, session_factory=session_factory, store=store)
-            _record_cost(run_id, runner, started, session_factory=session_factory)
-            bus.close(run_id)
+    # Read once, before anything can end the run: the run key is immutable, and
+    # the paths in the `finally` below need it after the liveness gate has shut.
+    run_key = control.run_facts().run_key
+    try:
+        # Inside the `try`, so a failure here still closes the stream a reader
+        # is waiting on rather than leaving it open on a run nothing is driving.
+        _restore_session(control, run_key, emit)
+        with heartbeat_during(run_id, control.heartbeat):
+            run_with_worktree(control, run_key, emit, runner)
+    finally:
+        # Both in a `finally`, so every way out of a run records what it cost
+        # and leaves the agent's session where a resume can find it. A pause
+        # does not come through here at all -- its container is killed outright
+        # -- which is why the session is archived at each step boundary too.
+        _persist_session(control, run_key, emit)
+        _record_cost(control, runner, started)
+        bus.close(run_id)
 
 
-def _restore_session(
-    run_id: int,
-    emit: Emit,
-    *,
-    session_factory: SessionFactory,
-    store: Storage | None,
-) -> None:
+def _restore_session(control: RunGateway, run_key: str, emit: Emit) -> None:
     """Put a resumed run's agent session back before the pipeline starts.
 
     Before, rather than inside, the composition: the CLI is invoked by the first
@@ -383,44 +327,36 @@ def _restore_session(
     `--resume` a session that is not there (a failed step rather than a
     forgotten exploration).
     """
-    with session_factory() as session:
-        run = repo.get_run(session, run_id)
-        if not run.claude_session_id:
-            return
-        if agent_session.restore(
-            session, run, store or storage.from_env(), emit=emit
-        ):
-            return
-        repo.clear_session_id(session, run_id)
+    if not control.run_state().claude_session_id:
+        return
+    if agent_session.restore(control, run_key, GatewayStorage(control), emit=emit):
+        return
+    control.clear_session_id()
 
 
-def _persist_session(
-    run_id: int,
-    emit: Emit,
-    *,
-    session_factory: SessionFactory,
-    store: Storage | None,
-) -> None:
+def _persist_session(control: RunGateway, run_key: str, emit: Emit) -> None:
     """Archive the agent's session as this run's reserved artifact.
 
     Never allowed to fail the run: the tree is the carrier of the work, and the
     session is the context for continuing it.
+
+    **Skipped once the run is no longer live**, and that is not a workaround for
+    the token's liveness gate but the same judgement the gate encodes: a
+    completed, stopped or failed run cannot be resumed, so there is nothing for
+    an archive of its session to be *for*. The save that matters is the one at
+    each step boundary and the one on the way out of a pause, and a paused run is
+    live. Checked rather than attempted-and-swallowed so that a run ending
+    normally does not log a failure every time.
     """
     try:
-        with session_factory() as session:
-            run = repo.get_run(session, run_id)
-            agent_session.save(session, run, store or storage.from_env(), emit=emit)
+        if not is_live(control.run_state().status):
+            return
+        agent_session.save(control, run_key, GatewayStorage(control), emit=emit)
     except Exception:  # pragma: no cover - never lose a run over its session
-        log.warning("could not persist the session of run %s", run_id, exc_info=True)
+        log.warning("could not persist the session of run %s", run_key, exc_info=True)
 
 
-def _record_cost(
-    run_id: int,
-    runner: Runner,
-    started: float,
-    *,
-    session_factory: SessionFactory,
-) -> None:
+def _record_cost(control: RunGateway, runner: Runner, started: float) -> None:
     """What the run spent of money and sandbox time, on the row.
 
     In a `finally`, so every path through the composition records it -- success,
@@ -428,18 +364,19 @@ def _record_cost(
     which is the case the lease reaper reconciles and the one case where "what
     did it cost?" has no answer worth inventing.
 
+    This is one of the two operations deliberately exempt from the token's
+    liveness gate (app/control/service.py), because it is recorded *about* a run
+    that has just ended and would otherwise be refused on every successful run.
+
     Never allowed to fail the run: accounting is not the work.
     """
     try:
-        with session_factory() as session:
-            repo.record_run_cost(
-                session,
-                run_id,
-                spend_usd=float(getattr(runner, "spent_usd", 0.0) or 0.0),
-                sandbox_seconds=int(time.monotonic() - started),
-            )
+        control.record_cost(
+            spend_usd=float(getattr(runner, "spent_usd", 0.0) or 0.0),
+            sandbox_seconds=int(time.monotonic() - started),
+        )
     except Exception:  # pragma: no cover - never lose a run over a cost column
-        log.warning("could not record the cost of run %s", run_id, exc_info=True)
+        log.warning("could not record the cost of run %s", control.scope.run_id, exc_info=True)
 
 
 def launch_run(run_id: int) -> None:
@@ -448,7 +385,16 @@ def launch_run(run_id: int) -> None:
     The thread call site. `QA_SANDBOX=thread` selects it (app/sandbox/dispatch.py);
     it keeps CI fast and token-free and it is what lets the existing suite prove
     the behaviour did not move when the work did.
+
+    **The gateway is built here, not on the thread.** Minting a token reads the
+    run, and that read is tenant-filtered: this function runs on the request
+    thread, where `require_auth` has made the run's own tenant the acting one,
+    and the daemon thread it starts has no request and therefore no acting
+    tenant. Building it the other side of `Thread(...)` would mint nothing and
+    fail every run. A test says so, because the failure would otherwise be a
+    puzzling `NotFound` from inside a thread.
     """
+    control = factory.local_for_run(run_id)
     threading.Thread(
-        target=drive_run, args=(run_id,), name=f"run-{run_id}", daemon=True
+        target=drive_run, args=(control,), name=f"run-{run_id}", daemon=True
     ).start()

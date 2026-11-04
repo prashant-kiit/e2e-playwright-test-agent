@@ -1,4 +1,10 @@
-"""Orchestrator driver tests, using the FakeRunner (no Claude Code, no tokens)."""
+"""Orchestrator driver tests, using the FakeRunner (no Claude Code, no tokens).
+
+P5-05 replaced the driver's `session_factory` with a run-scoped `control`
+gateway: a run in a sandbox has no database to open a session against. The
+operations are the same ones in the same order, so these tests are unchanged
+apart from what they hand it.
+"""
 
 import pytest
 
@@ -8,6 +14,8 @@ from app.domain.steps import STEP_ORDER, Step
 from app.models import AppLock, RunStep
 from app.orchestrator.driver import run_pipeline
 from app.orchestrator.fake import FakeRunner
+from tests.control_helpers import control_for
+from tests.storage_helpers import FakeStorage
 from tests.target_helpers import create_target
 
 
@@ -23,16 +31,26 @@ def run_env(session_factory, tmp_path, monkeypatch):
     return run_id, run_key, tmp_path
 
 
+@pytest.fixture()
+def control(run_env, session_factory, monkeypatch):
+    """The run's gateway: what the driver takes instead of a session factory.
+
+    A `LocalGateway` carrying a real run-scoped token, so these tests drive the
+    same authorization the container path goes through (tests/control_helpers.py).
+    """
+    return control_for(run_env[0], session_factory, FakeStorage(), monkeypatch)
+
+
 def _steps_by_name(session_factory, run_id):
     with session_factory() as s:
         rows = s.query(RunStep).filter(RunStep.run_id == run_id).all()
         return {r.step: r.status for r in rows}
 
 
-def test_happy_path_completes_all_steps_and_releases_lock(run_env, session_factory):
+def test_happy_path_completes_all_steps_and_releases_lock(run_env, session_factory, control):
     run_id, run_key, runs_dir = run_env
     lines: list[str] = []
-    run_pipeline(session_factory, run_id, FakeRunner(), emit=lines.append)
+    run_pipeline(control, run_id, FakeRunner(), emit=lines.append)
 
     with session_factory() as s:
         run = repo.get_run(s, run_id)
@@ -49,9 +67,9 @@ def test_happy_path_completes_all_steps_and_releases_lock(run_env, session_facto
     assert any("completed" in ln for ln in lines)
 
 
-def test_failure_midway_fails_run_and_releases_lock(run_env, session_factory):
+def test_failure_midway_fails_run_and_releases_lock(run_env, session_factory, control):
     run_id, _, _ = run_env
-    run_pipeline(session_factory, run_id, FakeRunner(fail_on=Step.GENERATE))
+    run_pipeline(control, run_id, FakeRunner(fail_on=Step.GENERATE))
 
     with session_factory() as s:
         run = repo.get_run(s, run_id)
@@ -67,14 +85,14 @@ def test_failure_midway_fails_run_and_releases_lock(run_env, session_factory):
     assert Step.HEAL not in statuses  # never reached
 
 
-def test_runner_crash_is_contained(run_env, session_factory):
+def test_runner_crash_is_contained(run_env, session_factory, control):
     run_id, _, _ = run_env
 
     class Boom:
         def run_step(self, ctx, emit):
             raise RuntimeError("kaboom")
 
-    run_pipeline(session_factory, run_id, Boom())
+    run_pipeline(control, run_id, Boom())
     with session_factory() as s:
         run = repo.get_run(s, run_id)
         assert run.status is RunStatus.FAILED
@@ -82,7 +100,7 @@ def test_runner_crash_is_contained(run_env, session_factory):
         assert s.get(AppLock, run.target_id) is None
 
 
-def test_resume_starts_after_last_completed_step(run_env, session_factory):
+def test_resume_starts_after_last_completed_step(run_env, session_factory, control):
     run_id, run_key, runs_dir = run_env
     # Pretend steps 1-2 already ran: mark PLAN complete.
     with session_factory() as s:
@@ -97,7 +115,7 @@ def test_resume_starts_after_last_completed_step(run_env, session_factory):
         s.commit()
 
     lines: list[str] = []
-    run_pipeline(session_factory, run_id, FakeRunner(), emit=lines.append)
+    run_pipeline(control, run_id, FakeRunner(), emit=lines.append)
 
     # Only explore/generate/heal should have produced artifacts this time.
     produced = {p.stem for p in (runs_dir / run_key).glob("*.txt")}

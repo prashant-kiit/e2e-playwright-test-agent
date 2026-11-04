@@ -67,6 +67,10 @@ targets(id, tenant_id, project_id, app, name,
         targetRepo, targetBranch,
         github_pat_ciphertext, pat_expires_at, credential_state)
         UNIQUE(tenant_id, app)                    -- per tenant, not global (P5)
+        -- the credential trio landed in P5-03: ciphertext (a KMS-wrapped data
+        -- key travels with it), the expiry GitHub reported, and
+        -- absent|valid|invalid. Decrypted only in the control plane, inside
+        -- the delivery Tools seam -- never in a sandbox, never in a log (8)
 
 revision(id, tenant_id, target_id, rev, parent_rev,
          tree_hash, produced_by_run, delivered_sha,
@@ -277,6 +281,13 @@ actually matters.
 > keeps the lock while clearing the lease, and the reaper skips `PAUSED` runs so a deliberate
 > pause is never mistaken for a crash. Leave that trio alone; adding the queue means adding a
 > scheduler *above* it, not changing it.
+>
+> **P5-04 is the first thing to take that advice**: the per-tenant quota check runs in
+> `repo.start_run` before the lock row is touched, and the trio is byte-for-byte what it was.
+> It is the shape a queue would go in too. One consequence is worth stating because it is a
+> deliberate ordering and not an accident: a tenant that is over its allowance *and* asking
+> for a busy app is told about the allowance, since "wait for this app" is advice that cannot
+> help when nothing could be started anyway.
 
 ---
 
@@ -321,27 +332,60 @@ read, and a run against one target structurally cannot reach another's host. The
 runtime's telemetry and error reporting are **disabled by environment rather than
 allowlisted**, so the list stays the length of what a run genuinely needs.
 
-*The allowlist includes the internal stores, and that is a decision with a successor.*
-Postgres and the object store are reachable from the sandbox network by name, because
-hydrate reads the head revision and ingest commits N+1 — those **are** the run. So a
-sandbox holds `DATABASE_URL` and the `S3_*` credentials, and that is **accepted exposure
-for this phase, deliberately**. The credential rule above is specifically about GitHub,
-for a stated reason: delivery is human-approved and happens in the control plane, so the
-push need not happen where the agent is — and after P4 it cannot, because no sandbox
-environment, image or compose service carries a GitHub credential and no module reachable
-from the sandbox entrypoint can read one (both enforced by structural tests). The store
-credentials have no such argument available to them; what they have is a successor.
-**P5 replaces them with a narrow, run-scoped internal control-plane API**, where the token
-that authorizes one run's target is the same mechanism that authorizes one tenant's data.
-Bundling that into P4 would have been building P5's tenant scoping early and worse.
+*The allowlist no longer includes the internal stores — P5-05 removed them.*
+Through P4, Postgres and the object store were reachable from the sandbox network by name,
+because hydrate reads the head revision and ingest commits N+1 — those **are** the run.
+A sandbox therefore held `DATABASE_URL` and the `S3_*` credentials, and that was accepted
+exposure for that phase, deliberately. The credential rule above is specifically about
+GitHub, for a stated reason: delivery is human-approved and happens in the control plane,
+so the push need not happen where the agent is — and after P4 it cannot, because no
+sandbox environment, image or compose service carries a GitHub credential and no module
+reachable from the sandbox entrypoint can read one (both enforced by structural tests).
+The store credentials had no such argument available to them; what they had was a
+successor, and **P5-05 built it**. A sandbox now carries neither `DATABASE_URL` nor any
+`S3_*` variable, and the stores are off its network entirely; in their place it holds a
+short-lived, run-scoped bearer token and reaches the control plane through the narrow
+internal API (`app/control/`, `app/internal_api.py`), where the token that authorizes one
+run's target is the same mechanism that authorizes one tenant's data. Bundling that into
+P4 would have been building P5's tenant scoping early and worse.
 
 ### Quotas and timeouts
 
-Enforced at enqueue: per-tenant **concurrent-run cap** and **monthly run quota**.
+Enforced at enqueue: per-tenant **concurrent-run cap** and **monthly run quota**
+(`tenants.max_concurrent_runs`, `tenants.monthly_run_quota`; P5-04).
 Enforced at runtime: **per-step and per-run wall-clock timeouts** that reap the sandbox,
-plus a **per-run token budget**. Any breach → run `failed` with an explicit reason, last
-good revision intact. The wall-clock timeout is the one that matters — a wedged agent
-holding a browser open is the most expensive failure mode in the system.
+plus a **per-run token budget**. The wall-clock timeout is the one that matters — a wedged
+agent holding a browser open is the most expensive failure mode in the system.
+
+**The two kinds of breach do not end the same way, and this section used to say they did.**
+A *runtime* breach → run `failed` with an explicit reason, last good revision intact: the
+work was accepted and started, and the run is the record of it. An *enqueue* breach → a
+typed **rejection** (`repo.QuotaExceeded` → HTTP **429**), and **no run row at all**. A
+refused start that wrote a `failed` run would be reporting work that never happened, and it
+would have spent the monthly quota it was just refused for — so the next attempt would be
+refused for the sake of a run nobody ran. 429 rather than the 409 a busy app gets, because
+"your tenant is out of allowance" and "this app already has a live run" have different
+remedies and an operator who cannot tell them apart can act on neither.
+
+`NULL` on either column means **no cap**, not a cap of zero — but a tenant does not *arrive*
+that way. Both columns carry a **server default** (`3` and `500`), kept rather than dropped,
+because there is no `create_tenant` in the application at all: a tenant comes from a migration
+seed or from raw SQL, and a server default is the only thing on both paths. Without it, "bound
+each tenant so one cannot starve the platform" held only for tenants somebody had remembered
+to configure, and nothing remembered. An unmetered plan is still expressible by writing
+`NULL` on purpose, and the enqueue then skips counting entirely for that tenant.
+
+This is a deliberate departure from the rule that a column's server default is dropped in the
+revision that adds it (P2's `tenant_id`, P5-03's `credential_state`). That rule stops a column
+acquiring a value nobody chose; here the default *is* the choice and has to outlive the
+revision, because its job is to apply to rows inserted by code that does not mention these
+columns.
+
+Both caps are the **tenant's**, counted across all of its apps, and the monthly one counts
+runs *started* in the calendar month — a failed run still spent its sandbox, and a quota
+that only counted successes would make "retry until it works" free. A rejection names one
+cap (it is one sentence to one person), while the portal's usage panel asks about each cap
+independently, because both can be full at once.
 
 ---
 
@@ -395,6 +439,50 @@ launch).
 - **Fail loud**: on 401/403 at delivery, set `credential_state = invalid`, fail the
   **delivery only**, and surface it. Never silently retry. A credential problem must
   never cost a customer a run — the results are already durable.
+
+**Landed in P5-03.** Three things about the shape are worth having written down, because
+none of them was obvious from the paragraph above:
+
+- **The envelope wraps a *data key*, never the PAT.** `app/envelope.py` generates a random
+  AES-256 key per secret, encrypts the PAT under it locally, and asks the KMS only to wrap
+  the 32-byte key. So the PAT is never in a KMS request and therefore never in the
+  provider's audit log of those requests, rotating the KMS key re-wraps small keys instead
+  of re-encrypting rows, and no secret can outgrow the KMS payload limit. The sealed form is
+  one self-describing string (`qa-env1$wrapped$nonce$ciphertext`), so the column is text and
+  the format can gain a version without a migration.
+- **`Tools` is bound to one target before it can push.** There was one `token` on the
+  delivery seam, read from `GITHUB_PAT` once per process. It is now what
+  `tools.for_app(app)` resolves from that target's row, and `for_target(tools, app)` is the
+  context manager every entry point uses — because binding and "GitHub rejected this
+  credential" are two halves of one decision, and five entry points each able to do the
+  first and forget the second is how the fail-loud rule would quietly stop holding. An
+  unbound seam raises a `CredentialError` naming the call that was missed rather than an
+  `AttributeError` from inside a push. Four paths deliberately do **not** bind:
+  `is_bootstrapped`, the already-bootstrapped arm of `ensure_bootstrapped`, and the
+  `--dry-run` arms of bootstrap and push. Those answers are Postgres and blob-store reads,
+  and needing a credential for them would be needing the network by another name. `plan_reset`
+  is the dry run that *does* bind, because it makes two authenticated GitHub calls — the test
+  is whether a path dials out, not whether it writes.
+- **A credential rejection is one outcome, whichever layer refuses us.** The PAT travels in
+  the clone URL as well as in the REST client's header, and `push_artifacts` clones *before*
+  its first REST call — so git's HTTPS transport is where most 401/403s actually land, and it
+  reports them as a failed subprocess rather than a status code. `GitError.is_credential_rejection`
+  classifies git's own stderr, and `for_target` translates a match into the same
+  `CredentialError` the REST client raises: the same sticky `credential_state = invalid`, the
+  same 502. A non-fast-forward push or a missing ref is re-raised untouched — marking a working
+  credential invalid would send a customer to rotate it for nothing (P5-03 review).
+- **A refusal at save time is 422, not 502.** A token missing `workflow`, an empty paste, a
+  revoked token: each is the operator's input being refused while they can still fix it, and
+  a different paste is the fix. 502 stays for GitHub refusing a credential *at delivery*,
+  which is a different event with a different remedy. `CredentialRejected` and
+  `CredentialError` are separate classes for exactly this reason — one class for both would
+  have told a customer with a scope typo that GitHub was down.
+- **`GITHUB_PAT` is retired, not kept as a fallback.** One operator token is not *any*
+  tenant's credential: every delivery it authored went into a customer's repository as the
+  same identity. Nothing is migrated into the new columns either — sealing that one token
+  per target would silently give every customer the same credential under a per-tenant
+  name. A deployment that was delivering before this revision saves a PAT per target
+  afterwards, and the portal says so.
 
 ---
 
@@ -524,8 +612,15 @@ not a P1 fix: see the queue note in §5.
 - `apps/<app>/*` files → config in `targets`; stories, plans, seed and tests become
   SeaweedFS blobs indexed by `revision`. **Done (P3.)** `apps/` and `app.json` are deleted.
 - Prompts → code-shipped defaults seeded into Postgres, tenant-overridable, versioned.
-  **Half done (P3):** they are code-shipped package data under `server/app/prompts/`, read
-  from the installed package. The `prompts` table, tenant overrides and versioning are P5.
+  **Done (P5-06).** `prompts(id, tenant_id, name, body, rev)` holds a tenant's versions;
+  `app/prompt_store.py` resolves "highest rev wins", seeding a tenant's missing defaults from
+  the package files at the resolution seam rather than in the migration — so a tenant created
+  by any path inherits the defaults, and a prompt file added in a later release is picked up by
+  the next resolve that misses it. Overrides append a row, never rewrite one. `runs.prompt_revs`
+  pins `{name: rev}` at `repo.start_run` and `control.service.run_facts` serves exactly those
+  revs, so the version recorded against a run is the version that ran even if an override lands
+  mid-flight. The package files are the seed source and nothing else: `prompt_store` is the only
+  module that opens one, and the runner renders what the context handed it.
 - The long-lived mounted repo (`QA_REPO_ROOT`) disappears. **Done (P3)**, and the sentence
   that followed it here was too strong, so it is corrected rather than deleted: removing the
   mount removed the *shared authoritative* disk — no replica needs another replica's disk to
@@ -624,6 +719,13 @@ one hook by the caller. Recorded here because the natural way to write P2 is to 
 | 28 | **Tenant-scoped reads are enforced, not remembered**: one `do_orm_execute` listener adds the filter to every ORM SELECT of a `TenantOwned` row, so a query cannot forget it — only explicitly opt out, and the opt-outs are a pinned allowlist. Installed at import with no off switch, because a flag would let the suite prove isolation in a configuration production does not run in (P5) |
 | 29 | Another tenant's row is **404, not 403**: a reader who does not own a row must not be able to tell "exists, not yours" from "does not exist", or the small integer ids become an inventory of what other tenants hold (P5) |
 | 30 | Background sweeps **iterate tenants** rather than reading across them. A sweep is not one query (`reap_expired` reads locks, then each lock's run, then frees it), so an unfiltered outer query would need every nested read opted out too — and the opt-out would become the normal case in the one module that touches every tenant's rows. One tenant's failure does not stop the others: the reaper is the only thing that frees an app lock (P5) |
+| 31 | **The envelope wraps a data key, not the PAT.** A random AES-256 key per secret, encrypted locally, with only the 32-byte key sent to the KMS — so the PAT is never in a KMS request or its audit log, key rotation re-wraps keys instead of re-encrypting rows, and no secret can outgrow the KMS payload limit (P5-03) |
+| 32 | **The delivery seam is bound to one target before it can push.** `for_target(tools, app)` resolves that target's credential *and* marks it invalid if GitHub rejects it, because those are two halves of one decision; an unbound seam fails loud naming the call that was missed. Four paths do not bind — `is_bootstrapped`, the already-bootstrapped arm and the two `--dry-run` arms — because their answers are Postgres and blob-store reads; `plan_reset` binds because it dials out. A rejection reaching us as a git transport failure rather than a REST 401/403 is translated to the same `CredentialError`, so it is one outcome with one status and one sticky state (P5-03) |
+| 33 | **A credential refused at save time is 422; one refused at delivery is 502.** Separate exception classes, because one class for both would read to a customer with a scope typo as a GitHub outage — and the two have different remedies (P5-03) |
+| 34 | **`GITHUB_PAT` is retired, not kept as a fallback, and nothing is migrated into the new columns.** One operator token is not any tenant's credential; sealing it per target would give every customer the same identity under a per-tenant name (P5-03) |
+| 35 | **An enqueue quota breach is a rejection, not a run.** Checked in `repo.start_run` *above* the `AppLock` trio and before any row is written, so a refusal leaves no run and no lock: a `failed` row would report work that never happened and would spend the monthly quota it was just refused for. 429, distinct from the 409 a busy app gets, because the remedies differ (P5-04) |
+| 36 | **A rejection names one cap; the usage panel asks about each.** `quotas.breach` returns the single kind to refuse with, monthly first, because a tenant that is both out of quota and at its concurrency cap must hear the one that is true for longer — telling them to wait cannot help. Both caps can be full at once, so the portal reads two independent predicates rather than deriving its gauges from the rejection (P5-04) |
+| 37 | **A tenant arrives bounded, and unmetered is something a plan asks for.** The caps carry a server default that is deliberately *not* dropped, because no `create_tenant` exists — a tenant comes from a seed or from raw SQL, and only a server default covers both. `NULL` still means no cap; it just has to be written on purpose now. A cap of `0` is lockout, which is how a tenant is suspended (P5-04) |
 
 ---
 
@@ -635,12 +737,14 @@ does not have to reconstruct which were considered.
 | Deferred | To | Why |
 |---|---|---|
 | **Git bundles and `bundle_key`** | not scheduled | Nothing reads a bundle. Revisions reconstruct from deduped content blobs, a crash commits nothing by design, and a resumed run needs the *agent session* — which P4 persists as a run artifact — rather than mid-step git history. The worktree is a plain directory; a bundle would mean a second history nobody reads (§3) |
-| **Per-tenant concurrency caps and monthly run quotas** | P5 | They are enforced at enqueue, for tenants, and there is one tenant. What bounds a wedged agent is the per-run limits, and P4 added those (§6) |
+| ~~**Per-tenant concurrency caps and monthly run quotas**~~ | ~~P5~~ | **Done (P5-04).** Enforced in `repo.start_run` above the `AppLock` trio, as a typed 429 rejection that writes no run row; `NULL` means unmetered. See §6 |
 | **The run queue and batch runs** | not scheduled | A second run on a busy target is refused with a 409, not queued. The queue is a scheduler *above* the lock trio, and §5 says to leave that trio alone |
 | **A K8s or Fargate scheduler** | when there is a cluster | The dispatch seam exists for them; Docker is the one implementation P4 ships, and the dev stack's socket mount is what the seam exists to replace (§6) |
-| **The run-scoped internal control-plane API** | P5 | It would remove `DATABASE_URL` and the `S3_*` credentials from a sandbox. It is the same mechanism as P5's tenant-scoped reads, and building it earlier would have meant building that worse (§6) |
-| **KMS envelope encryption of PATs; prompts in Postgres with tenant overrides** | P5 | Both are per-tenant mechanisms, and there is one tenant (§8, §12) |
-| **`audit_log`** | P5 | Delivery approvals are the thing it exists to record, and the approving actor is a per-tenant user (§10) |
+| ~~**The run-scoped internal control-plane API**~~ | ~~P5~~ | **Done (P5-05).** `DATABASE_URL` and the `S3_*` credentials are gone from a sandbox and the stores are off its network; a run-scoped bearer token and the narrow internal API (`app/control/`, `app/internal_api.py`) replace them. It is the same mechanism as P5's tenant-scoped reads, which is why building it earlier would have meant building that worse (§6) |
+| ~~**KMS envelope encryption of PATs**~~ | ~~P5~~ | **Done (P5-03).** See §8 |
+| ~~**Prompts in Postgres with tenant overrides**~~ | ~~P5~~ | **Done (P5-06).** A `prompts` table seeded from the code-shipped defaults, overridable per tenant and versioned, with a run recording the revisions it used; the read surface followed in #39 (§12) |
+| **A GitHub App replacing PATs** | not scheduled | §8 names it the better long-term answer; PATs were chosen for launch and remain the credential after P5-03. The envelope, the scope check and the fail-loud path are all independent of which kind of credential it is |
+| ~~**`audit_log`**~~ | ~~P5~~ | **Done (P5-07).** Append-only, enforced by a trigger, recording delivery approval, PAT save/rotate, infra re-sync, target reset, prompt save and quota change, with a tenant-scoped `GET /audit`. Delivery approvals are the thing it exists to record, and the approving actor is a per-tenant user (§10). **User add/remove is not recorded because no user-administration code path exists** — see #30 stories 2 and 27 |
 
 ### What P5 inherits
 

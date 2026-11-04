@@ -93,7 +93,7 @@ def test_the_cutover_is_deleted_with_the_parity_check_it_gated_on():
 # --- what replaced the mount: package data --------------------------------
 
 def test_the_prompts_resolve_from_package_data():
-    from app.orchestrator.claude import prompts_dir
+    from app.package_data import prompts_dir
 
     prompts = prompts_dir()
     assert prompts.is_relative_to(PACKAGE_DIR)
@@ -125,7 +125,8 @@ def test_package_data_is_inside_the_installed_package(tmp_path, monkeypatch):
     """The point of "package data": it is found from the module, not from the
     working directory, so an API image with nothing mounted still finds it."""
     from app.delivery.render import TEMPLATES_DIR
-    from app.orchestrator.claude import prompts_dir, runtime_dir
+    from app.orchestrator.claude import runtime_dir
+    from app.package_data import prompts_dir
 
     monkeypatch.chdir(tmp_path)
 

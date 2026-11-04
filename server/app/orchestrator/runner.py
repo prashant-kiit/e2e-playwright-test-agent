@@ -9,11 +9,12 @@ without Claude Code (see FakeRunner).
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
 from ..domain.steps import Step
+from ..prompt_store import ResolvedPrompt
 from ..target_config import TargetConfig
 
 # A sink for a single log line (already newline-free).
@@ -45,6 +46,19 @@ class StepContext:
     worktree: Path      # per-run hydrated tree: the agent's working directory
     target: TargetConfig  # the row's config, rendered into the prompt
     prev_session_id: str | None  # Claude Code session to --resume, if any
+    # The prompts this run was pinned to, keyed by name (P5-06). They arrive
+    # here for the same reason `target` and `worktree` do: a Runner must not
+    # need a database session to find what it was told to do, and in a sandbox
+    # there is no session to find it with.
+    #
+    # Defaulted to empty so a test or a FakeRunner-driven path can build a
+    # context without a prompts table behind them. A *rendering* runner needs
+    # them: `claude.build_message` raises on a name it was not given rather
+    # than reading the file, so empty is usable only by a runner that renders
+    # no prompt. Every dispatched run arrives with its set populated --
+    # `control.service.run_facts` serves the shipped defaults even for a run
+    # from before the column, so there is no live path that leaves this empty.
+    prompts: dict[str, ResolvedPrompt] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

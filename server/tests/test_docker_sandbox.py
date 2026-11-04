@@ -23,6 +23,17 @@ Two deliberate shapes:
   only thing that can prove it.
 * **Nothing reaches inside a container.** Every assertion here is about a row,
   a blob or a refused connection.
+
+**P5-05 added a third thing these tests have to stand up: the control plane
+itself.** A sandbox no longer holds `DATABASE_URL` or the `S3_*` credentials, so
+a container cannot reach the database the test is using -- it reaches an API that
+does, over the internal control-plane routes. So `control_plane` below runs a
+real `uvicorn` against the test database and the container is pointed at it.
+That makes these the only tests that exercise the whole thing as deployed: a real
+container, a real token, real HTTP, a real API, real rows. The in-process suite
+covers the service and both gateways (tests/test_control_service.py,
+tests/test_control_gateway.py, tests/test_internal_api.py); what only these can
+show is that a sandbox with no credentials can still do its job.
 """
 
 from __future__ import annotations
@@ -30,7 +41,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import time
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -66,6 +79,14 @@ HOST_GATEWAY = f"{HOST_ALIAS}:host-gateway"
 # ceiling is for a cold container start on a loaded machine.
 RUN_TIMEOUT_S = 180.0
 POLL_S = 0.5
+
+# The run tokens these tests mint and the API verifies have to be signed with
+# the same key, so both the test process and the `uvicorn` it starts are given
+# this one. It is a test key; nothing here reaches a real deployment.
+SIGNING_KEY = "the-docker-suite-signing-key"
+
+# How long to wait for the control plane to answer /health.
+API_BOOT_TIMEOUT_S = 30.0
 
 # What a container on the sandbox network reports about the world. Spelled out
 # rather than compressed into a `-c` one-liner: what it prints is the evidence
@@ -186,25 +207,104 @@ def real_store():
     return store
 
 
+def _free_port() -> int:
+    import socket as _socket
+
+    with _socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 @pytest.fixture()
-def container_env(monkeypatch, real_store):
+def control_plane(real_store):
+    """A real control plane, serving the internal API against the test database.
+
+    This is what P5-05 makes necessary. The container holds a token and a URL
+    and nothing else, so something has to be at that URL that can read the
+    database and the blob store on its behalf -- and it has to be the real
+    thing, because the point of these tests is that the deployed arrangement
+    works.
+
+    `uvicorn` as a subprocess rather than in-process: the container reaches it
+    over TCP through the host gateway, and a thread inside the test process
+    serving the same database on the same connection pool would be a different
+    arrangement from the one that ships. The reaper is off (`QA_REAPER=0`) so it
+    cannot reap the run this test is watching out from under it.
+    """
+    port = _free_port()
+    url = make_url(database_url()).set(database=TEST_DB)
+    env = {
+        **os.environ,
+        "DATABASE_URL": url.render_as_string(hide_password=False),
+        "S3_ENDPOINT": os.environ.get("S3_ENDPOINT", "http://localhost:8333"),
+        "S3_ACCESS_KEY": os.environ.get("S3_ACCESS_KEY", "qa"),
+        "S3_SECRET_KEY": os.environ.get("S3_SECRET_KEY", "qa-secret"),
+        "S3_BUCKET": os.environ.get("S3_BUCKET", "qa-artifacts"),
+        "QA_SECRET_KEY": SIGNING_KEY,
+        "QA_REAPER": "0",
+        "QA_LOG_BUS": "postgres",
+        "QA_SANDBOX": "thread",
+    }
+    proc = subprocess.Popen(
+        [
+            sys.executable, "-m", "uvicorn", "app.main:app",
+            "--host", "0.0.0.0", "--port", str(port), "--log-level", "warning",
+        ],
+        cwd=str(SERVER_DIR),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    health = f"http://127.0.0.1:{port}/health"
+    deadline = time.monotonic() + API_BOOT_TIMEOUT_S
+    try:
+        while True:
+            if proc.poll() is not None:
+                docker_unavailable(
+                    f"the control plane exited at once: {proc.stdout.read()[-800:]}"
+                )
+            try:
+                with urllib.request.urlopen(health, timeout=2) as answer:
+                    if answer.status == 200:
+                        break
+            except Exception:
+                pass
+            if time.monotonic() > deadline:
+                proc.terminate()
+                docker_unavailable(
+                    f"the control plane did not answer {health} in "
+                    f"{API_BOOT_TIMEOUT_S}s"
+                )
+            time.sleep(POLL_S)
+        # What the *container* must use: the host gateway, not loopback.
+        yield f"http://{HOST_ALIAS}:{port}"
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover - a wedged uvicorn
+            proc.kill()
+
+
+@pytest.fixture()
+def container_env(monkeypatch, control_plane):
     """The environment a dispatched container is given, pointed at the host.
 
     The sandbox network of the compose stack is not what a test process has, so
     these tests put the container on Docker's default bridge and let it reach
-    the Postgres and the object store the suite itself is using, through the
-    host gateway. That is a difference in *where the stores are*, not in what
-    the run does -- and the egress test below is the one that uses the real
-    internal network.
+    the control plane the fixture above started, through the host gateway. That
+    is a difference in *where the control plane is*, not in what the run does --
+    and the egress test below is the one that uses the real internal network.
+
+    **No `DATABASE_URL` and no `S3_*` are set for the container**, and that is
+    the whole of P5-05 expressed as a fixture: what used to be here is gone, and
+    what replaced it is a URL. The token is minted per dispatch by the scheduler
+    (app/sandbox/docker.py), signed with the key the control plane above was
+    given.
     """
-    url = make_url(database_url()).set(database=TEST_DB, host=HOST_ALIAS)
-    monkeypatch.setenv("DATABASE_URL", url.render_as_string(hide_password=False))
-    monkeypatch.setenv(
-        "S3_ENDPOINT",
-        os.environ.get("S3_ENDPOINT", "http://localhost:8333").replace(
-            "localhost", HOST_ALIAS
-        ),
-    )
+    monkeypatch.setenv("QA_CONTROL_PLANE_URL", control_plane)
+    monkeypatch.setenv("QA_SECRET_KEY", SIGNING_KEY)
     monkeypatch.setenv("QA_RUNNER", "fake")
     monkeypatch.setenv("QA_FAKE_TREE_WRITES", "1")
     monkeypatch.setenv("QA_SANDBOX", "docker")
@@ -223,7 +323,7 @@ def seeded_run(session_factory, tmp_path, real_store):
 
 
 def _scheduler(session_factory, image: str) -> sandbox_docker.DockerScheduler:
-    """A scheduler pointed at the host's stores, with no proxy.
+    """A scheduler pointed at the host's control plane, with no proxy.
 
     `with_proxy=False` because what these two tests prove is the container
     path; the egress control has its own Docker-backed test below, on the real
@@ -242,6 +342,18 @@ def _scheduler(session_factory, image: str) -> sandbox_docker.DockerScheduler:
         # its own tests (tests/test_egress.py, tests/test_proxy.py).
         resolve=public_resolver,
     )
+
+
+def _container_log(handle: str) -> str:
+    """What the sandbox printed, for a failure message.
+
+    Worth having permanently: when a container path breaks, the run row says
+    `pending` and nothing else, and the reason is invariably on the container's
+    stdout -- which `AutoRemove` takes away the moment anyone thinks to look. So
+    it is read before the destroy and put in the assertion.
+    """
+    got = _docker("logs", handle, check=False)
+    return ((got.stdout or "") + (got.stderr or ""))[-3000:]
 
 
 def _await_terminal(session_factory, run_id: int) -> RunStatus:
@@ -279,12 +391,13 @@ def test_a_dispatched_container_produces_the_rows_a_thread_run_produces(
         handle = repo.get_run(s, run_id).sandbox_handle
     try:
         status = _await_terminal(session_factory, run_id)
+        sandbox_log = _container_log(handle or "")
     finally:
         scheduler.destroy(handle or "")
 
     with session_factory() as s:
         run = repo.get_run(s, run_id)
-        assert status is RunStatus.COMPLETED, run.error
+        assert status is RunStatus.COMPLETED, (run.error, sandbox_log)
         assert run.last_completed_step is Step.HEAL
         assert {rs.step for rs in run.steps} == set(Step)
         assert run.sandbox_handle == handle, "the dispatch recorded its sandbox"

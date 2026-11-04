@@ -9,11 +9,19 @@ P3 deleted the sixth. "Is this target bootstrapped?" used to be two REST calls
 asking whether the branch carried an `app.json` and a `playwright.config.ts`;
 it is a Postgres query now (`delivery.catalog`), because the answer must be the
 same for everyone and must not depend on the network being up.
+
+**There is no `token_from_env` here any more** (P5-03). This module reads no
+credential from anywhere: it is handed one. A single `GITHUB_PAT` in the API's
+environment meant every delivery into every customer's repository was authored
+by the same identity, with no per-customer credential, no scope check at save
+and nowhere to record that GitHub had stopped accepting it. A target's token is
+sealed on its own row and opened by `app/delivery/credentials.py`, in the
+control plane, at push time. `token_info` stays and gains a second caller: it
+is what validates a PAT the moment a customer pastes it.
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -53,26 +61,6 @@ class TokenInfo:
         if not self.scopes:
             return True
         return "repo" in self.scopes and "workflow" in self.scopes
-
-
-def token_from_env() -> str:
-    """GITHUB_PAT from the environment. The environment only.
-
-    qa-lib.sh read it from a `.env` beside the workspace as a fallback, and that
-    fallback is deleted here. From P3 the workspace is a tree an LLM wrote while
-    reading a live customer website, so looking for a credential anywhere near
-    it is an exfiltration path -- the single most dangerous line this phase could
-    have introduced. DESIGN.md §6 ("no GitHub credentials ever enter a sandbox")
-    does not formally bind until P4; the lookup path is introduced here, so the
-    rule is applied here.
-
-    Per-tenant encrypted credentials are P5; this stays a process-level
-    environment variable until then.
-    """
-    token = os.environ.get("GITHUB_PAT", "").strip()
-    if token:
-        return token
-    raise CredentialError("no GitHub token: set GITHUB_PAT in the environment")
 
 
 def clone_url(repo: str, token: str) -> str:

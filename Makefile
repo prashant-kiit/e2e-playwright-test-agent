@@ -96,9 +96,13 @@ ci-test-docker: docker-up ## `make ci-test` plus the Docker-backed tests CI runs
 	QA_REQUIRE_DB=1 QA_REQUIRE_DOCKER=1 $(MAKE) test
 
 # --- target-repo delivery (app/delivery; was scripts/*.sh) ---------------
-# APP and STORY are required where shown. GITHUB_PAT comes from the environment
-# only -- neither `gh auth token` nor a `.env` beside the workspace is a
-# fallback (README.md §6.5).
+# APP and STORY are required where shown. The GitHub credential comes from the
+# target's own row -- saved in the portal, encrypted, per tenant (P5-03). There
+# is no GITHUB_PAT in the environment any more, and neither `gh auth token` nor
+# a `.env` beside the workspace was ever a fallback (README.md §6.5).
+#
+# These commands bind no tenant, so they act as the seeded default tenant only:
+# a target belonging to another tenant is not visible to them.
 #
 # Each of these is also an API route (POST /targets/<id>/deliver, /reset,
 # GET /targets/<id>/delivery), but only the delivery state is wired into the

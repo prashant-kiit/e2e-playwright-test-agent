@@ -31,6 +31,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy import (
     Enum as SAEnum,
@@ -38,6 +39,9 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 
 from .db import Base
+from .domain.audit import Action
+from .domain.credentials import CredentialState
+from .domain.quotas import DEFAULT_MAX_CONCURRENT_RUNS, DEFAULT_MONTHLY_RUN_QUOTA
 from .domain.roles import UserRole
 from .domain.status import RunStatus
 from .domain.steps import Step
@@ -117,6 +121,28 @@ class Tenant(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     slug: Mapped[str] = mapped_column(String(63), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # This tenant's plan limits, enforced at enqueue (P5-04, DESIGN.md §6).
+    # `None` is **no cap**, not "nothing allowed": a genuinely unmetered plan,
+    # said explicitly rather than spelled as a sentinel some later reader has
+    # to recognise. A tenant nobody has configured is unmetered, which is the
+    # safe direction while there is still no tenant-admin surface to configure
+    # one with.
+    # The server defaults are **kept**, not dropped, and that is a deliberate
+    # departure from this schema's usual rule (P2's `tenant_id`, P5-03's
+    # `credential_state` both drop theirs so application code must set the
+    # column rather than let the database guess). The rule exists to stop a
+    # column acquiring a meaningless value nobody chose. Here the default *is*
+    # the choice: there is no `create_tenant` in this application, so a tenant
+    # comes from the migration's seed or from raw SQL, and a server default is
+    # the only thing on both paths. Without it, "bound each tenant so one
+    # cannot starve the platform" was true only of tenants somebody had
+    # remembered to configure.
+    max_concurrent_runs: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, server_default=text(str(DEFAULT_MAX_CONCURRENT_RUNS))
+    )
+    monthly_run_quota: Mapped[int | None] = mapped_column(
+        Integer, nullable=True, server_default=text(str(DEFAULT_MONTHLY_RUN_QUOTA))
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -224,6 +250,31 @@ class Target(TenantOwned, Base):
     agent_notes: Mapped[list] = mapped_column(JSON, nullable=False)
     target_repo: Mapped[str] = mapped_column(String(200), nullable=False)
     target_branch: Mapped[str] = mapped_column(String(200), nullable=False)
+
+    # The tenant's own GitHub credential (P5-03, DESIGN.md §8). The columns §3
+    # named and P4 never built.
+    #
+    # `github_pat_ciphertext` is an envelope-sealed PAT: ciphertext plus a
+    # KMS-wrapped data key in one self-describing string (app/envelope.py). It
+    # is **never** the token -- nothing in this process reads the column
+    # expecting a credential, and the one function that opens it lives in
+    # app/delivery/credentials.py, reached only through the delivery `Tools`
+    # seam in the control plane. Nullable because a target legitimately has no
+    # credential until its customer pastes one, which is what `ABSENT` says.
+    github_pat_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # What GitHub reported when the token was saved, so the portal can warn
+    # before it lapses. Null for a fine-grained or non-expiring token, which is
+    # "no expiry reported" and not "expires now".
+    pat_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Non-null with no server default, like `tenant_id` and the P3 config
+    # columns: the backfill default lives in the migration and is dropped
+    # there, so a row cannot acquire a credential state the database guessed.
+    credential_state: Mapped[CredentialState] = mapped_column(
+        _enum_col(CredentialState), nullable=False, default=CredentialState.ABSENT
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -271,6 +322,21 @@ class Run(TenantOwned, Base):
     # the lease reaper is what reconciles (P4).
     spend_usd: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
     sandbox_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Which version of each prompt this run was given: `{name: rev}`, pinned at
+    # `repo.start_run` and never rewritten. P5-06 / #30 story 24 -- "a run
+    # records which prompt version it used".
+    #
+    # Pinning it at the start, rather than resolving again when the sandbox
+    # asks for its facts, is what makes the recorded version *the* version that
+    # ran: `control.service.run_facts` serves exactly these (name, rev) rows,
+    # so an override saved while the run is in flight changes the next run and
+    # not this one. Resolving twice would leave the column a claim about what
+    # probably happened.
+    #
+    # Null for a run that predates the column, and for one started before any
+    # prompt existed to resolve; a reader must treat it as "not recorded"
+    # rather than "no prompts".
+    prompt_revs: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -433,6 +499,118 @@ class FileIndex(TenantOwned, Base):
     size: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     revision: Mapped[Revision] = relationship(back_populates="files")
+
+
+class Prompt(TenantOwned, Base):
+    """One version of one prompt, for one tenant. The agent's instructions as data.
+
+    Prompts were code-shipped package data through P3 (`server/app/prompts/`,
+    via `package_data.prompts_dir()`). P5-06 makes them rows so a customer can
+    tune the agent for their application without a code change or a redeploy --
+    DESIGN.md §12's "code-shipped defaults seeded into Postgres,
+    tenant-overridable, versioned".
+
+    **`name` is the prompt's path relative to the prompts directory**, posix
+    style: `qa_system_prompt.md`, `steps/_context.md`, `steps/4-generate.md`.
+    The same string the portal's Prompts page has always shown, so a row and
+    the file it was seeded from are obviously the same prompt.
+
+    **`rev` is the version, and rows are append-only.** `SEED_REV` (1) is the
+    body seeded from the code-shipped file; every override inserts a new row at
+    the next rev rather than updating one, which is what makes "my prompt
+    overrides are versioned, so I can see what changed and when" (#30, story
+    24) a question the table answers. Resolution is therefore "the highest rev
+    for this tenant and name" -- an override beats the default because it is
+    later, not because it is flagged.
+
+    **The code-shipped files are the seed source, not a live second author.**
+    `prompt_store` reads a file only to insert a tenant's missing `SEED_REV`
+    row; once that row exists the file is never consulted for that tenant
+    again. Editing a `.md` therefore changes nothing for any tenant that has
+    already resolved it -- which is the property that makes the table the one
+    authority rather than a cache in front of the files.
+
+    `UNIQUE(tenant_id, name, rev)` is what makes an override's insert the
+    concurrency check: two simultaneous saves computing the same next rev
+    cannot both land, so one gets an IntegrityError instead of silently
+    overwriting the other's version.
+    """
+
+    __tablename__ = "prompts"
+    # Named explicitly, for the reason `uq_tenants_slug` is: `compare_metadata`
+    # does not compare constraint names, so an unnamed `unique=True` would be
+    # `prompts_tenant_id_name_rev_key` from the models and
+    # `uq_prompts_tenant_id_name_rev` from the chain with the drift test unable
+    # to see the disagreement.
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", "rev", name="uq_prompts_tenant_id_name_rev"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    rev: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class AuditLog(TenantOwned, Base):
+    """One control-plane mutation: what was done, to what, by whom, when.
+
+    P5-07 / #37. The table that makes "who authorized writing this commit into
+    our repo, and when?" a query instead of a grep through logs that rotate,
+    are not tenant-scoped, and cannot be shown to the customer asking.
+
+    **Append-only, enforced by a trigger rather than by convention.** The
+    migration installs `BEFORE UPDATE OR DELETE` on this table so an UPDATE or
+    a DELETE raises -- from application code, from psql, from a future bulk
+    write that did not know. `app/audit.py` has no update and no delete
+    function, but that alone would make immutability a property of one module's
+    API surface, and the trail's whole value is that it cannot be quietly
+    altered afterwards (#30, story 28). The one exception the spec allows,
+    tenant purge, must disable the trigger explicitly; see `app/audit.py`.
+
+    Row-level triggers do not fire on TRUNCATE, so the test fixture's
+    `TRUNCATE` still works -- deliberate, and not a hole worth closing with a
+    statement-level trigger: TRUNCATE needs table-owner rights, and a suite
+    that could not reset its own tables would simply stop asserting this.
+
+    **`actor` is a string, not a foreign key to `users`.** The email of the
+    authenticated user, copied in at write time. An FK would make the trail
+    depend on a row that is allowed to disappear -- removing a user would
+    either be blocked by the audit log (`RESTRICT`) or would erase who did
+    what (`SET NULL`), and a trail that forgets the actor when the actor leaves
+    the company is the opposite of a trail. The cost is that a renamed address
+    reads as two actors, which is honest: that is what the rows recorded.
+
+    **`before`/`after` are state, never a credential.** A PAT save records
+    `absent` -> `valid`, not the token, not a redaction of it. See
+    `app/audit.py`.
+
+    **`target` is a string**, prefixed by kind (`target:saucedemo`,
+    `tenant:1`, `prompt:steps/4-generate.md`), for the same reason `actor` is:
+    the rows outlive the things they name. `app/audit.py`'s `*_ref` helpers own
+    the spelling so a prefix filter means something.
+    """
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor: Mapped[str] = mapped_column(String(320), nullable=False)
+    action: Mapped[Action] = mapped_column(_enum_col(Action), nullable=False)
+    target: Mapped[str] = mapped_column(String(500), nullable=False)
+    # The state either side of the mutation, as far as it is worth recording:
+    # null where a mutation has no meaningful before (a first PAT save) or no
+    # meaningful after (a clear). JSON rather than two typed columns because
+    # what matters differs per action, and a column per action would be mostly
+    # nulls.
+    before: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    after: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
 
 
 # Every tenant-owned entity above inherits `TenantOwned`, so one call covers

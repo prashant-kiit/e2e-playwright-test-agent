@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .render import INFRA_DESTINATIONS, TargetRef, target_ref, write_infra
-from .tools import Tools, default_tools
+from .tools import Tools, default_tools, for_target
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,13 @@ class BootstrapResult:
 
 
 def is_bootstrapped(app: str, *, tools: Tools | None = None) -> tuple[bool, TargetRef]:
-    """Read-only, and read from the database. Never writes, never dials out."""
+    """Read-only, and read from the database. Never writes, never dials out.
+
+    **Deliberately unbound** (P5-03): it answers from Postgres, so it must not
+    need a credential. Requiring one here would mean a target with no PAT saved
+    yet could not be asked whether it had ever been delivered to -- the same
+    mistake `api.get_catalog` exists to avoid.
+    """
     tools = tools or default_tools()
     ref = target_ref(tools.catalog.config(app))
     return tools.catalog.state(app).bootstrapped, ref
@@ -55,13 +61,19 @@ def ensure_bootstrapped(app: str, *, tools: Tools | None = None) -> BootstrapRes
     story" (DESIGN.md decision 16).
     """
     tools = tools or default_tools()
+    # The state check is a Postgres query, so it happens before any credential
+    # is resolved: a target that needs no bootstrap needs no PAT to say so.
     if tools.catalog.state(app).bootstrapped:
         return None
     return bootstrap(app, tools=tools)
 
 
 def bootstrap(app: str, *, dry_run: bool = False, tools: Tools | None = None) -> BootstrapResult:
-    tools = tools or default_tools()
+    with for_target(tools, app, bind=not dry_run) as bound:
+        return _bootstrap(app, dry_run=dry_run, tools=bound)
+
+
+def _bootstrap(app: str, *, dry_run: bool, tools: Tools) -> BootstrapResult:
     cfg = tools.catalog.config(app)
     target = target_ref(cfg)
     files = INFRA_DESTINATIONS

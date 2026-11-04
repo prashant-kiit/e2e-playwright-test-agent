@@ -11,8 +11,21 @@ that execute a run legitimately need this package's *tracked-tree* definition --
 `write_infra` for hydrate's render step, `tracked_tree` for ingest,
 `resolve_story` for the agent's prompt. Importing `app.delivery.render` imports
 this file, and an eager re-export of `default_tools` here would pull
-`app.delivery.github`, the one module that reads `GITHUB_PAT`, into the import
-graph of every sandbox.
+`app.delivery.github`, the module that performs the authenticated push, into the
+import graph of every sandbox. (It read `GITHUB_PAT` from the environment when
+this rule was written; P5-03 retired that source, and the module now reads no
+credential from anywhere -- it is handed a target's decrypted token. The import
+still does not belong in a sandbox, which is why the laziness stays.)
+
+**`app.delivery.credentials` is not in the table at all** (P5-03), and that
+is one step further than lazy. Lazy keeps a module out of the sandbox's import
+*graph*; it does not keep the name out of this file, and this file *is* loaded
+by every sandbox. A table entry reading `"decrypt_pat": "credentials"` would
+hand anything running in there the exact name to ask for -- one
+`getattr(delivery, ...)` away from a function that unwraps a tenant's data key.
+The control plane imports that module by path instead
+(`from .delivery.credentials import ...` in app/api.py), which is a line a
+reviewer sees and a sandbox has no reason to contain.
 
 So the names below resolve on first attribute access instead. Wanting the naming
 contract no longer drags the credential reader along, and
@@ -38,8 +51,13 @@ _EXPORTS: dict[str, str] = {
     "DeliveryState": "catalog",
     "ConfirmationMismatch": "errors",
     "CredentialError": "errors",
+    "CredentialRejected": "errors",
     "DeliveryError": "errors",
     "GitError": "errors",
+    # The message sanitiser. Safe to re-export -- unlike `decrypt_pat`, which
+    # is deliberately absent from this table (a name here is a string anything
+    # in a sandbox could `getattr`), `redact` only ever removes a credential.
+    "redact": "errors",
     "Git": "git",
     "GitHubClient": "github",
     "PullRequest": "github",

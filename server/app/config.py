@@ -85,13 +85,21 @@ def sandbox_kind() -> str:
 
 
 def log_bus_kind() -> str:
-    """Where live log lines go: 'postgres' (a table) or 'memory' (this process).
+    """Where live log lines go: 'postgres', 'memory', or 'gateway' in a sandbox.
 
     It **follows the dispatch kind** rather than being a second thing to
     configure: a run in a container cannot publish into the API's memory, and a
     run on a thread has no reason to need a database for a log line. The
     override exists for the sandbox entrypoint, which sets it explicitly because
     it is not the process that chose the dispatch.
+
+    P5-05 added the third value. A sandbox has no database, so it cannot append
+    to `run_log` itself: it publishes through its run's gateway and the control
+    plane appends on its behalf (`GatewayLogBus`). The value is informational
+    for that process -- the entrypoint builds its own bus, because a gateway is
+    not something `bus_from_env` could conjure -- and `bus_from_env` refuses it
+    rather than silently handing back an in-process dictionary whose lines
+    nobody would ever read.
     """
     explicit = os.environ.get("QA_LOG_BUS", "").strip().lower()
     if explicit:
@@ -170,3 +178,87 @@ def fake_delay() -> float:
         return float(os.environ.get("QA_FAKE_DELAY", "0"))
     except ValueError:
         return 0.0
+
+
+# --- what kind of deployment this is -------------------------------------
+#
+# One signal, read by the two things that must behave differently in
+# development: the session cookies' `Secure` flag (app/auth.py) and the
+# envelope's local key fallback (app/envelope.py). They are the same question
+# -- "is this a real deployment?" -- so they are one variable rather than two.
+
+DEFAULT_ENV = "prod"
+
+
+def is_dev_deployment() -> bool:
+    """True only for `QA_ENV=dev`. **Everything else is a deployment.**
+
+    The default is `prod`, and the asymmetry is deliberate. The two callers
+    both guard a customer credential: one decides whether a 30-day refresh
+    cookie may travel over plain HTTP, the other whether the key that decrypts
+    every stored PAT may be derived from a well-known constant. For both, the
+    cost of reading an unset or misspelled variable as "development" is a live
+    credential exposure, and the cost of reading it as "deployment" is a
+    developer who sets `QA_ENV=dev` once. So only the exact word opts out --
+    `devv`, `staging` and `""` are all deployments.
+
+    The dev stack says so explicitly (`docker-compose.yml`), and so does the
+    test suite (`tests/conftest.py`), for the same reason: the insecure branch
+    should be reachable only on purpose.
+    """
+    return os.environ.get("QA_ENV", DEFAULT_ENV).strip().lower() == "dev"
+
+
+# --- the keys this deployment signs with ---------------------------------
+#
+# Here because three modules need to know what they are and a review found
+# them disagreeing: `app/auth.py` defaulted `QA_SECRET_KEY` to
+# `dev-secret-change-me`, `app/run_token.py` layered `QA_RUN_TOKEN_KEY` over
+# the same default, and `app/envelope.py`'s "the two keys must differ" guard
+# re-derived the first with a default of `""`. So with `QA_SECRET_KEY` unset --
+# every dev stack -- `QA_ENVELOPE_KEY=dev-secret-change-me` *was* the cookie
+# signing key, and the guard compared it to the empty string and allowed it.
+# That is the arrangement follow-up 21 exists to prevent, in the configuration
+# whose refusal is documented in three places.
+#
+# The lesson is the one this codebase keeps relearning: a value known in two
+# places is a value that will disagree in one of them. These are the one place.
+
+DEV_SECRET_KEY = "dev-secret-change-me"
+
+
+def secret_key() -> str:
+    """The key the portal signs session cookies with (`app/auth.py`).
+
+    Falls back to a well-known development value, which is why
+    `envelope.wrapper_from_env` must compare against *this* rather than
+    against a bare `os.environ.get`: the fallback is a real key that really
+    signs cookies, not an absence.
+    """
+    return os.environ.get("QA_SECRET_KEY", DEV_SECRET_KEY)
+
+
+def run_token_key() -> str:
+    """The key run-scoped sandbox tokens are signed with (`app/run_token.py`).
+
+    `QA_RUN_TOKEN_KEY` where a deployment wants the two separated, else the
+    portal's own key -- unchanged behaviour, moved here so there is one answer
+    to "what is actually signing run tokens".
+    """
+    return os.environ.get("QA_RUN_TOKEN_KEY") or secret_key()
+
+
+def cookies_secure() -> bool:
+    """Whether the session cookies carry `Secure` (app/auth.py).
+
+    Its own function rather than `not is_dev_deployment()` at the call site, so
+    the cookie contract reads as a contract and this file stays the one place
+    that knows what `QA_ENV` means.
+
+    Note that development over `http://localhost` does not actually need this
+    to be false -- browsers treat localhost as a secure context and accept
+    `Secure` cookies there. It is false in development for the cases that are
+    not localhost: a stack reached over a LAN address or a tunnel on plain
+    HTTP, and a test client that is not a browser at all.
+    """
+    return not is_dev_deployment()

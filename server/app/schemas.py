@@ -6,6 +6,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .domain.audit import Action
+from .domain.credentials import CredentialState
 from .domain.status import RunStatus
 from .domain.steps import Step
 
@@ -171,6 +173,59 @@ class TargetCreatedOut(BaseModel):
 class PromptOut(BaseModel):
     name: str
     content: str
+    # Which version of this prompt the tenant is on: 1 is the seeded default,
+    # 2 and up are their own overrides (P5-06). On the page so "what changed
+    # and when" has somewhere to start, and so the Prompts page can show that
+    # a prompt has been tuned rather than looking identical to a default.
+    rev: int
+
+
+class PromptSave(BaseModel):
+    content: str
+
+
+class PromptRevisionOut(BaseModel):
+    """One historical revision of a prompt, for `GET /prompts/{name}/history`.
+
+    `content` rather than `body`, to match `PromptOut` and the page that reads
+    it -- the wire name for a prompt's text has been `content` since P3 and
+    this is not the surface to change it on.
+
+    `created_at` is **nullable**, and not because a row might lack one: a
+    tenant who has never overridden a prompt has no row at all, and their one
+    entry is the shipped default, which became theirs at no particular moment
+    (see `prompt_store.PromptRevision`).
+    """
+
+    name: str
+    content: str
+    rev: int
+    created_at: datetime | None
+
+
+class AuditEntryOut(BaseModel):
+    """One row of the audit trail, for `GET /audit` (P5-07).
+
+    `before`/`after` are passed through as the arbitrary JSON they are rather
+    than modelled per action: what is worth recording differs by mutation, and
+    a typed union here would have to be extended in lockstep with every new
+    action -- turning a row the database already holds into one the API cannot
+    show.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    actor: str
+    # The enum, not a bare `str`: it is a closed vocabulary (`app/domain/audit.py`)
+    # and saying so puts the values in the OpenAPI schema instead of leaving a
+    # client to discover them from data. Serialises to the member's value,
+    # because `Action` is `(str, Enum)` like every other domain enum here.
+    action: Action
+    target: str
+    before: dict | None
+    after: dict | None
+    at: datetime
 
 
 class ArtifactOut(BaseModel):
@@ -221,6 +276,37 @@ class ResetBody(BaseModel):
     dry_run: bool = False
 
 
+class PatBody(BaseModel):
+    """The one thing the save route takes. A body rather than a query parameter
+    or a path segment, because those end up in access logs and this does not."""
+
+    token: str = Field(min_length=1, max_length=500)
+
+
+class CredentialOut(BaseModel):
+    """A target's GitHub credential, as the portal is allowed to see it.
+
+    **There is no field for the token and none for the ciphertext**, and that
+    is the schema doing a job rather than an omission: a response body lands in
+    a browser's network log, and nothing in the portal has any use for either
+    value. What it needs is the three questions in `credential_status` --
+    is there a credential, does GitHub still accept it, is it about to lapse.
+
+    Costs no KMS call and no GitHub call: every field is a function of the row.
+    """
+
+    app: str
+    state: CredentialState
+    expires_at: datetime | None
+    days_until_expiry: int | None
+    expiring_soon: bool
+    warning: str | None
+    # Who GitHub says the token belongs to. Only known on the save that just
+    # validated it -- it is not stored, because it is GitHub's answer at a
+    # moment and not a fact about the row.
+    login: str | None = None
+
+
 class DeliveryStateOut(BaseModel):
     """"Is this delivered?", answered from Postgres (invariant 5).
 
@@ -238,6 +324,13 @@ class DeliveryStateOut(BaseModel):
     delivered_sha: str | None
     revisions_ahead: int
     summary: str
+    # The credential, carried on the answer the portal already fetches per
+    # target for the delivery badge (P5-03). A second round trip for "can this
+    # target deliver at all?" would be a second thing to forget: the two
+    # questions are asked in the same breath and shown in the same row.
+    credential_state: CredentialState
+    pat_expires_at: datetime | None
+    credential_warning: str | None
 
 
 class DeliveryOut(BaseModel):
@@ -246,3 +339,26 @@ class DeliveryOut(BaseModel):
     pr_url: str = ""
     pr_number: int | None = None
     detail: dict = {}
+
+
+class UsageOut(BaseModel):
+    """What this tenant has spent against what its plan allows (P5-04).
+
+    One request rather than two, because the portal always wants both halves:
+    a count with no denominator cannot be rendered as "2 of 3", and a cap with
+    no count cannot be rendered at all.
+
+    `max_concurrent_runs` and `monthly_run_quota` are `None` for an unmetered
+    tenant -- no cap, rather than a cap of zero -- and the two `at_*` flags are
+    then always false. They are computed here rather than left to the browser
+    so "is this tenant at its cap?" has exactly one implementation: the portal
+    disabling a button on one rule while the enqueue refuses on another is how
+    a Start button that looks available starts answering 429.
+    """
+
+    live_runs: int
+    runs_this_month: int
+    max_concurrent_runs: int | None
+    monthly_run_quota: int | None
+    at_concurrency_cap: bool
+    at_monthly_quota: bool

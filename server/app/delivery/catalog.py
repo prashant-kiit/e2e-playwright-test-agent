@@ -88,6 +88,27 @@ class DeliveryState:
         )
 
 
+def target_by_app(session, app: str) -> Target:
+    """The calling tenant's target with this slug, or `DeliveryError`.
+
+    Module level rather than a method, because delivery has two seams that need
+    it: the catalog (configuration, tree, state) and the credential seam
+    (app/delivery/credentials.py). A second copy of this query would be a
+    second chance to forget the `tenant_id` filter -- `targets.app` is unique
+    per tenant now (P5-02), so an unfiltered lookup is both a leak and a
+    `MultipleResultsFound` waiting for the second customer who tests the same
+    application.
+    """
+    if not app:
+        raise DeliveryError("a target is required")
+    target = session.scalars(
+        select(Target).where(Target.app == app, Target.tenant_id == current_tenant_id())
+    ).one_or_none()
+    if target is None:
+        raise DeliveryError(f"no such target: {app!r}")
+    return target
+
+
 class Catalog(Protocol):
     def config(self, app: str) -> TargetConfig: ...
     def materialize(self, app: str) -> AbstractContextManager[Path]: ...
@@ -134,7 +155,7 @@ class DbCatalog:
                         f"target {app!r} has no head revision, so there is nothing to deliver"
                     )
                 try:
-                    hyd.materialize(session, head, self._store, root)
+                    hyd.materialize(revisions.revision_view(session, head), self._store, root)
                 except hyd.HydrateError as exc:
                     raise DeliveryError(f"could not materialize {app!r}: {exc}") from exc
                 hyd.render_generated(root, config_of(target))
@@ -202,13 +223,4 @@ class DbCatalog:
 
     @staticmethod
     def _target(session, app: str) -> Target:
-        if not app:
-            raise DeliveryError("a target is required")
-        target = session.scalars(
-            select(Target).where(
-                Target.app == app, Target.tenant_id == current_tenant_id()
-            )
-        ).one_or_none()
-        if target is None:
-            raise DeliveryError(f"no such target: {app!r}")
-        return target
+        return target_by_app(session, app)

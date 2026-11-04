@@ -37,7 +37,7 @@ from .render import (
     target_ref,
     tracked_tree,
 )
-from .tools import Tools, default_tools
+from .tools import Tools, for_target
 
 
 @dataclass(frozen=True)
@@ -64,7 +64,28 @@ def push_artifacts(
     dry_run: bool = False,
     tools: Tools | None = None,
 ) -> PushResult:
-    tools = tools or default_tools()
+    with for_target(tools, app, bind=not dry_run) as bound:
+        return _push_artifacts(
+            app,
+            story_id,
+            body=body,
+            body_file=body_file,
+            run_id=run_id,
+            dry_run=dry_run,
+            tools=bound,
+        )
+
+
+def _push_artifacts(
+    app: str,
+    story_id: str,
+    *,
+    body: str | None,
+    body_file: Path | None,
+    run_id: str | None,
+    dry_run: bool,
+    tools: Tools,
+) -> PushResult:
     cfg = tools.catalog.config(app)
     target = target_ref(cfg)
 

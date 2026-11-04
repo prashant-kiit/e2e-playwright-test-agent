@@ -11,12 +11,18 @@ Structural tests, in the style of test_no_repo_mount.py, because the guarantee
 is about what *cannot* happen rather than about what did. A behavioural test
 passes for as long as nobody adds the variable.
 
-The store credentials are **accepted exposure for this phase, deliberately**:
-hydrate and ingest are the run, so they need the stores. Routing them through a
-narrow, run-scoped internal API is P5's, where the token that authorizes one
-run's target is the same mechanism that authorizes one tenant's data. That
-decision is recorded in DESIGN.md §6 rather than left to be rediscovered, and
-the test below pins the *shape* of the exposure so it cannot quietly grow.
+**P5-05 closed the last of it.** P4 recorded the store credentials as accepted
+exposure with a stated plan, and the tests below are now the other end of that
+note: a sandbox carries neither `DATABASE_URL` nor the `S3_*` credentials, and
+what it carries instead is a run-scoped token (app/run_token.py) that authorizes
+one run of one target of one tenant and stops working when that run does.
+
+The shape of the remaining exposure is worth stating, because it is not nothing:
+a sandbox can do, for the life of its run, exactly what its own run could always
+do -- read its target's head revision, write its target's next one, upload its
+own artifacts, append to its own log. What it can no longer do is read any other
+tenant's rows or blobs, which is what `DATABASE_URL` let it do for as long as it
+held one.
 """
 
 from __future__ import annotations
@@ -39,7 +45,64 @@ REPO_ROOT = SERVER_DIR.parent
 # Everything that would let a sandbox write to a customer's repository or act as
 # the portal. Named individually rather than by prefix: a list is readable, and
 # a prefix rule would quietly stop covering a credential named differently.
-FORBIDDEN = ("GITHUB_PAT", "GITHUB_TOKEN", "GH_TOKEN", "QA_ADMIN_PASSWORD", "QA_SECRET_KEY")
+FORBIDDEN = (
+    "GITHUB_PAT",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "QA_ADMIN_PASSWORD",
+    # Since P5-05, what run tokens are signed with. A sandbox holding it could
+    # mint itself a token for any run of any tenant, which would undo the whole
+    # of this phase in one variable.
+    #
+    # It was *also* the wrapping key for every tenant's sealed PAT until the
+    # follow-up 21 fix, which moved that job to `QA_ENVELOPE_KEY` -- so what
+    # this entry guards is now narrower, and there is a second entry below for
+    # the other half. Both are still forbidden, for different reasons.
+    "QA_SECRET_KEY",
+    "QA_RUN_TOKEN_KEY",
+    # The wrapping key for every tenant's sealed PAT (`envelope.LocalKeyWrapper`
+    # derives from it). A sandbox holds sealed ciphertext it can do nothing
+    # with, which is the property the envelope buys; this key is precisely what
+    # would turn that back into a readable credential. Forbidden in compose for
+    # the same reason as `QA_SECRET_KEY`: a real deployment supplies it through
+    # its own secret mechanism rather than a file in the repository, and a dev
+    # stack needs no value at all (`QA_ENV=dev` falls back to
+    # `envelope.DEV_ENVELOPE_KEY`).
+    "QA_ENVELOPE_KEY",
+)
+
+# The store credentials P5-05 removed. Kept as their own list rather than folded
+# into FORBIDDEN above, because that list is also applied to every compose
+# service -- and the API, the reaper and the migrations are all *supposed* to
+# have these. What must not have them is a sandbox.
+FORBIDDEN_IN_A_SANDBOX = (
+    "DATABASE_URL",
+    "S3_ENDPOINT",
+    "S3_ACCESS_KEY",
+    "S3_SECRET_KEY",
+    "S3_BUCKET",
+)
+
+# `QA_KMS_KEY_ID` is deliberately **not** in that list. It is a key *identifier*,
+# not a credential -- what authorises its use is the deployment's IAM grant --
+# and the list above is also applied to every compose service, so including it
+# would forbid the API from being configured with the key it needs. That a
+# sandbox does not get it is asserted directly instead, in
+# `test_no_sealed_credential_or_wrapping_key_reaches_the_sandbox`.
+
+
+@pytest.fixture()
+def run_token(monkeypatch):
+    """A real minted token, because that is what a real sandbox is handed.
+
+    Minted rather than faked: `sandbox_environment` takes it as a required
+    positional argument, and a test passing a placeholder string would not
+    notice if the thing being put in a container stopped being a token.
+    """
+    from app import run_token as tokens
+
+    monkeypatch.setenv("QA_SECRET_KEY", "the-suite-signing-key")
+    return tokens.mint(tokens.RunScope(run_id=7, target_id=3, tenant_id=42))
 
 
 @pytest.fixture()
@@ -67,23 +130,69 @@ def _control_plane_environment(monkeypatch):
     monkeypatch.setenv("S3_BUCKET", "qa-artifacts")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("QA_CORS_ORIGINS", "http://localhost:5173")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
 
 
 # --- one function builds the environment ---------------------------------
 
-def test_the_sandbox_environment_carries_what_hydrate_and_ingest_need(cfg):
-    env = sandbox_env.sandbox_environment(7, cfg)
+def test_the_sandbox_environment_carries_a_token_and_where_to_present_it(
+    cfg, run_token
+):
+    """What replaced the stores: one token, one URL.
 
-    assert env["DATABASE_URL"] == "postgresql+psycopg://qa:qa@postgres:5432/qa"
-    assert env["S3_ENDPOINT"] == "http://seaweedfs:8333"
-    assert env["S3_ACCESS_KEY"] == "qa"
-    assert env["S3_SECRET_KEY"] == "qa-secret"
-    assert env["S3_BUCKET"] == "qa-artifacts"
+    This is the acceptance criterion in one assertion -- a sandbox's whole
+    authority over Postgres and the blob store is a string that expires with its
+    run.
+    """
+    env = sandbox_env.sandbox_environment(7, cfg, run_token)
+
+    assert env["QA_RUN_TOKEN"] == run_token
+    assert env["QA_CONTROL_PLANE_URL"] == "http://api:8000"
     assert env["ANTHROPIC_API_KEY"] == "sk-ant-test"
 
 
-def test_the_sandbox_environment_carries_the_scratch_paths_and_the_runner_kind(cfg):
-    env = sandbox_env.sandbox_environment(7, cfg)
+@pytest.mark.parametrize("name", FORBIDDEN_IN_A_SANDBOX)
+def test_no_store_credential_reaches_the_sandbox(cfg, run_token, name):
+    """P5-05's first acceptance criterion, as a structural test.
+
+    The control plane's environment has all of these (the fixture above puts
+    them there, as the API really does), and none of them comes out.
+    """
+    assert name not in sandbox_env.sandbox_environment(7, cfg, run_token)
+
+
+def test_no_value_of_a_store_credential_reaches_the_sandbox_under_another_name(
+    cfg, run_token
+):
+    """The rename guard, applied to the credentials this ticket removed: the way
+    this would actually be lost is somebody passing the same connection string
+    along under a name the list above does not mention."""
+    env = sandbox_env.sandbox_environment(7, cfg, run_token)
+    values = {
+        "postgresql+psycopg://qa:qa@postgres:5432/qa",
+        "http://seaweedfs:8333",
+        "qa-secret",
+        "qa-artifacts",
+    }
+
+    assert {k: v for k, v in env.items() if v in values} == {}
+
+
+def test_the_token_is_a_real_run_token_and_says_only_what_it_should(cfg, run_token):
+    """It carries one run, one target and one tenant -- and the sandbox cannot
+    change any of them, because it does not hold the signing key."""
+    from app import run_token as tokens
+
+    env = sandbox_env.sandbox_environment(7, cfg, run_token)
+
+    scope = tokens.verify(env["QA_RUN_TOKEN"])
+    assert (scope.run_id, scope.target_id, scope.tenant_id) == (7, 3, 42)
+
+
+def test_the_sandbox_environment_carries_the_scratch_paths_and_the_runner_kind(
+    cfg, run_token
+):
+    env = sandbox_env.sandbox_environment(7, cfg, run_token)
 
     assert env["QA_RUNS_DIR"]
     assert env["QA_WORKTREES_DIR"]
@@ -91,30 +200,36 @@ def test_the_sandbox_environment_carries_the_scratch_paths_and_the_runner_kind(c
     assert env["QA_RUNNER"] in ("fake", "claude")
 
 
-def test_the_sandbox_writes_its_log_to_postgres(cfg):
-    """It cannot publish into the API's memory, and the entrypoint is not the
-    process that chose the dispatch, so it is told explicitly."""
-    assert sandbox_env.sandbox_environment(7, cfg)["QA_LOG_BUS"] == "postgres"
+def test_the_sandbox_writes_its_log_through_the_control_plane(cfg, run_token):
+    """It cannot publish into the API's memory, and after P5-05 it has no
+    database to append to either -- so its lines go to the control plane, which
+    appends them on its behalf. The entrypoint is not the process that chose the
+    dispatch, so it is told explicitly."""
+    env = sandbox_env.sandbox_environment(7, cfg, run_token)
+
+    assert env["QA_LOG_BUS"] == "gateway"
 
 
 @pytest.mark.parametrize("name", FORBIDDEN)
-def test_no_github_or_portal_credential_reaches_the_sandbox(cfg, name):
-    env = sandbox_env.sandbox_environment(7, cfg)
+def test_no_github_or_portal_credential_reaches_the_sandbox(cfg, run_token, name):
+    env = sandbox_env.sandbox_environment(7, cfg, run_token)
     assert name not in env
 
 
-def test_no_value_of_a_forbidden_credential_reaches_the_sandbox_under_another_name(cfg):
+def test_no_value_of_a_forbidden_credential_reaches_the_sandbox_under_another_name(
+    cfg, run_token
+):
     """A rename is the way this guarantee would actually be lost."""
-    env = sandbox_env.sandbox_environment(7, cfg)
+    env = sandbox_env.sandbox_environment(7, cfg, run_token)
     secrets = {f"secret-{name.lower()}" for name in FORBIDDEN}
     leaked = {key: value for key, value in env.items() if value in secrets}
     assert leaked == {}
 
 
-def test_the_environment_is_built_from_a_list_rather_than_copied(cfg):
+def test_the_environment_is_built_from_a_list_rather_than_copied(cfg, run_token):
     """`os.environ` is never the starting point: a control-plane variable added
     next year must not arrive in a sandbox because nobody updated a deny list."""
-    env = sandbox_env.sandbox_environment(7, cfg)
+    env = sandbox_env.sandbox_environment(7, cfg, run_token)
     assert "QA_CORS_ORIGINS" not in env
     assert "QA_SANDBOX" not in env
     source = Path(sandbox_env.__file__).read_text()
@@ -123,18 +238,18 @@ def test_the_environment_is_built_from_a_list_rather_than_copied(cfg):
     assert "os.environ.copy" not in source
 
 
-def test_the_agent_runtimes_telemetry_and_error_reporting_are_disabled(cfg):
+def test_the_agent_runtimes_telemetry_and_error_reporting_are_disabled(cfg, run_token):
     """Disabled by environment rather than allowlisted, so the allowlist stays
     the length of what a run genuinely needs."""
-    env = sandbox_env.sandbox_environment(7, cfg)
+    env = sandbox_env.sandbox_environment(7, cfg, run_token)
     assert env["DISABLE_TELEMETRY"] == "1"
     assert env["DISABLE_ERROR_REPORTING"] == "1"
     assert env["CLAUDE_CODE_ENABLE_TELEMETRY"] == "0"
     assert env["DISABLE_AUTOUPDATER"] == "1"
 
 
-def test_every_value_is_a_string_a_container_can_take(cfg):
-    env = sandbox_env.sandbox_environment(7, cfg)
+def test_every_value_is_a_string_a_container_can_take(cfg, run_token):
+    env = sandbox_env.sandbox_environment(7, cfg, run_token)
     assert all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())
 
 
@@ -346,53 +461,173 @@ def test_install_dependencies_is_still_one_named_function():
     assert "npm" in inspect.getsource(hydrate.install_dependencies)
 
 
-# --- the stores are reached directly, not through the proxy --------------
+# --- the control plane is reached directly, not through the proxy --------
+#
+# This section used to be about the stores. P5-05 took them off the sandbox's
+# network entirely, and the trap they were here for moved intact to the thing
+# that replaced them.
 
-def test_the_internal_stores_are_not_sent_through_the_proxy(cfg):
-    """The bug this test exists for: boto3 honours `HTTPS_PROXY`.
+def test_the_internal_control_plane_is_not_sent_through_the_proxy(cfg, run_token):
+    """The bug this test exists for, now one layer up.
 
-    Postgres and the object store sit on the sandbox's own internal network and
-    are reached by name. They are deliberately **not** on the egress allowlist --
-    a proxy that could reach the control plane's stores would be a proxy worth
-    attacking -- so if their hosts are not in `NO_PROXY`, the S3 client tunnels
-    `http://seaweedfs:8333` to the proxy, the proxy refuses it, and hydrate and
-    ingest both fail. The Docker-backed integration test cannot catch this: it
-    runs with no proxy at all.
+    `HTTP_PROXY` is honoured by more clients than the ones it is set for. It was
+    boto3 before -- the S3 client tunnelled `http://seaweedfs:8333` to the
+    allowlisting proxy, which refused it, correctly, and hydrate and ingest both
+    failed in any stack that had a proxy. The client is `httpx` now and the host
+    is the control plane's, and the consequence is worse rather than better: not
+    one operation but *every* operation a run performs goes through the internal
+    API.
+
+    So the control plane bypasses the proxy rather than being allowlisted
+    through it. A proxy that could reach the internal API would be a proxy worth
+    attacking -- the same argument that kept the stores off the allowlist, now
+    protecting what replaced them. The Docker-backed integration test cannot
+    catch this: it runs with no proxy at all.
     """
     env = sandbox_env.sandbox_environment(
-        7, cfg, proxy_url="http://qa-proxy-run:3128"
+        7, cfg, run_token, proxy_url="http://qa-proxy-run:3128"
     )
 
     for name in ("NO_PROXY", "no_proxy"):
         hosts = env[name].split(",")
-        assert "seaweedfs" in hosts, env[name]
-        assert "postgres" in hosts, env[name]
+        assert "api" in hosts, env[name]
     assert env["HTTPS_PROXY"] == "http://qa-proxy-run:3128"
 
 
-def test_the_stores_in_no_proxy_are_the_stores_the_sandbox_was_given(cfg, monkeypatch):
-    """Derived from the endpoints, never hand-listed: a stack whose stores are
-    somewhere else must not need this file edited to keep working."""
-    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://qa:qa@db.internal:5432/qa")
-    monkeypatch.setenv("S3_ENDPOINT", "http://blobs.internal:9000")
+def test_the_stores_are_not_on_the_sandboxs_network_at_all(cfg, run_token):
+    """The other half of "the stores are unreachable from a sandbox".
 
-    env = sandbox_env.sandbox_environment(7, cfg, proxy_url="http://p:3128")
+    They are not allowlisted through the proxy, and they are no longer on the
+    bypass path either -- because the sandbox is not told where they are. There
+    is no hostname here for a run to resolve, in `NO_PROXY` or out of it.
+    """
+    env = sandbox_env.sandbox_environment(
+        7, cfg, run_token, proxy_url="http://qa-proxy-run:3128"
+    )
 
-    hosts = env["NO_PROXY"].split(",")
-    assert "db.internal" in hosts
-    assert "blobs.internal" in hosts
+    for name in ("NO_PROXY", "no_proxy"):
+        hosts = env[name].split(",")
+        assert "seaweedfs" not in hosts, env[name]
+        assert "postgres" not in hosts, env[name]
+    assert not any("seaweedfs" in value for value in env.values())
+    assert not any("postgres" in value for value in env.values())
 
 
-def test_the_target_is_not_in_no_proxy(cfg):
+def test_the_host_in_no_proxy_is_the_control_plane_the_sandbox_was_given(
+    cfg, run_token, monkeypatch
+):
+    """Derived from the URL, never hand-listed: a stack whose API is somewhere
+    else must not need this file edited to keep working."""
+    monkeypatch.setenv("QA_CONTROL_PLANE_URL", "http://control.internal:9000")
+
+    env = sandbox_env.sandbox_environment(7, cfg, run_token, proxy_url="http://p:3128")
+
+    assert "control.internal" in env["NO_PROXY"].split(",")
+
+
+def test_the_target_is_not_in_no_proxy(cfg, run_token):
     """It must go *through* the proxy: that is where the allowlist and the
     public-address rule are enforced."""
-    env = sandbox_env.sandbox_environment(7, cfg, proxy_url="http://p:3128")
+    env = sandbox_env.sandbox_environment(7, cfg, run_token, proxy_url="http://p:3128")
 
     assert "shop.example.com" not in env["NO_PROXY"].split(",")
 
 
-def test_without_a_proxy_there_is_no_proxy_environment_at_all(cfg):
-    env = sandbox_env.sandbox_environment(7, cfg)
+def test_without_a_proxy_there_is_no_proxy_environment_at_all(cfg, run_token):
+    env = sandbox_env.sandbox_environment(7, cfg, run_token)
 
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "QA_PROXY_URL"):
         assert name not in env
+
+
+# --- the per-tenant PAT (P5-03) ------------------------------------------
+#
+# P4's rule was about one operator `GITHUB_PAT`. P5-03 turns the credential
+# into a per-tenant secret on the target row, which makes the rule larger
+# rather than smaller: there is now a credential *per customer* to keep out,
+# plus the key material that would open it. The tests below are the same shape
+# as the ones above -- what cannot happen, not what did.
+
+
+def test_the_target_configuration_a_sandbox_is_handed_carries_no_credential():
+    """The structural half, and the reason it is cheap to be sure of.
+
+    `sandbox_environment` takes a `TargetConfig`, which is the target's row
+    *minus* its credential: the dataclass has no field for one, so there is no
+    value for the environment builder to pass along even by mistake. A sealed
+    PAT reaching a sandbox would have to start with somebody adding a field
+    here, which is a reviewable line rather than an oversight.
+    """
+    import dataclasses
+
+    fields = {f.name for f in dataclasses.fields(TargetConfig)}
+
+    assert fields == {
+        "app",
+        "name",
+        "base_url",
+        "locators",
+        "agent_notes",
+        "target_repo",
+        "target_branch",
+    }
+    for name in ("github_pat_ciphertext", "pat_expires_at", "credential_state"):
+        assert name not in fields
+
+
+def test_no_sealed_credential_or_wrapping_key_reaches_the_sandbox(
+    cfg, run_token, monkeypatch
+):
+    """Belt as well as braces: a real sealed PAT and the key that opens it are
+    both in the control plane's environment, and neither comes out."""
+    from app import envelope
+
+    monkeypatch.setenv("QA_KMS_KEY_ID", "arn:aws:kms:eu-west-1:1:key/abc")
+    sealed = envelope.seal(
+        "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        envelope.LocalKeyWrapper(b"the-suite-wrapping-key"),
+    )
+
+    env = sandbox_env.sandbox_environment(7, cfg, run_token)
+
+    assert "QA_KMS_KEY_ID" not in env
+    assert not any(sealed in value for value in env.values())
+    assert not any("ghp_" in value for value in env.values())
+    # The wrapping key itself, under whatever name: `_control_plane_environment`
+    # puts a recognisable value in QA_SECRET_KEY, and the rename guard above
+    # covers the general case.
+    assert not any(value == "secret-qa_secret_key" for value in env.values())
+
+
+def test_no_module_reachable_from_the_entrypoint_can_open_a_sealed_credential():
+    """The import-graph half, extended to the decrypt path.
+
+    The sandbox image ships the same server package as the API, so
+    `app/envelope.py` and `app/delivery/credentials.py` exist in it. What must
+    not exist is a path from the entrypoint to them: until P5-05 the sandbox
+    holds `DATABASE_URL`, so it can *read* `targets.github_pat_ciphertext`
+    already -- the envelope is what makes that harmless, and it stays harmless
+    only while nothing in there can unwrap a data key.
+    """
+    modules = _modules_reachable_from_the_entrypoint()
+
+    assert "app.envelope" not in modules
+    assert "app.delivery.credentials" not in modules
+
+
+@pytest.mark.parametrize("name", ("decrypt_pat", "open_sealed", "LocalKeyWrapper"))
+def test_nothing_the_sandbox_imports_mentions_the_decrypt_path(name):
+    """The rename guard, as for the forbidden credentials above: a module that
+    acquired this by being imported for something else would not show up as a
+    failing behaviour anywhere."""
+    offenders = []
+    for module in _modules_reachable_from_the_entrypoint():
+        path = SERVER_DIR / (module.replace(".", "/") + ".py")
+        if not path.is_file():
+            path = SERVER_DIR / module.replace(".", "/") / "__init__.py"
+        if path.is_file() and name in code_of(path):
+            offenders.append(module)
+    assert offenders == [], (
+        f"{offenders} are reachable from the sandbox entrypoint and mention "
+        f"{name}; no sandbox may be able to open a tenant's sealed credential"
+    )

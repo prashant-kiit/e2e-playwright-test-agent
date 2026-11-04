@@ -42,14 +42,14 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy.orm import Session
-
-from .. import config, revisions
+from .. import config
+from ..control.gateway import RunGateway
+from ..control.model import HeadRevision
 from ..delivery.render import write_infra
-from ..models import Revision, Target
 from ..orchestrator.runner import Emit
+from ..revisions import sha256_from_blob_key
 from ..storage import Storage
-from ..target_config import TargetConfig, config_of
+from ..target_config import TargetConfig
 
 _CHUNK = 1 << 16
 
@@ -77,9 +77,7 @@ class HydrateResult:
     installed: bool
 
 
-def materialize(
-    session: Session, revision: Revision, store: Storage, dest: Path
-) -> list[str]:
+def materialize(revision: HeadRevision, store: Storage, dest: Path) -> list[str]:
     """Write every file of `revision` into `dest`. Returns the paths written.
 
     Verification is not an extra step: the blob key is the content hash, so
@@ -87,11 +85,19 @@ def materialize(
     store that hands back the wrong bytes is caught here rather than becoming a
     worktree the agent works in.
 
-    Also what delivery uses, so what we push is provably the revision recorded.
+    **P5-05 made that check load-bearing rather than belt-and-braces.** It used
+    to guard against a store handing back the wrong object; now the bytes arrive
+    over HTTP from the control plane, so it also covers the framing -- a blob
+    truncated in transit fails the hydrate here instead of becoming a worktree
+    the agent works in and ingest commits.
+
+    Takes a `HeadRevision` and a `Storage` rather than a session and a row,
+    because a sandbox has neither: both come from the run's gateway, and on the
+    thread path they come from the same gateway against the same database.
     """
     written: list[str] = []
-    for row in revisions.list_files(session, revision.id):
-        expected = revisions.sha256_from_blob_key(row.blob_key)
+    for row in revision.files:
+        expected = sha256_from_blob_key(row.blob_key)
         path = dest / row.path
         path.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
@@ -173,29 +179,33 @@ def install_dependencies(
 
 
 def hydrate(
-    session: Session,
-    target: Target,
+    control: RunGateway,
     store: Storage,
     dest: Path,
     *,
     emit: Emit,
     install: bool = True,
 ) -> HydrateResult:
-    """Build `target`'s head revision into `dest`: materialize, render, install.
+    """Build the run's head revision into `dest`: materialize, render, install.
 
     Raises rather than returning a partial tree, and removes `dest` on the way
     out when it does. The run fails on that exception, which is the point: a run
     that cannot be given a tree must not burn tokens against a corrupt one.
+
+    `control` is the run's gateway (app/control/gateway.py): it names the head
+    revision and the target's configuration, and after P5-05 it is also where the
+    blobs come from. The target is not a parameter because a sandbox holds
+    exactly one target's tree -- the gateway's scope already says which.
     """
-    head = revisions.head_revision(session, target.id)
+    head = control.head_revision()
+    cfg = control.run_facts().target
     if head is None:
         raise NoHeadRevision(
-            f"target {target.app!r} has no head revision to hydrate from"
+            f"target {cfg.app!r} has no head revision to hydrate from"
         )
 
-    cfg = config_of(target)
     try:
-        files = materialize(session, head, store, dest)
+        files = materialize(head, store, dest)
         render_generated(dest, cfg)
         installed = install_dependencies(dest, emit) if install else False
     except Exception:

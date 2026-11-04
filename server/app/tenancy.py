@@ -1,4 +1,4 @@
-"""Who "we" are for the current request.
+"""Who "we" are for the current request: the tenant, and the acting user.
 
 Every table carries `tenant_id` from P2 onward (DESIGN.md §13). P2 bought, by
 carrying the column even while there was one tenant, that P5 is a data backfill
@@ -15,13 +15,32 @@ a `ContextVar` set for the duration of whoever is acting:
 * a run on the thread/CI path sets it from the run's own `tenant_id`
   (app/launcher.py), because that work has no request behind it.
 
-Outside any scope the resolver answers `DEFAULT_TENANT_ID`. That default is not
-a stand-in for "unknown": it is what keeps the pure-domain tests and any code
-that runs before auth exists writing the one seeded tenant, exactly as the
-constant did before P5.
+Outside any scope the resolver **raises** (`NoTenantScope`, P5-11). It used to
+answer `DEFAULT_TENANT_ID`, and that default was load-bearing in exactly the
+wrong direction: it meant a route that forgot its auth dependency, or
+background work that forgot to bind a scope, quietly read and wrote the first
+customer's rows. Story 6 asks for the opposite -- a missing filter should fail
+closed rather than leak -- so the resolver no longer guesses. The constant
+remains what the migrations seed, what the CLI defaults to and what the test
+harness binds; it is simply not something resolution falls back on.
+
+Every path with no request behind it therefore binds its tenant itself: the
+maintenance sweeps one tenant at a time (`reaper._for_each_tenant`), the
+heartbeat thread by copying its caller's context, the operator CLI from
+`--tenant`, and the test suite from an autouse fixture (tests/conftest.py).
 
 Do not inline the constant at call sites, and do not thread a tenant argument
 through them. The indirection is the point.
+
+**The acting user lives here too** (`current_actor`, P5-07), resolved the same
+way and bound by the same dependency. It is here rather than in `app/audit.py`
+because this module is the one that answers "who is acting", and because
+`app/auth.py` -- which binds both -- would otherwise have to import the ORM to
+reach the audit module. `audit.record` reads it; nothing else needs to.
+
+The two are deliberately *not* one object. A tenant is resolved on every path
+including the ones with no user at all (a run, a background sweep), and
+collapsing them would mean inventing a user for those.
 """
 
 from __future__ import annotations
@@ -47,14 +66,51 @@ _current_tenant: contextvars.ContextVar[int | None] = contextvars.ContextVar(
 )
 
 
+class NoTenantScope(RuntimeError):
+    """Raised when the current tenant is resolved with nothing acting.
+
+    Its own class rather than a bare `RuntimeError`, for two reasons. The read
+    guard resolves the tenant inside SQLAlchemy's `do_orm_execute`, so this
+    surfaces from the middle of arbitrary query machinery and a caller that
+    wants to distinguish "no scope" from "the database is down" needs something
+    to catch. And `app/api.py` turns it into a 500 deliberately -- see the
+    handler there -- which takes a type, not a message.
+    """
+
+
 def current_tenant_id() -> int:
     """The tenant owning the work in progress.
 
-    Resolved from the active scope (a request's user, a run's row); the seeded
-    default when there is no scope.
+    Resolved from the active scope: a request's authenticated user
+    (`auth.require_auth`), a run acting under its own token
+    (`control.service.acting_as`), a maintenance sweep binding each tenant in
+    turn (`reaper._for_each_tenant`), or an operator at the CLI (`--tenant`).
+
+    **With no scope active this raises** (P5-11, story 6). It used to answer
+    `DEFAULT_TENANT_ID`, which made the one guarantee the spec asks for --
+    "structurally unable to read another tenant's data ... a missing filter is
+    a bug that fails closed rather than a leak" -- the one property the design
+    did not have. A route that forgot its auth dependency served the first
+    customer's rows; a background job that forgot to bind a scope maintained
+    the first customer's rows; and both looked exactly like working code,
+    because the resolver answered a real tenant to a question nobody had the
+    standing to ask.
+
+    Failing here rather than at each call site is the whole value of the seam:
+    one function refuses, and every read filter and every insert built on it
+    refuses with it.
     """
     tenant_id = _current_tenant.get()
-    return DEFAULT_TENANT_ID if tenant_id is None else tenant_id
+    if tenant_id is None:
+        raise NoTenantScope(
+            "no tenant scope is active, so there is no tenant to act as. A "
+            "request resolves one from the authenticated user "
+            "(auth.require_auth -- check the route has its auth dependency); "
+            "a run from its token (control.service.acting_as); background "
+            "work and the CLI must bind one explicitly with "
+            "tenancy.tenant_scope()."
+        )
+    return tenant_id
 
 
 def set_current_tenant(tenant_id: int) -> None:
@@ -82,6 +138,53 @@ def tenant_scope(tenant_id: int) -> Iterator[None]:
         yield
     finally:
         _current_tenant.reset(token)
+
+
+# --- the acting user ------------------------------------------------------
+#
+# The audit log's `actor` (P5-07, #37). Scoped exactly like the tenant above,
+# and for the same two reasons: the request path is async, so a ContextVar is
+# what carries the value into the threadpooled endpoint; and threading an
+# acting user through every call site would make every new call site a chance
+# to pass the wrong one.
+
+# What the actor is when nobody is logged in: the delivery CLI (`make
+# deliver`), a console session, a background sweep. A real answer rather than a
+# missing one -- those genuinely are not a user, and `system` says so. What it
+# must never become is a stand-in for a user the code failed to resolve, which
+# is why `auth.require_auth` binds the actor for every authenticated request
+# rather than each route remembering to.
+SYSTEM_ACTOR = "system"
+
+_current_actor: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_actor", default=None
+)
+
+
+def current_actor() -> str:
+    """Who is acting: the authenticated user's email, or `SYSTEM_ACTOR`."""
+    actor = _current_actor.get()
+    return SYSTEM_ACTOR if actor is None else actor
+
+
+def set_current_actor(actor: str) -> None:
+    """Bind the acting user for the rest of this context, with no unbinding.
+
+    The sibling of `set_current_tenant`, used by `require_auth` for the reason
+    given there: a dependency cannot wrap the request in a `finally`, and
+    nothing leaks because each request has its own `Context`.
+    """
+    _current_actor.set(actor)
+
+
+@contextmanager
+def actor_scope(actor: str) -> Iterator[None]:
+    """Bind the acting user for the duration of a block, then restore it."""
+    token = _current_actor.set(actor)
+    try:
+        yield
+    finally:
+        _current_actor.reset(token)
 
 
 # --- the enforced read path -----------------------------------------------
@@ -123,8 +226,10 @@ def across_tenants(statement):
     1. **Login.** `repo.get_user_for_login` runs before a current tenant
        exists -- deciding which tenant is acting is its job. It is scoped by
        the slug the caller typed instead.
-    2. **Resolving a run's own tenant.** `launcher._run_tenant_scope` reads the
-       run row in order to *open* the scope, so it cannot already be inside it.
+    2. **Resolving a reaped run's tenant.** `reaper._tenant_of` reads the run
+       row in order to *open* the scope, so it cannot already be inside it.
+       (This reason used to name `launcher._run_tenant_scope`; P5-05 deleted
+       that function, because the run-scoped token now carries the tenant.)
     3. **The background sweeps.** The reaper and the log prune run on a timer
        with no request and no run behind them, so `current_tenant_id()` would
        answer the seeded default and they would quietly maintain tenant 1
@@ -151,6 +256,14 @@ def install_read_guard(tenant_owned: type) -> None:
     column and aggregate selects, and lazy relationship loads -- the criteria
     propagates from the originating query, so `run.steps` cannot walk into
     another tenant.
+
+    **What it asks a tenant for.** Every statement except one it can prove
+    touches nothing tenant-owned -- a select of `tenants` itself, the one table
+    with no `tenant_id`. Since P5-11 made resolution raise outside a scope,
+    resolving for every statement would have turned "I have nothing to filter
+    here" into "you may not run this". The proof has to run in the fail-closed
+    direction, and the comment at the check says why: a statement whose mappers
+    are not visible is filtered, not waved through.
 
     **What it does not cover**, and must not be mistaken for covering:
 
@@ -180,6 +293,34 @@ def install_read_guard(tenant_owned: type) -> None:
             # loaded its parent; re-applying to either is at best redundant.
             return
         if state.execution_options.get(ACROSS_TENANTS):
+            return
+        # A statement that provably touches nothing tenant-owned has nothing to
+        # filter, and so no business resolving a tenant. That distinction only
+        # started to matter when resolution began to *raise* (P5-11): resolving
+        # unconditionally meant a select of a table with no `tenant_id` at all
+        # demanded a scope and failed without one -- the guard inventing a
+        # requirement rather than enforcing one. `repo.list_tenant_ids` is the
+        # case that proves it: a select of `tenants`, run by the reaper
+        # precisely to discover which tenants to bind, necessarily before any
+        # of them is bound. Failing it would have taken the maintenance loop
+        # down every thirty seconds while looking like the fail-closed
+        # guarantee doing its job.
+        #
+        # **"Provably" is load-bearing, and this is the fail-closed direction
+        # of an otherwise innocuous optimisation.** `all_mappers` is empty for
+        # an aggregate like `select(func.count()).select_from(Run)` -- the
+        # shape `repo.tenant_usage` counts quotas with -- so a check written as
+        # "skip unless some mapper is tenant-owned" skips the filter on exactly
+        # the statements whose mappers it cannot see. That is not a missing
+        # optimisation, it is an unfiltered read: the first version of this
+        # made one tenant's runs count against another's quota, and
+        # test_quotas.py caught it. So an empty or unreadable mapper list means
+        # "filter it", and only a non-empty list with nothing owned in it is
+        # allowed through.
+        mappers = state.all_mappers
+        if mappers and not any(
+            issubclass(mapper.class_, tenant_owned) for mapper in mappers
+        ):
             return
         # Resolved *outside* the lambda, and this is load-bearing rather than
         # stylistic. `with_loader_criteria`'s criteria is lambda SQL: the

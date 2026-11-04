@@ -8,6 +8,12 @@
 # container-per-run on a laptop with no extra steps: the API dispatches a
 # sandbox from the prebaked image, that sandbox sits on an **internal** network
 # with no default route, and the only way out is a per-run allowlisting proxy.
+#
+# P5-05 took the stores off that internal network. A sandbox no longer holds
+# `DATABASE_URL` or the `S3_*` credentials: it holds a run-scoped token and
+# reaches the API's internal control-plane routes, which do the reads and writes
+# on its behalf and refuse anything outside that one run's target and tenant.
+# So the only thing on `qa-sandbox` besides the run and its proxy is the API.
 services:
   postgres:
     image: postgres:16-alpine
@@ -20,11 +26,13 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
-      # Also on the sandbox network: hydrate reads the head revision and ingest
-      # commits N+1, so a sandbox has to reach Postgres by name. It reaches
-      # nothing else -- that network has no default route (DESIGN.md §6).
+      # **Control plane only.** Until P5-05 Postgres was on the sandbox network
+      # too, because hydrate and ingest read and wrote it directly. They go
+      # through the API's internal routes now, so a sandbox has no reason to
+      # reach the database -- and therefore must not be able to. Removing it
+      # here is half of "the stores are unreachable from a sandbox"; the other
+      # half is that the sandbox is not given a connection string.
       - default
-      - sandbox
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U qa"]
       interval: 5s
@@ -35,19 +43,23 @@ services:
     # Open-source, freely-pullable S3-compatible store (MinIO was dropped).
     image: chrislusf/seaweedfs:latest
     # `-ip.bind=0.0.0.0` is load-bearing, not tidiness. SeaweedFS binds one
-    # interface, and this container is on two networks: without it the S3 port
-    # comes up on whichever address it picked -- observed as qa-sandbox only --
-    # and is a closed socket on the other. That makes the store unreachable
-    # from the API (and from the host's published port) while the healthcheck,
-    # which curls localhost, still reports healthy. Postgres is immune because
-    # it binds 0.0.0.0 already; this makes the store behave the same way.
+    # interface, and this container used to be on two networks: without it the
+    # S3 port came up on whichever address it picked -- observed as qa-sandbox
+    # only -- and was a closed socket on the other, which made the store
+    # unreachable from the API and from the host's published port while the
+    # healthcheck, which curls localhost, still reported healthy. P5-05 put it
+    # back on one network, so the trap is no longer reachable; the flag stays
+    # because the host still publishes 8333 and binding one interface is never
+    # what is wanted here.
     command: server -ip.bind=0.0.0.0 -s3 -s3.config=/etc/seaweedfs/s3.json -dir=/data
     volumes:
       - seaweeddata:/data
       - ./docker/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
     networks:
+      # Control plane only, for the same reason as Postgres above (P5-05): blobs
+      # in, blobs out and artifacts up all go through the API's internal routes,
+      # which authorize every key against the asking run's token.
       - default
-      - sandbox   # blobs in, blobs out, artifacts up: the other half of a run
     ports:
       - "8333:8333"   # S3 API
       - "8888:8888"   # filer
@@ -89,6 +101,19 @@ services:
       # Orchestrator knobs (host-overridable): fake runner by default so the
       # stack runs token-free; QA_FAKE_DELAY slows fake steps for pause demos.
       QA_RUNNER: "${QA_RUNNER:-fake}"
+      # The cloud KMS key that wraps each tenant's PAT data key (P5-03). Unset
+      # here, so `make up` works with no cloud account: app/envelope.py then
+      # derives an in-process wrapping key, which is real AES-GCM but not a
+      # production configuration -- see that module and README 6.5. A key
+      # *identifier* is not a credential; the IAM grant is what authorises it.
+      QA_KMS_KEY_ID: "${QA_KMS_KEY_ID:-}"
+      # This stack is a development stack, and says so. `app/config.py`
+      # defaults to "prod" on purpose: that is what makes the session cookies
+      # `Secure` and makes a missing envelope key refuse to boot, so a real
+      # deployment that forgets this variable gets the safe arrangement rather
+      # than the convenient one. The dev stack is the thing that has to opt
+      # out, because it is served over plain HTTP and has no envelope key.
+      QA_ENV: "${QA_ENV:-dev}"
       QA_FAKE_DELAY: "${QA_FAKE_DELAY:-0}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       # The per-run limits (host-overridable, .env.example documents them). The
@@ -99,6 +124,23 @@ services:
       QA_STEP_TIMEOUT_S: "${QA_STEP_TIMEOUT_S:-1800}"
       QA_RUN_TIMEOUT_S: "${QA_RUN_TIMEOUT_S:-7200}"
       QA_SPEND_BUDGET_USD: "${QA_SPEND_BUDGET_USD:-20}"
+      # Where a sandbox reaches the internal control-plane API (P5-05). This is
+      # the API's own name on the **sandbox** network, not the portal's public
+      # origin: it is the one address a run can resolve, and app/sandbox/env.py
+      # forwards it into every container and keeps it off the egress proxy.
+      QA_CONTROL_PLANE_URL: "${QA_CONTROL_PLANE_URL:-http://api:8000}"
+      # `QA_SECRET_KEY` and `QA_ENVELOPE_KEY` are deliberately **not** here,
+      # and that is enforced: server/tests/test_sandbox_credentials.py asserts
+      # no compose service carries either. `QA_SECRET_KEY` signs the portal's
+      # session cookies and, since P5-05, the run-scoped tokens;
+      # `QA_ENVELOPE_KEY` is the key that unwraps every tenant's sealed PAT
+      # where no cloud KMS is configured. They must not be set to the same
+      # value, and the API refuses to start if they are (app/envelope.py). It signs the portal's session cookies and, since P5-05, the
+      # run-scoped tokens -- so a dev stack falls back to app/auth.py's
+      # `dev-secret-change-me` and a real deployment supplies it through its own
+      # secret mechanism rather than through a file in the repository. What
+      # matters for this phase is only that it stays in the control plane: a
+      # sandbox holding it could mint a token for any run of any tenant.
     volumes:
       # Per-run scratch only: run output and the npm cache. Nothing here is
       # authoritative, and nothing is shared between replicas.
@@ -114,6 +156,14 @@ services:
       # no socket at all (app/sandbox/dispatch.py). Do not promote this line to
       # a deployment manifest.
       - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - default
+      # **On the sandbox network too, and the only thing there.** This is what
+      # replaced Postgres and SeaweedFS on it: a run reaches the internal
+      # control-plane routes by this name and reaches nothing else, because the
+      # network still has no default route. A sandbox therefore talks to one
+      # host, over HTTP, authenticated as one run.
+      - sandbox
     ports:
       - "8000:8000"
     depends_on:
@@ -170,8 +220,10 @@ networks:
   # Where a run executes. `internal: true` is the whole egress control: Docker
   # attaches no gateway, so a container on this network has **no default route**
   # and an agent that writes and runs code cannot opt out of that by unsetting a
-  # variable. Postgres and SeaweedFS are reachable by name because they are on
-  # this network too; everything else is reachable only through the proxy.
+  # variable. The **API** is reachable by name because it is on this network
+  # too -- that is the internal control-plane API a run does its reads and
+  # writes through (P5-05). Postgres and SeaweedFS used to be here and are not
+  # any more. Everything else is reachable only through the proxy.
   sandbox:
     name: qa-sandbox
     internal: true

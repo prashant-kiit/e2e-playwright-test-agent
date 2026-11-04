@@ -12,6 +12,7 @@ transaction.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from datetime import timedelta
 
@@ -21,6 +22,8 @@ from app.domain.status import RunStatus
 from app.models import AppLock, Tenant
 from app.tenancy import current_tenant_id, tenant_scope
 from tests.target_helpers import create_target
+
+OTHER_TENANT = 2  # not the tenant the harness binds
 
 
 def _seed_run(session_factory, *, app="practice-target", story="SCRUM-201"):
@@ -36,6 +39,22 @@ def _run_field(session_factory, run_id, field):
         return getattr(repo.get_run(s, run_id), field)
 
 
+def _beat(session_factory, run_id):
+    """What refreshes the lease, as `heartbeat_during` now takes it.
+
+    P5-05 made the beat a callable rather than a session factory, because the
+    process doing the work may be a sandbox with no database: in production this
+    is `control.heartbeat`. Here it is the `repo.heartbeat` it wraps, which is
+    what these tests were always really about.
+    """
+
+    def beat() -> None:
+        with session_factory() as s:
+            repo.heartbeat(s, run_id)
+
+    return beat
+
+
 def _expire_lease(session_factory, target_id, run_id):
     """Leave the lease in the past, the way a crashed process would."""
     past = lease.utcnow() - lease.DEFAULT_LEASE_TTL
@@ -47,13 +66,51 @@ def _expire_lease(session_factory, target_id, run_id):
         s.commit()
 
 
+def test_the_heartbeat_thread_beats_as_its_callers_tenant():
+    """The beat runs inside the tenant that started it (P5-11).
+
+    `heartbeat_during` starts a `threading.Thread`, and a bare thread does
+    **not** inherit contextvars -- so the beat resolved the tenant with nothing
+    bound. While the resolver answered the seeded default that was invisible
+    and wrong in the worst way: every run heartbeated as tenant 1, so for any
+    other tenant `repo.heartbeat` read a run row through the tenant filter,
+    found nothing, raised `NotFound`, and the loop read that as "no longer
+    live" and returned. The lease then expired on a perfectly healthy run and
+    the reaper reaped it -- a second customer's runs dying at the lease TTL
+    with nothing in the log but the heartbeat's own silence.
+
+    Asserted on the tenant the beat *observes* rather than on a reaped run,
+    because that is the actual claim and it holds whatever the run's id is.
+    """
+    seen: list[int] = []
+    beat_ran = threading.Event()
+
+    def beat() -> None:
+        seen.append(current_tenant_id())
+        beat_ran.set()
+
+    # No database here on purpose: the claim is about which tenant the thread
+    # resolves, and asserting it on the beat itself needs neither a run row nor
+    # a tenant row. It also keeps this test out of the fixture collision the
+    # module docstring warns about.
+    with tenant_scope(OTHER_TENANT):
+        with reaper.heartbeat_during(1, beat, interval_s=0.01):
+            assert beat_ran.wait(timeout=5.0), "the heartbeat thread never beat"
+
+    assert seen, "the heartbeat thread never beat"
+    assert set(seen) == {OTHER_TENANT}, (
+        f"the beat resolved tenant(s) {set(seen)} rather than its caller's "
+        f"{OTHER_TENANT}; a bare thread does not inherit the scope"
+    )
+
+
 def test_heartbeat_during_extends_a_live_runs_lease(session_factory):
     target_id, run_id = _seed_run(session_factory)
     with session_factory() as s:
         repo.begin_run(s, run_id)
     before = _run_field(session_factory, run_id, "lease_expires_at")
 
-    with reaper.heartbeat_during(run_id, interval_s=0.01, session_factory=session_factory):
+    with reaper.heartbeat_during(run_id, _beat(session_factory, run_id), interval_s=0.01):
         _wait_until(
             lambda: _run_field(session_factory, run_id, "lease_expires_at") > before
         )
@@ -82,7 +139,7 @@ def test_heartbeat_uses_the_default_interval_when_none_is_given(session_factory,
         repo.begin_run(s, run_id)
     before = _run_field(session_factory, run_id, "lease_expires_at")
 
-    with reaper.heartbeat_during(run_id, session_factory=session_factory):
+    with reaper.heartbeat_during(run_id, _beat(session_factory, run_id)):
         _wait_until(lambda: _run_field(session_factory, run_id, "lease_expires_at") > before)
 
     assert _run_field(session_factory, run_id, "lease_expires_at") > before
@@ -95,7 +152,7 @@ def test_heartbeat_stops_quietly_once_the_run_is_no_longer_live(session_factory)
         repo.begin_run(s, run_id)
         repo.complete_run(s, run_id)
 
-    with reaper.heartbeat_during(run_id, interval_s=0.01, session_factory=session_factory):
+    with reaper.heartbeat_during(run_id, _beat(session_factory, run_id), interval_s=0.01):
         time.sleep(0.05)  # must not raise
 
     assert _run_field(session_factory, run_id, "status") is RunStatus.COMPLETED

@@ -18,28 +18,47 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import apphub, authoring, delivery, repo, revisions, storage, target_config
+from . import (
+    apphub,
+    audit,
+    authoring,
+    delivery,
+    envelope,
+    prompt_store,
+    repo,
+    revisions,
+    storage,
+    target_config,
+)
 from .auth import AdminDep, AuthDep
 from .db import SessionLocal, get_session
+from .delivery import credentials as pats
+from .domain import quotas
+from .domain.credentials import CredentialState
 from .domain.status import RunStatus, is_live, is_terminal
 from .models import Artifact
 from .orchestrator.bus import LogBus, bus_from_env
 from .sandbox import dispatch, egress
 from .schemas import (
     ArtifactOut,
+    AuditEntryOut,
+    CredentialOut,
     DeliverBody,
     DeliveryOut,
     DeliveryStateOut,
     FileIndexOut,
+    PatBody,
     ProjectCreate,
     ProjectOut,
     PromptOut,
+    PromptRevisionOut,
+    PromptSave,
     ResetBody,
     RevisionOut,
     RunCreate,
@@ -52,6 +71,7 @@ from .schemas import (
     TargetCreate,
     TargetCreatedOut,
     TargetOut,
+    UsageOut,
     WriteOut,
 )
 from .storage import Storage
@@ -125,22 +145,55 @@ def get_catalog(store: Storage = Depends(get_storage)) -> delivery.Catalog:
 
     "Is this delivered?" is a Postgres question (invariant 5), so answering it
     must not need a credential. Hanging it off `get_delivery_tools` meant an
-    operator with no `GITHUB_PAT` configured got a 503 for an answer that never
+    operator with no credential configured got a 503 for an answer that never
     leaves the database -- found in a real browser, where the portal could not
     show the badge at all.
+
+    P5-03 makes that split matter more rather than less: a credential is now
+    per target and saved in the portal, so "a target with no PAT yet" is the
+    *normal* state of a newly created target, and it must still be able to say
+    where it stands.
     """
     return delivery.DbCatalog(SessionLocal, store)
 
 
-def get_delivery_tools() -> delivery.Tools:
-    """git + GitHub + the PAT. Overridden in tests so no route touches the
-    network; building it here (not at import) keeps a missing PAT from breaking
-    unrelated endpoints.
+def get_token_validator():
+    """The live GitHub call that validates a pasted PAT's scopes and expiry.
 
-    Dependencies resolve before the handler body runs, so a failure here would
-    escape the routes' own exception handling as a bare 500. A missing `git` or
-    a missing PAT is an environment problem, so it is reported as 503 with the
-    reason rather than as an opaque server error.
+    A dependency for the same reason `get_resolver` is one: the check is
+    load-bearing -- it is what turns "your delivery will fail in four hours"
+    into "this token is missing `workflow`" -- and a check nothing can
+    substitute is a check nothing tests. No route touches the network in the
+    suite because every test overrides this.
+    """
+    return pats.validate_with_github
+
+
+def get_key_wrapper() -> envelope.KeyWrapper:
+    """What wraps the data key a PAT is sealed under.
+
+    `wrapper_from_env` picks the cloud KMS when `QA_KMS_KEY_ID` is set and an
+    in-process key otherwise, so the dev stack works offline -- see
+    app/envelope.py, which also explains why the second is not a production
+    configuration.
+    """
+    return envelope.wrapper_from_env()
+
+
+def get_delivery_tools() -> delivery.Tools:
+    """git + GitHub + the catalog + the credential seam, **unbound**.
+
+    Overridden in tests so no route touches the network. Building it here (not
+    at import) keeps an environment problem from breaking unrelated endpoints:
+    dependencies resolve before the handler body runs, so a failure here would
+    escape the routes' own exception handling as a bare 500, and a missing
+    `git` is reported as 503 with the reason instead.
+
+    Since P5-03 a *missing credential* is no longer one of those failures. There
+    is nothing process-wide left to be missing: the seam carries no token until
+    a delivery binds it to a target (`tools.for_app`), and a target with no PAT
+    saved fails inside the route, where it becomes a message about that target
+    rather than a 503 about the service.
     """
     try:
         return delivery.default_tools()
@@ -153,8 +206,132 @@ def get_delivery_tools() -> delivery.Tools:
 # --- prompts + settings --------------------------------------------------
 
 @router.get("/prompts", response_model=list[PromptOut])
-def list_prompts():
-    return apphub.read_prompts()
+def list_prompts(session: Session = Depends(get_session)):
+    return apphub.read_prompts(session)
+
+
+@router.get(
+    "/prompts/{name:path}/history", response_model=list[PromptRevisionOut]
+)
+def prompt_history(name: str, session: Session = Depends(get_session)):
+    """Every revision of one prompt, oldest first (#39).
+
+    The read half of #30's story 24: P5-06 made the rows append-only and
+    recorded which revision a run used, and left "so that I can see what
+    changed and when" with no surface at all -- the data was there and nothing
+    could reach it.
+
+    **Declared before `PUT /prompts/{name:path}`** and sharing its path
+    converter. `:path` is greedy because a prompt's name carries slashes
+    (`steps/2-plan.md`), and the literal `/history` suffix is what keeps this
+    unambiguous: the name is everything before it.
+
+    A name the package never shipped is a 404, the same answer the `PUT`
+    gives. An empty list would be a worse answer than a 404 here, because it
+    reads as "this prompt has never been edited" -- a true-sounding statement
+    about a prompt that does not exist.
+
+    No new proxy entry: `/prompts` is already in `docker/nginx.conf` and
+    `web/vite.config.js`, both of which match on the first path segment, so
+    this sub-path is forwarded by the entries that already exist. Checked
+    rather than assumed, because P5-04 shipped a panel that was invisible in
+    the real app for exactly this reason while 84 frontend tests passed.
+    """
+    try:
+        return apphub.read_prompt_history(session, name)
+    except prompt_store.PromptNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"no such prompt: {name}") from exc
+
+
+@router.put("/prompts/{name:path}", response_model=PromptOut)
+def save_prompt(
+    name: str, body: PromptSave, session: Session = Depends(get_session)
+):
+    """Record this tenant's version of one prompt.
+
+    `{name:path}` because a prompt's name carries a slash (`steps/2-plan.md`):
+    it is the file's path relative to the prompts directory, which is the name
+    the page has always shown and the key the rows use.
+
+    A name the package never shipped is a 404. Accepting it would create a row
+    nothing resolves -- a prompt a customer could carefully tune and never have
+    sent -- which is a worse outcome than being told the name is wrong.
+    """
+    try:
+        saved = apphub.save_prompt(session, name, body.content)
+    except prompt_store.PromptNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"no such prompt: {name}") from exc
+    except IntegrityError as exc:
+        # unique(tenant_id, name, rev): a concurrent save took this revision.
+        # Same answer as every other racing write here -- there is no merge for
+        # two people editing one prompt, so the later one reloads and re-edits.
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="another save recorded a revision first; reload and try again",
+        ) from exc
+
+    # Not one of the mutations #37 enumerates, and audited deliberately: #39
+    # asks where a prompt revision's *actor* lives, since `prompts` records
+    # when a revision was saved but not by whom. It lives here, so the two
+    # tickets are one answer rather than two halves. The revision, not the
+    # body: the body is already in `prompts` at that rev, and copying it would
+    # put an unbounded blob in a table nothing prunes.
+    audit.record(
+        session,
+        action=audit.Action.PROMPT_SAVE,
+        target=audit.prompt_ref(name),
+        after={"rev": saved["rev"]},
+    )
+    return saved
+
+
+# --- the audit trail (P5-07) ---------------------------------------------
+
+# How much program output an audit row will carry. Bounded because `audit_log`
+# is the one table nothing may prune, so an unbounded field on it is unbounded
+# growth that cannot be reclaimed.
+_AUDIT_TEXT_LIMIT = 2000
+
+
+def _audit_text(text: str) -> str:
+    """Make program output safe to store in the trail: redacted, then bounded.
+
+    `infra.sync` is the only audited action whose payload is built from a
+    subprocess and an exception rather than from values we chose, and a failing
+    git push echoes the argv that failed -- which carries the PAT. `redact` is
+    the same choke point `app/delivery/credentials.py` puts in front of every
+    message bound for a human (DESIGN.md §8); this table deserves it more than
+    a log line does, because nothing here can be deleted afterwards.
+    """
+    cleaned = delivery.redact(text or "")
+    if len(cleaned) <= _AUDIT_TEXT_LIMIT:
+        return cleaned
+    return cleaned[:_AUDIT_TEXT_LIMIT] + "… (truncated)"
+
+@router.get("/audit", response_model=list[AuditEntryOut], dependencies=[AdminDep])
+def list_audit_entries(
+    limit: int = Query(default=200, ge=1, le=1000),
+    session: Session = Depends(get_session),
+):
+    """This tenant's control-plane mutations, most recent first.
+
+    **Tenant-admin only.** Every surface that writes these rows is already
+    admin-gated, and the trail collects them: who approved which delivery into
+    the customer's repo, who rotated which credential. That is an admin's view
+    of their own organisation rather than something every member reads.
+
+    Scoped to the caller's tenant by `tenancy.install_read_guard`, like every
+    other read -- there is no `.where(tenant_id == ...)` here because a filter
+    a route remembers is a filter a route can forget (P5-02, #32).
+
+    `limit` is a plain cap rather than a cursor, and is itself bounded: the
+    trail is append-only and read newest-first, so "the last 200 things that
+    happened" is the question the page asks, while an unbounded `limit` would
+    let one request ask for a table that only ever grows. Paginating back
+    through it is a different feature and no portal surface asks for it yet.
+    """
+    return audit.entries(session, limit=limit)
 
 
 @router.get("/settings")
@@ -220,10 +397,23 @@ def create_target(
             status_code=409, detail=f"a target named {body.app!r} already exists"
         ) from exc
 
+    bootstrap = run_sync(target.app) if body.sync_infra else None
+    if bootstrap is not None:
+        # An audited mutation even though the route it rides on is a create:
+        # the create writes our database, the sync writes the *customer's*
+        # repo. Recorded whether or not it succeeded, with the outcome in the
+        # row -- a failed push is something an operator may well be asked
+        # about later, and it is not what the create's own 201 reports.
+        audit.record(
+            session,
+            action=audit.Action.INFRA_SYNC,
+            target=audit.target_ref(target.app),
+            after={"ok": bootstrap.ok, "output": _audit_text(bootstrap.output)},
+        )
     return TargetCreatedOut(
         target=target,
         revision=_revision_out(revision, revisions.count_files(session, revision.id)),
-        bootstrap=run_sync(target.app) if body.sync_infra else None,
+        bootstrap=bootstrap,
     )
 
 
@@ -384,6 +574,7 @@ def target_delivery_state(
         state = catalog.state(target.app)
     except delivery.DeliveryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    credential = pats.credential_status(target)
     return DeliveryStateOut(
         app=ref.app,
         repo=ref.repo,
@@ -394,7 +585,132 @@ def target_delivery_state(
         delivered_sha=state.delivered_sha,
         revisions_ahead=state.revisions_ahead,
         summary=state.describe(),
+        credential_state=credential.state,
+        pat_expires_at=credential.expires_at,
+        credential_warning=credential.warning,
     )
+
+
+# --- the tenant's own GitHub credential (P5-03) --------------------------
+#
+# Through P4 there was one operator `GITHUB_PAT` in the API's environment, so
+# every delivery into every customer's repository was authored by the same
+# identity. These three routes are how a credential becomes the customer's:
+# sealed onto their target's row, validated the moment they paste it, and
+# reported back without the token or the ciphertext ever reaching the browser.
+#
+# Saving and clearing are tenant-admin actions, beside approving a delivery:
+# all three write into -- or authorise writing into -- a customer's repository.
+# *Reading* the state is not, because a member has to be able to see why
+# delivery is refused.
+
+def _credential_audit_state(state) -> dict:
+    """A credential's state as an audit payload. **Never the token.**
+
+    Named once because both PAT routes build it, on both sides of their
+    mutation, and the one thing that must stay true of all four is that it
+    carries the *state* and nothing else (app/audit.py).
+    """
+    return {"credential_state": CredentialState(state).value}
+
+
+def _credential_out(target, status, *, login: str | None = None) -> CredentialOut:
+    return CredentialOut(
+        app=target.app,
+        state=status.state,
+        expires_at=status.expires_at,
+        days_until_expiry=status.days_until_expiry,
+        expiring_soon=status.expiring_soon,
+        warning=status.warning,
+        login=login,
+    )
+
+
+@router.get("/targets/{target_id}/credential", response_model=CredentialOut)
+def target_credential(target_id: int, session: Session = Depends(get_session)):
+    """Is there a credential, does GitHub still accept it, is it about to lapse.
+
+    Every field is a function of the row, so this costs no KMS call and no
+    GitHub call -- the same reason "is this delivered?" is a Postgres question.
+    """
+    target = _target_or_404(session, target_id)
+    return _credential_out(target, pats.credential_status(target))
+
+
+@router.put(
+    "/targets/{target_id}/pat",
+    response_model=CredentialOut,
+    dependencies=[AdminDep],
+)
+def save_target_pat(
+    target_id: int,
+    body: PatBody,
+    session: Session = Depends(get_session),
+    validate=Depends(get_token_validator),
+    wrapper: envelope.KeyWrapper = Depends(get_key_wrapper),
+):
+    """Store a tenant's GitHub PAT for this target, sealed.
+
+    **422, not 502, for every refusal here.** A token missing `workflow`, an
+    empty paste, a token GitHub has revoked: each is the operator's input being
+    refused while they can still fix it, and a different paste is the fix. 502
+    is reserved for GitHub refusing a credential *at delivery*, which is a
+    different event with a different remedy (DESIGN.md §8). Telling a customer
+    with a scope typo that GitHub was down is how they stop reading the message.
+
+    The row is not touched unless the token passed validation, so a failed
+    rotation leaves the working credential in place rather than a broken one.
+    """
+    target = _target_or_404(session, target_id)
+    # Read before the write: `before` is what distinguishes a first save from a
+    # rotation, and after `save_pat` has run the old state is gone.
+    previous_state = target.credential_state
+    try:
+        info = pats.save_pat(
+            session, target, body.token, validate=validate, wrapper=wrapper
+        )
+    except pats.CredentialRejected as exc:
+        # No row: the rejection left the stored credential untouched, so there
+        # is no mutation to record. A row here would report a rotation that did
+        # not happen.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # The token is never in this row -- only the state either side of the save,
+    # and the login GitHub reported. See app/audit.py.
+    audit.record(
+        session,
+        action=audit.Action.PAT_SAVE,
+        target=audit.target_ref(target.app),
+        before=_credential_audit_state(previous_state),
+        after={
+            **_credential_audit_state(target.credential_state),
+            "login": info.login,
+            "expires_at": info.expires_at.isoformat() if info.expires_at else None,
+        },
+    )
+    return _credential_out(
+        target, pats.credential_status(target), login=info.login
+    )
+
+
+@router.delete(
+    "/targets/{target_id}/pat",
+    response_model=CredentialOut,
+    dependencies=[AdminDep],
+)
+def clear_target_pat(target_id: int, session: Session = Depends(get_session)):
+    """Remove this target's credential. Delivery then cannot run until a new
+    one is saved, which is what `absent` says and what the portal shows."""
+    target = _target_or_404(session, target_id)
+    previous_state = target.credential_state
+    pats.clear_pat(session, target)
+    audit.record(
+        session,
+        action=audit.Action.PAT_CLEAR,
+        target=audit.target_ref(target.app),
+        before=_credential_audit_state(previous_state),
+        after=_credential_audit_state(target.credential_state),
+    )
+    return _credential_out(target, pats.credential_status(target))
 
 
 @router.post("/targets/{target_id}/deliver", response_model=DeliveryOut, dependencies=[AdminDep])
@@ -428,6 +744,33 @@ def deliver_story(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except delivery.DeliveryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # The audit row P5-07 exists for, written *after* the push succeeded: a
+    # trail that recorded an approval before the work would claim deliveries
+    # that never happened, and a missing row is a gap an auditor can see where
+    # a false one is not (app/audit.py).
+    #
+    # **A dry run writes no row.** It touches nothing in the customer's repo,
+    # so it is not the mutation story 26 asks about, and recording it under the
+    # same action would make `delivery.approve` a filter whose rows a reader
+    # has to check a flag on before believing -- which is the question the
+    # table exists to answer plainly. An earlier version of this did record
+    # them, flagged; the flag was the tell that they did not belong.
+    if not body.dry_run:
+        audit.record(
+            session,
+            action=audit.Action.DELIVERY_APPROVE,
+            target=audit.target_ref(target.app),
+            after={
+                "story_id": body.story_id,
+                "run_id": body.run_id,
+                "branch": result.branch,
+                "committed": result.committed,
+                "delivered_sha": result.delivered_sha,
+                "pr_url": result.pr_url,
+                "pr_number": result.pr_number,
+            },
+        )
     return DeliveryOut(
         ok=True,
         message=result.message,
@@ -466,6 +809,25 @@ def reset_target_repo(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except delivery.DeliveryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Recorded after the fact, like the delivery approval above, and with what
+    # was destroyed rather than just that a reset happened: "which branches did
+    # that wipe take?" is the question this row has to answer on its own. A dry
+    # run deletes nothing and writes no row, for the reason given there.
+    if not body.dry_run:
+        audit.record(
+            session,
+            action=audit.Action.TARGET_RESET,
+            target=audit.target_ref(target.app),
+            after={
+                "repo": result.repo,
+                "branch": result.branch,
+                "already_empty": result.already_empty,
+                "reset_branch": result.reset_branch,
+                "deleted_branches": list(result.deleted_branches),
+                "failed_branches": list(result.failed_branches),
+            },
+        )
     return DeliveryOut(
         ok=True,
         message=result.message,
@@ -588,12 +950,49 @@ def start_run(
         )
     except repo.NotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except repo.QuotaExceeded as exc:
+        # 429, and deliberately not the 409 a busy app gets: "your tenant is
+        # out of allowance" and "this app is busy" are different problems with
+        # different remedies, and an operator who cannot tell them apart cannot
+        # act on either. The detail carries the numbers, so the portal can say
+        # "3 of 3" without a second request.
+        #
+        # Order against the `RunConflict` arm below does not matter: both are
+        # siblings under `RepoError` and neither catches the other. It would
+        # start mattering the day something caught `RepoError` here, so the
+        # narrow arms stay above the broad ones out of habit rather than need.
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except repo.RunConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     launcher(run.id)  # kick off the orchestrator in the background
     return run
+
+
+@router.get("/usage", response_model=UsageOut)
+def get_usage(session: Session = Depends(get_session)):
+    """This tenant's usage against its plan caps (P5-04).
+
+    Not per target and not per project: both caps are the tenant's, so this
+    reads the same two counts the enqueue checks. Tenant-scoped by the ordinary
+    read guard, like every other read -- there is no tenant id in the path
+    because there is no tenant to name but your own.
+    """
+    caps = repo.tenant_caps(session)
+    usage = repo.tenant_usage(session)
+    return UsageOut(
+        live_runs=usage.live_runs,
+        runs_this_month=usage.runs_this_month,
+        max_concurrent_runs=caps.max_concurrent_runs,
+        monthly_run_quota=caps.monthly_run_quota,
+        # The two caps asked about **independently**, and from the same
+        # predicates `quotas.breach` is built on. Both can be full at once --
+        # `breach` picks one to refuse with, which is the right answer for a
+        # rejection message and the wrong one for a pair of gauges.
+        at_concurrency_cap=quotas.at_concurrency_cap(caps, usage),
+        at_monthly_quota=quotas.at_monthly_quota(caps, usage),
+    )
 
 
 @router.get("/runs", response_model=list[RunOut])

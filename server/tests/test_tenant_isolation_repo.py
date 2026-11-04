@@ -23,11 +23,17 @@ from pathlib import Path
 import pytest
 from sqlalchemy.orm import sessionmaker
 
-from app import repo, revisions
+from app import audit, repo, revisions
 from app.db import Base
+from app.domain.audit import Action
 from app.models import Artifact, FileIndex, Revision, RunLog, Tenant, TenantOwned
 from app.orchestrator.bus import PostgresLogBus
-from app.tenancy import DEFAULT_TENANT_ID, current_tenant_id, tenant_scope
+from app.tenancy import (
+    DEFAULT_TENANT_ID,
+    actor_scope,
+    current_tenant_id,
+    tenant_scope,
+)
 from tests.target_helpers import create_target
 
 OTHER = 2  # the tenant that owns nothing here
@@ -104,6 +110,16 @@ def theirs(session):
         )
     )
     session.commit()
+    # A control-plane mutation of theirs (P5-07): the trail says who approved a
+    # delivery into *their* repo, so it is one of the reads that must come up
+    # empty for anyone else.
+    with actor_scope("admin@theirs.example"):
+        audit.record(
+            session,
+            action=Action.DELIVERY_APPROVE,
+            target=audit.target_ref(target.app),
+            after={"story_id": "SCRUM-1"},
+        )
     return {
         "project": project,
         "target": target,
@@ -132,6 +148,7 @@ def test_listings_are_empty_for_a_tenant_that_owns_nothing(mine, theirs):
         assert revisions.list_revisions_with_file_counts(
             mine, theirs["target"].id
         ) == []
+        assert audit.entries(mine) == []
 
 
 def test_direct_id_reads_fail_closed_for_another_tenants_rows(mine, theirs):
@@ -254,9 +271,15 @@ ALLOWED_BYPASSES = {
     "repo: get_user_for_login",
     # The cross-tenant primary-key read itself, used by the two below.
     "repo: get_run_across_tenants",
-    # Reads a run in order to open its tenant scope (the background path's
-    # equivalent of require_auth).
-    "launcher: _run_tenant_scope",
+    # P5-05 deleted the third entry that used to be here,
+    # `launcher: _run_tenant_scope`. It read a run across tenants in order to
+    # discover whose it was, so that the background path could bind a tenant the
+    # way `require_auth` does for a request -- a genuine chicken-and-egg while
+    # the sandbox read the database itself. It does not any more: the run-scoped
+    # token carries the tenant, it is minted while that tenant is acting (so the
+    # read is filtered), and `control.service.acting_as` binds it per operation.
+    # The honest version of this allowlist got shorter, which is the direction
+    # the comment above asks for.
     # Resolves a reaped run's tenant before its sandbox is destroyed.
     "reaper: _tenant_of",
 }

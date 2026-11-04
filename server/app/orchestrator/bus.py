@@ -7,11 +7,14 @@ then the wrong place for the lines to live. It was already the wrong place for
 two other reasons: a restart erased the history of every run that had ever
 streamed, and only the replica that started a run could stream it.
 
-So `LogBus` is a protocol with two implementations and **one read model**: append
-a line, read forward from a cursor.
+So `LogBus` is a protocol with three implementations and **one read model**:
+append a line, read forward from a cursor.
 
-    InMemoryLogBus   the thread path and the tests. One process, no durability.
-    PostgresLogBus   anything out of process. `run_log`, read by cursor.
+    InMemoryLogBus   the tests and a single-process API. No durability.
+    PostgresLogBus   the reader's side, and any writer holding a database.
+    GatewayLogBus    what a run writes through after P5-05: it has no database,
+                     so its lines go to the control plane over the internal API
+                     and land in `run_log` there.
 
 `Emit` does not change shape (see runner.py): the driver, the runners and the
 step-boundary hook hand lines to a plain callable and know nothing about where
@@ -39,6 +42,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
 from .. import config
+from ..control.gateway import RunGateway
 from ..db import SessionLocal
 from ..domain import lease
 from ..domain.status import RunStatus, is_terminal
@@ -244,6 +248,157 @@ def prune_run_logs(session, *, days: int | None = None, now: datetime | None = N
     return result.rowcount or 0
 
 
+class GatewayLogBus:
+    """A run's lines, published through the control plane rather than to a table.
+
+    What a sandbox writes through after P5-05. It holds no `DATABASE_URL`, so it
+    cannot append to `run_log` itself; it hands batches to the internal API,
+    which appends them through `PostgresLogBus` on the other side. The reader is
+    unchanged -- it still reads `run_log` by cursor -- so this is a change of who
+    holds the connection, not of where the lines live.
+
+    **Batched, with a background flush.** The real runner emits one line per line
+    of the agent's output (app/orchestrator/claude.py), so a request per line
+    would be thousands of round trips per run and would make the log the
+    dominant cost of running one. Lines are buffered and flushed when the buffer
+    fills or when the interval lapses, whichever comes first -- the interval is
+    what keeps a *live* log live, because a run that goes quiet mid-step must not
+    leave its last lines sitting in a buffer where the portal cannot see them.
+
+    **A log line may never fail a run.** The same rule `PostgresLogBus.publish`
+    states, and for the same reason: the work matters more than the view of it.
+    A flush that fails is logged and its lines are dropped. Dropping rather than
+    retrying for ever is deliberate -- a sandbox that cannot reach the control
+    plane has a run that is about to fail on its next real operation anyway, and
+    a log buffer growing without bound inside a container is its own failure.
+    """
+
+    # Enough that a chatty step is a handful of requests rather than hundreds,
+    # small enough that a batch is one modest insert.
+    BATCH = 100
+    # The longest a line waits before a reader can see it.
+    INTERVAL_S = 1.0
+    # How long `close` waits for a flush already in flight. One request, so the
+    # ceiling is generous rather than tuned.
+    JOIN_TIMEOUT_S = 30.0
+
+    def __init__(
+        self,
+        gateway: RunGateway,
+        *,
+        batch: int = BATCH,
+        interval_s: float = INTERVAL_S,
+    ) -> None:
+        self._gateway = gateway
+        self._batch = batch
+        self._interval_s = interval_s
+        self._pending: list[str] = []
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._flusher = threading.Thread(
+            target=self._run_flusher, name="log-flusher", daemon=True
+        )
+        self._flusher.start()
+
+    def _check(self, run_id: int) -> None:
+        """Refuse a run id that is not this bus's.
+
+        Two authorities name the run here -- the argument and the gateway's
+        scope -- and `run_pipeline` guards exactly this mismatch for exactly
+        this reason. Without it a line handed to the wrong bus would be
+        *silently reattributed* to the scope's run, because the scope is what
+        the server trusts: the argument is not sent. A log line landing on
+        another run is the kind of wrong that looks like a flaky test.
+        """
+        if run_id != self._gateway.scope.run_id:
+            raise ValueError(
+                f"this log bus belongs to run {self._gateway.scope.run_id}, "
+                f"not {run_id}"
+            )
+
+    def publish(self, run_id: int, line: str) -> None:
+        """Buffer a line. Flushes inline once the buffer is full."""
+        self._check(run_id)
+        with self._lock:
+            self._pending.append(line)
+            full = len(self._pending) >= self._batch
+        if full:
+            self.flush()
+
+    def flush(self) -> None:
+        """Send whatever is buffered. Never raises."""
+        with self._lock:
+            batch, self._pending = self._pending, []
+        if not batch:
+            return
+        try:
+            self._gateway.publish_log(batch)
+        except Exception:  # pragma: no cover - never lose a run over its log
+            log.warning(
+                "could not publish %d log lines for run %s; they are dropped",
+                len(batch),
+                self._gateway.scope.run_id,
+                exc_info=True,
+            )
+
+    def _run_flusher(self) -> None:
+        while not self._stop.wait(self._interval_s):
+            self.flush()
+
+    def close(self, run_id: int) -> None:
+        """Stop the background thread, wait for it, then flush what is left.
+
+        The flush is the part that matters: this runs in `drive_run`'s `finally`,
+        so it is the last chance for the lines of the step that ended the run --
+        which are the ones an operator reads first.
+
+        **The join is not tidiness.** Without it, `close` raced the flusher: the
+        background thread would already have taken the pending lines and be
+        waiting on its request, `close`'s own flush would find an empty buffer
+        and return, and the process would exit -- killing a daemon thread
+        mid-request and losing the batch. The symptom was precise and
+        misleading: a container path where every log line appeared except the
+        last one, `=== run <key> completed ===`, which is the line an operator
+        looks for first. The same reasoning as `reaper.heartbeat_during`'s
+        join: what is worth waiting for is one request already in flight.
+
+        There is nothing to *mark*, for the reason `PostgresLogBus.close` gives:
+        the run's terminal status is the end-of-stream marker, and it is the only
+        one a reader in another process can see.
+        """
+        self._check(run_id)
+        self._stop.set()
+        self._flusher.join(timeout=self.JOIN_TIMEOUT_S)
+        self.flush()
+
+    def is_closed(self, run_id: int) -> bool:
+        """Asked by readers, and a run is not one.
+
+        A sandbox writes its own log and never reads it back, so this exists to
+        satisfy the protocol rather than to be called. It answers from the run's
+        status, the same question `PostgresLogBus` answers, so a caller that does
+        reach it is not told something different.
+        """
+        self._check(run_id)
+        return is_terminal(RunStatus(self._gateway.run_status()))
+
+    def read_from(self, run_id: int, cursor: int) -> tuple[list[str], int]:
+        """Not available to a run: there is no read route, by design.
+
+        A sandbox has no business reading back the log of any run, its own
+        included -- the portal is the reader, and it reads `run_log` directly.
+        Raising rather than returning nothing, because a silent empty answer
+        would make a misrouted reader look like a quiet run.
+        """
+        raise NotImplementedError(
+            "a run writes its log and does not read it back; the portal reads "
+            "run_log through PostgresLogBus"
+        )
+
+    def emitter(self, run_id: int) -> Emit:
+        return lambda line: self.publish(run_id, line)
+
+
 # The thread path's bus: one process, one shared instance. Imported directly by
 # the launcher and reset between tests.
 bus = InMemoryLogBus()
@@ -255,7 +410,20 @@ def bus_from_env() -> LogBus:
     One factory, read by both ends: the launcher publishes through it and the
     API's events route reads through it, so the writer and the reader cannot
     disagree about where a run's lines are.
+
+    `gateway` is refused rather than served. A `GatewayLogBus` needs a run's
+    gateway, which this function has no way to obtain and no business minting a
+    token for; the one process that uses it builds it itself
+    (app/sandbox/run.py). Returning the in-process bus instead would give a
+    sandbox a log nobody can read, which is worse than a startup failure naming
+    the reason.
     """
-    if config.log_bus_kind() == "postgres":
+    kind = config.log_bus_kind()
+    if kind == "postgres":
         return PostgresLogBus()
+    if kind == "gateway":
+        raise ValueError(
+            "QA_LOG_BUS=gateway needs a run's gateway to publish through; the "
+            "sandbox entrypoint builds that bus itself (app/sandbox/run.py)"
+        )
     return bus

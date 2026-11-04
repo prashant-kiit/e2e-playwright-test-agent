@@ -106,7 +106,7 @@ def _edited_tree(
     tmp = Path(tempfile.mkdtemp(prefix="qa-authoring-"))
     try:
         root = tmp / "tree"
-        hyd.materialize(session, head, store, root)
+        hyd.materialize(revisions.revision_view(session, head), store, root)
         hyd.render_generated(root, config_of(target))
         yield root
     finally:
