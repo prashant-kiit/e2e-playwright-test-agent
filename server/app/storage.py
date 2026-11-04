@@ -24,6 +24,11 @@ class Storage(Protocol):
     def put_file(self, key: str, path: Path, content_type: str | None = None) -> None: ...
     def get_stream(self, key: str) -> tuple[Iterator[bytes], str]: ...
     def exists(self, key: str) -> bool: ...
+    # Added by P5-08 as a prefactor for tenant purge, which has to remove
+    # objects nobody recorded individually. Nothing in production calls either
+    # yet; their semantics are held by tests/test_storage_guard.py.
+    def delete(self, key: str) -> None: ...
+    def list_keys(self, prefix: str) -> Iterator[str]: ...
 
 
 class S3Storage:
@@ -85,6 +90,43 @@ class S3Storage:
         obj = self._client.get_object(Bucket=self.bucket, Key=key)
         ct = obj.get("ContentType") or content_type_for(key)
         return obj["Body"].iter_chunks(chunk_size=64 * 1024), ct
+
+    def delete(self, key: str) -> None:
+        """Remove one object. **A key that is not there is not an error.**
+
+        S3 `DeleteObject` is already idempotent, so this is the semantics of
+        the API rather than something handled here -- and it is the semantics
+        tenant purge needs, because a purge has to be re-runnable after a
+        partial failure. A missing bucket is the same story: there is nothing
+        under the key either way.
+        """
+        from botocore.exceptions import ClientError
+
+        try:
+            self._client.delete_object(Bucket=self.bucket, Key=key)
+        except ClientError:
+            # NoSuchBucket, and nothing else that matters: an object that is
+            # not there is already the state the caller asked for.
+            pass
+
+    def list_keys(self, prefix: str) -> Iterator[str]:
+        """Every key under `prefix`, **paging through the whole result set**.
+
+        A paginator rather than one `list_objects_v2`, because that call
+        returns at most 1000 keys and silently truncates: a tenant with a long
+        run history would be purged down to its first thousand objects and
+        reported as done. This is the one part of the operation that can be
+        wrong while looking right, which is why it is a paginator and why a
+        test drives it with more than one page.
+
+        A generator, so a purge streams rather than holding a tenant's whole
+        key space in memory. An empty or missing prefix yields nothing rather
+        than raising -- a tenant with no objects is an ordinary case.
+        """
+        paginator = self._client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for obj in page.get("Contents", ()):
+                yield obj["Key"]
 
 
 def from_env() -> S3Storage:

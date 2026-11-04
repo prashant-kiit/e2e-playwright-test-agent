@@ -35,3 +35,19 @@ class FakeStorage:
 
     def exists(self, key: str) -> bool:
         return key in self.objects
+
+    def delete(self, key: str) -> None:
+        """Idempotent, as `S3Storage.delete` is: purge must be re-runnable."""
+        self.objects.pop(key, None)
+
+    def list_keys(self, prefix: str) -> Iterator[str]:
+        """Keys under `prefix`, as a generator, like the real one.
+
+        Sorted so a test can assert an order if it needs one; S3 returns keys
+        in lexicographic order too, so this is the real semantics rather than a
+        convenience the fake alone has. A plain `startswith`, which is what the
+        S3 `Prefix` parameter does -- note that means `tenant/1/` and
+        `tenant/11/` are different prefixes but `tenant/1` matches both, and a
+        caller purging a tenant must include the separator.
+        """
+        return iter(sorted(key for key in self.objects if key.startswith(prefix)))
