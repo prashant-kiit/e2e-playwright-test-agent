@@ -582,7 +582,9 @@ class AuditLog(TenantOwned, Base):
     function, but that alone would make immutability a property of one module's
     API surface, and the trail's whole value is that it cannot be quietly
     altered afterwards (#30, story 28). The one exception the spec allows,
-    tenant purge, must disable the trigger explicitly; see `app/audit.py`.
+    tenant purge, disables the trigger explicitly for exactly its own DELETE
+    and re-enables it in the same transaction: `app/accounts/purge.py`, which
+    holds the only `DISABLE TRIGGER` in the tree.
 
     Row-level triggers do not fire on TRUNCATE, so the test fixture's
     `TRUNCATE` still works -- deliberate, and not a hole worth closing with a
@@ -624,6 +626,59 @@ class AuditLog(TenantOwned, Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
 
+
+
+class PurgeLog(Base):
+    """What a tenant purge destroyed. **Deliberately not `TenantOwned`.**
+
+    P5-15 / #47, story 32. The purge removes every row belonging to
+    one tenant, its audit trail included -- so a record of the purge that
+    belonged to that tenant would be removed by the thing it is recording. This
+    table therefore has no `tenant_id` column and is not under the tenant
+    guard: it is a *platform* log, not a customer's, and it is the one place
+    that can answer "what happened to Acme?" after Acme is gone.
+
+    **`purged_tenant_id`, not `tenant_id`**, and the name is load-bearing
+    twice. It is not an ownership column -- it names a tenant that no longer
+    exists, which is the opposite of the thing `TenantOwned.tenant_id` means --
+    and `tests/test_tenant_isolation_repo.py` fails any mapped class carrying
+    a `tenant_id` without inheriting the mixin. That tripwire caught this table
+    on the first run, correctly: a reader who saw `tenant_id` here would
+    reasonably assume the guard applied. Renaming it was the honest fix; adding
+    an exemption to the tripwire would have spent the guarantee to save a word.
+
+    It is a plain integer rather than a foreign key, for the reason
+    `AuditLog.actor` is a string: the row it would reference is the row this
+    operation deletes. An FK would either block the purge (`RESTRICT`) or
+    forget which tenant it was (`SET NULL`), and a purge log that cannot name
+    the tenant is not one.
+
+    The slug and name are copied in because they are what a human remembers a
+    customer by, and after the purge there is nothing left to join to.
+
+    Append-only by the same argument as the audit log, but **not** by trigger:
+    the audit log's immutability is a promise to a customer about their own
+    trail, while this is our own operational record. Nothing in the
+    application updates or deletes it, and that is enough for what it is.
+    """
+
+    __tablename__ = "purge_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    purged_tenant_id: Mapped[int] = mapped_column(
+        Integer, nullable=False, index=True
+    )
+    slug: Mapped[str] = mapped_column(String(80), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    actor: Mapped[str] = mapped_column(String(255), nullable=False)
+    # What was removed, per table and for the store, as a JSON object. A shape
+    # rather than columns because the set of tenant-owned tables changes with
+    # the schema, and a column per table would need a migration every time one
+    # is added -- exactly when somebody is least likely to remember.
+    removed: Mapped[dict] = mapped_column(JSON, nullable=False)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
 
 
 # Every tenant-owned entity above inherits `TenantOwned`, so one call covers

@@ -1787,6 +1787,49 @@ documentation, and none of them is fixed.
     #40 is driven through a botocore-shaped stub and the move through `FakeStorage`, so what
     is unproven is SeaweedFS's behaviour, not the logic. UAT 3 (#54) is where offboarding
     gets observed end to end.
+
+    **Story 32 itself closed on 2026-11-04 (#47 / P5-15).** `python -m app.accounts
+    purge-tenant --slug acme --confirm-slug acme`. The order is the design, because the
+    requirement is that a half-finished purge is safe to run again: the store first, then
+    the tenant's rows table by table, then the audit rows with the trigger off, then the
+    `tenants` row, then the `purge_log` row. **The tenant row goes last** so the slug still
+    resolves after any interruption and the same command finishes the job; deleting it first
+    would leave an operator holding a slug that resolves to nothing and a bucket prefix
+    nobody can name.
+    **No tenant bypass, which is a deviation from what the ticket expected.** #47 says the
+    purge "must use the documented bypass rather than quietly escaping the guard" — it needs
+    neither, because #44 put ORM DELETE under the guard, so a delete issued inside
+    `tenant_scope(tenant_id)` is *scoped by the guard* to exactly the rows being purged.
+    That is strictly stronger than opting out, and it is what the allowlist's own comment
+    asks for ("ask first whether the read can be done inside a tenant scope instead"). The
+    bypass allowlist did not grow.
+    The table list is derived from the mapped classes, so a table added later is purged
+    without anybody remembering this module — the argument `install_tenant_guard` makes for
+    the read filter, applied to the delete — and a test asserts the **fixture** populates
+    every one of the twelve, because a purge test over two tables would pass while covering
+    none of the rest.
+    The audit trigger is disabled for one statement and re-enabled in the same transaction;
+    a test asserts it is back on by trying to delete another tenant's row afterwards. That
+    module holds the only `DISABLE TRIGGER` in the tree, and `app/audit.py` now says so.
+    The gate is **naming the tenant twice** (`--slug` and `--confirm-slug`) rather than a
+    `--yes`: a flag can be pasted into any invocation, a second spelling cannot be confirmed
+    for the wrong tenant by accident, and unlike a prompt it stays scriptable.
+    `purge_log` is the record that survives, and is deliberately not tenant-owned — a record
+    belonging to the purged tenant would be deleted by the thing it records. **Two structural
+    tripwires fired while building it, and both were right.** It first carried a `tenant_id`
+    column, which `test_tenant_isolation_repo.py` fails for any mapped class not inheriting
+    the mixin; the honest fix was renaming it `purged_tenant_id`, since it names a tenant
+    that no longer exists rather than an owner, and exempting the tripwire would have spent
+    the guarantee to save a word. Then `test_tenancy.py` fails any table without the column
+    at all; that one needed a real exemption, so the test now carries a named set with a
+    reason per entry — two so far, and of different kinds: `tenants` *is* the tenant, and
+    `purge_log` is ours rather than any customer's.
+    `_no_dev_database` caught the CLI's `create-tenant` ignoring its injected session factory
+    on the way through, which is the third time that guard has earned its place in this phase.
+    **Still not proven**: no purge has run against SeaweedFS or against a real tenant. The
+    sweep is driven through `FakeStorage`, and `ALTER TABLE ... DISABLE TRIGGER` needs
+    table-owner rights — which the suite's role has and a reduced-privilege production role
+    may not. Both belong to UAT 3 (#54).
 49. **Stories 1, 2 and 5 — no tenant or user administration.** `app/domain/audit.py` states
     there is no user-administration surface at all, which is why `Action` has no
     `USER_ADD`/`USER_REMOVE` and why #37 could not record two of the mutations its own spec

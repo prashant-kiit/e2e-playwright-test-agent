@@ -33,7 +33,8 @@ from enum import Enum
 # It had to be server-side because there was no `create_tenant` in the
 # application at all: a tenant arrived from the migration's seed or from raw
 # SQL, and only a server default was on both paths. P5-14 (#46) added
-# `accounts.create_tenant`, so there are now three paths rather than two -- and
+# `accounts.create_tenant` and P5-15 (#47) added the purge that removes one, so
+# there are now three paths in rather than two -- and
 # the server default stays exactly where it is, because it is still the only
 # thing all of them go through, and because a tenant created by a future fourth
 # path must arrive bounded rather than unmetered.

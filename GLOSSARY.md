@@ -31,6 +31,14 @@ tenant with no admin can never be administered: it is refused on the way out
 is an operator-run command rather than a portal action — see ADR 0002.
 _Avoid_: Signup, registration, provisioning, tenant creation (alone)
 
+**Purge**:
+Offboarding a tenant: every row it owns and every object under its storage
+prefix, removed. The one operation that may delete from the audit log, and the
+only one with no undo — so it is a command that makes you name the tenant
+twice, and it records what it did in a platform log that is not the tenant's
+and therefore survives it.
+_Avoid_: Delete tenant, offboard (as a verb for this), wipe, GDPR delete
+
 **Project**:
 A tenant's grouping of targets, used to organize work. Carries no
 configuration of its own.
