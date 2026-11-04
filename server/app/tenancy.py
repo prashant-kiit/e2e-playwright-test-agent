@@ -69,12 +69,20 @@ _current_tenant: contextvars.ContextVar[int | None] = contextvars.ContextVar(
 class NoTenantScope(RuntimeError):
     """Raised when the current tenant is resolved with nothing acting.
 
-    Its own class rather than a bare `RuntimeError`, for two reasons. The read
-    guard resolves the tenant inside SQLAlchemy's `do_orm_execute`, so this
-    surfaces from the middle of arbitrary query machinery and a caller that
-    wants to distinguish "no scope" from "the database is down" needs something
-    to catch. And `app/api.py` turns it into a 500 deliberately -- see the
-    handler there -- which takes a type, not a message.
+    Its own class rather than a bare `RuntimeError`: the guard resolves the
+    tenant inside SQLAlchemy's `do_orm_execute`, so this surfaces from the
+    middle of arbitrary query machinery, and a caller that wants to
+    distinguish "no scope" from "the database is down" needs something to
+    catch.
+
+    **Nothing handles it, and that is the intent.** There is no exception
+    handler for it in `app/api.py`: it reaches Starlette's unhandled-exception
+    path and the client gets a bare 500, which is the right answer because the
+    caller did nothing wrong and there is nothing they could change. A 4xx
+    would blame them for a missing dependency in our own route, and a handler
+    that rendered the message would publish the internal explanation above. The
+    500 is asserted at the boundary in
+    tests/test_tenant_isolation.py::test_a_route_without_its_auth_dependency_fails_instead_of_serving_tenant_one.
     """
 
 

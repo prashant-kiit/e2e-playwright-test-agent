@@ -265,13 +265,21 @@ def test_every_tenant_owned_table_inherits_the_mixin():
             offenders.append(cls.__name__)
     assert offenders == [], (
         f"{offenders} carry tenant_id without inheriting TenantOwned, so the "
-        "read guard does not apply to them"
+        "tenant guard does not apply to them"
     )
 
 
-# Every place in `app/` allowed to read across tenants, as "module: function".
+# Every place in `app/` allowed to reach across tenants, as "module: function".
 # A bypass is legitimate only where no tenant is acting yet or where every
 # tenant is; each of these says which in its own docstring.
+#
+# **Reads *and* writes, since P5-12.** This list was a read allowlist while the
+# guard was a SELECT-time filter. The guard now covers ORM bulk UPDATE and
+# DELETE too, so a cross-tenant *write* takes the same opt-out and belongs on
+# the same list -- `bus.prune_run_logs` is the first. Leaving the name and the
+# docs saying "read" would have reproduced one file over the exact defect P5-12
+# renamed `install_read_guard` to remove: a reviewer assuming the mechanism
+# does not reach writes.
 #
 # **If this test fails, do not simply add the new name.** Ask first whether the
 # read can be done inside a tenant scope instead -- `reaper._for_each_tenant`
@@ -331,7 +339,7 @@ def _mentions_a_bypass(node: ast.AST) -> bool:
 
 
 def _bypass_sites() -> set[str]:
-    """Every place in `app/` that mentions a cross-tenant read, by name.
+    """Every place in `app/` that mentions a cross-tenant read or write, by name.
 
     A source scan rather than a runtime hook because the claim is about the code
     as written: the point is that a *new* unfiltered query is visible, including
@@ -365,8 +373,13 @@ def _bypass_sites() -> set[str]:
     return sites
 
 
-def test_reading_across_tenants_is_a_short_allowlist():
+def test_reaching_across_tenants_is_a_short_allowlist():
     """#32's criterion, as a test: a bypass is the detectable exception.
+
+    Named for reaching rather than reading since P5-12: the guard covers bulk
+    UPDATE and DELETE now, so this pins the cross-tenant *writes* as well, and
+    a name that said "reading" would invite the assumption that a write bypass
+    is not on this list.
 
     The guard means a query cannot *forget* the tenant filter -- forgetting now
     takes an explicit opt-out. This is what makes that opt-out detectable: the
@@ -407,7 +420,7 @@ def test_a_bulk_update_cannot_reach_another_tenants_row_by_id(session, theirs):
     reads go through "a single enforced path ... so a new query cannot forget
     the filter" has no reading under which writes are exempt -- a bulk update
     that forgets `tenant_id` looks exactly like one that does not need it,
-    which is the property the read guard exists to remove.
+    which is the property the guard exists to remove.
 
     Asserted on the row being *unchanged* rather than on a raised error,
     because the filter is a `WHERE` clause and not an assertion: the statement

@@ -87,12 +87,6 @@ def pg_engine():
     engine.dispose()
 
 
-# The marker a test uses to say it acts outside any tenant scope. Registered
-# in pyproject.toml's `markers`, so a typo is an error rather than a test that
-# quietly runs scoped after all.
-UNSCOPED_MARKER = "unscoped_tenant"
-
-
 @pytest.fixture(autouse=True)
 def _tenant_scope(request):
     """Every test acts as an explicit tenant, in one place rather than sixty-five.
@@ -114,7 +108,12 @@ def _tenant_scope(request):
     greppable -- the opt-out has to be visible, or "every test is scoped" stops
     being true without anything saying so.
     """
-    if request.node.get_closest_marker(UNSCOPED_MARKER) is not None:
+    # The marker is registered in pyproject.toml's `markers`, so a misspelling
+    # at a test is an error rather than a test that quietly runs scoped after
+    # all. Spelled here as the literal the tests write: a constant would be a
+    # third copy of the name rather than a single source of it, since neither
+    # `@pytest.mark.unscoped_tenant` nor the pyproject entry can reference one.
+    if request.node.get_closest_marker("unscoped_tenant") is not None:
         yield
         return
     with tenant_scope(DEFAULT_TENANT_ID):

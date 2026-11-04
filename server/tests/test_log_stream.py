@@ -247,7 +247,7 @@ def test_the_retention_prune_spans_every_tenant(session_factory):
     from app.domain import lease
     from app.models import RunLog, Tenant
     from app.orchestrator.bus import prune_run_logs
-    from app.tenancy import DEFAULT_TENANT_ID, tenant_scope
+    from app.tenancy import DEFAULT_TENANT_ID, across_tenants, tenant_scope
 
     pg_bus = PostgresLogBus(session_factory=session_factory)
     run_ids = {}
@@ -267,11 +267,16 @@ def test_the_retention_prune_spans_every_tenant(session_factory):
 
     # Age every line past the window, both tenants'.
     with session_factory() as s:
+        # Through the helper, not by writing `qa_across_tenants=True` by hand:
+        # that raw spelling is exactly what the allowlist scanner in
+        # test_tenant_isolation_repo.py exists to catch, and a test is not
+        # entitled to a spelling the application is not.
         s.execute(
-            update(RunLog)
-            .where(RunLog.seq == 1)
-            .values(at=lease.utcnow() - timedelta(days=30))
-            .execution_options(qa_across_tenants=True)
+            across_tenants(
+                update(RunLog)
+                .where(RunLog.seq == 1)
+                .values(at=lease.utcnow() - timedelta(days=30))
+            )
         )
         s.commit()
 
