@@ -6,22 +6,20 @@ than free strings because the column is what a compliance reader filters on --
 a trail holding both `pat.save` and `pat_saved` answers "every PAT rotation
 last quarter" wrongly and gives no sign that it has.
 
-**Two of the mutations #37 lists are missing here, deliberately.** `user add/
-remove` and `quota change` are named in the spec's list, and:
+**The rule for adding a member is: the mutation has a code path that performs
+it.** An action nothing can write is worse than an absence, because it reads as
+covered. That rule is why `quota change` was here before it had a route
+(`repo.set_tenant_caps` was reachable from a console, and a mutation with no
+HTTP surface is still a mutation) and why `user add/remove` was not -- there
+was no user-administration surface at all, no route and no function.
 
-* there is **no user-administration surface at all** -- no route, no repo
-  function, nothing that adds or removes a user outside the migration that
-  seeds the single operator (DESIGN.md §13's tenant-admin surface is story 2 of
-  #30 and unbuilt). A member here would be an action nothing can write, which
-  is worse than an absence: it would read as covered.
-* `quota change` **is** here (`QUOTA_CHANGE`), because `repo.set_tenant_caps`
-  exists and is reachable from a console even though no route is -- a mutation
-  with no HTTP surface is still a mutation.
-
-So the rule for adding a member is: the mutation has a code path that performs
-it. `USER_ADD`/`USER_REMOVE` belong to whichever ticket builds that surface,
-and `tests/test_audit.py` records the gap so it is not mistaken for an
-oversight.
+P5-14 (#46) built that surface, so `USER_ADD` and `USER_REMOVE` are here now
+and #37's list of seven is complete. Both are written by `app/accounts.py`,
+which is the only module that adds or removes a user; the first admin of a new
+tenant is a `USER_ADD` too, recorded against the tenant being created with
+`system` as the actor, because the operator CLI that creates a tenant binds no
+user and "a human at a console did this, and we cannot say which human" is the
+honest answer (the same one `app/delivery/__main__.py` gives).
 
 `(str, Enum)` rather than `StrEnum`, like every other domain enum here -- see
 `app/models._enum_col` and the UP042 note in pyproject.toml.
@@ -54,3 +52,14 @@ class Action(str, Enum):
     # only place the acting user is captured. Confirmed on #37 rather than left
     # for a third ticket, which is what #39 asked for.
     PROMPT_SAVE = "prompt.save"
+    # P5-14 / #46. One action per direction rather than a single `user.change`
+    # with a verb in the payload: "every account added last quarter" is the
+    # question a compliance reader asks, and it should be a filter on this
+    # column rather than a filter plus a decode of `after`.
+    #
+    # A role change is deliberately **not** a third action yet: nothing can
+    # perform one. `accounts.add_user` assigns a role at creation and there is
+    # no update path, so a `USER_ROLE_CHANGE` member would be exactly the
+    # "action nothing can write" this module's docstring argues against.
+    USER_ADD = "user.add"
+    USER_REMOVE = "user.remove"

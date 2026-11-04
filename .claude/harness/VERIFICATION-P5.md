@@ -1367,10 +1367,40 @@ end of the phase. They are what #30 is waiting on in code, as opposed to in evid
 
 ### Carried over or deferred
 
-6. **The tenant-admin surface does not exist.** No way to create a tenant, set its slug, or
+6. **The tenant-admin surface does not exist.** ~~No way to create a tenant, set its slug, or
    invite a user — `repo.create_user` was deliberately removed in `06a3acd` as out of scope.
    Until it lands, a second tenant can only be made with SQL, which is why "a second real
-   tenant" sits in §fakes. **This is the gating item for most of the rest of P5.**
+   tenant" sits in §fakes.~~ **This was the gating item for most of the rest of P5.**
+
+   **Closed on 2026-11-04 (#46 / P5-14).** `app/accounts/` is the one module that creates or
+   removes an account, and the surface is split at two altitudes:
+   - **A tenant's own users are a portal surface**: `GET/POST /users`, `DELETE /users/{id}`,
+     all behind `AdminDep`, with a Users panel on Settings shown to admins. Invite assigns a
+     role and returns a **one-time password** — there is no mail path here, so the password
+     exists in that one response and nowhere else; the panel says so, and the audit row
+     deliberately does not contain it.
+   - **Creating a tenant is not a route at all**: `python -m app.accounts create-tenant`.
+     Recorded as `docs/adr/0002-tenant-creation-is-an-operator-action.md`, because the
+     alternative is reasonable and will be proposed again. Every authenticated surface here
+     acts *as a tenant*, and the person creating one belongs to no tenant yet: gated by
+     `AdminDep` it would mean "an admin of A may create B", ungated it would let anyone
+     create tenants, and a platform-operator role is a bigger change than this ticket with
+     its own auth story. The authority is shell access, which on a single-operator
+     deployment is who should have it.
+   `USER_ADD`/`USER_REMOVE` join the audit vocabulary, so **#37's list of seven is
+   complete** — and `tests/test_audit.py`'s tripwire, which was written to fail the moment
+   this surface appeared, is now the inverse assertion. A role *change* is deliberately still
+   absent: nothing performs one, and an `Action` member nothing can write is what that
+   module's rule forbids. Changing a role means remove and re-invite.
+   Two answers the ticket asked for by name: **the last admin cannot be removed** (409, with
+   "make another admin first" in the body, because a tenant with no admin can never be
+   administered again from inside), and **removing yourself needs no special case** — leaving
+   is allowed while another admin remains, and the last-admin rule already refuses the one
+   departure that matters.
+   **What is still not proven**: none of this has been run against the live stack. UAT 1
+   (#52) is where two tenants get created with the command rather than with SQL, and where
+   the portal panel is used in a browser — the suite cannot do either, and this phase has
+   four recorded occasions of a real run finding what a green suite could not.
 7. **`/auth/me` does not return the tenant's slug or name**, so the portal cannot show which
    tenant you are signed into — and with per-tenant emails, the same address in two tenants
    now looks identical in the UI. `Login.jsx` hardcodes `DEFAULT_TENANT = "default"`,
@@ -1896,7 +1926,7 @@ P5-02 also produced the phase's first real evidence that is not a green suite: a
 tenant that exists, logged in over HTTP against the live stack, refused every one of the
 other tenant's rows in both directions, and allowed to register an app slug the first tenant
 already holds. The largest remaining holes are the ones next to the code rather than in it:
-no admin surface to create tenants without SQL (item 6), a 30-day credential travelling
+no admin surface to create tenants without SQL (item 6 — closed since, by #46), a 30-day credential travelling
 without `Secure` (item 2), and artifact URLs the refresh dance cannot reach (item 3).
 
 Two lessons worth carrying. The first, from `105e9b7`, in P4's spirit: the `EventSource`

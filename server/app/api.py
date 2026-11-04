@@ -25,6 +25,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import (
+    accounts,
     apphub,
     audit,
     authoring,
@@ -41,6 +42,7 @@ from .db import SessionLocal, get_session
 from .delivery import credentials as pats
 from .domain import quotas
 from .domain.credentials import CredentialState
+from .domain.roles import UserRole
 from .domain.status import RunStatus, is_live, is_terminal
 from .models import Artifact
 from .orchestrator.bus import LogBus, bus_from_env
@@ -54,6 +56,8 @@ from .schemas import (
     DeliveryOut,
     DeliveryStateOut,
     FileIndexOut,
+    InviteBody,
+    InvitedUserOut,
     PatBody,
     ProjectCreate,
     ProjectOut,
@@ -73,6 +77,7 @@ from .schemas import (
     TargetCreatedOut,
     TargetOut,
     UsageOut,
+    UserOut,
     WriteOut,
 )
 from .storage import Storage
@@ -969,6 +974,75 @@ def start_run(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     launcher(run.id)  # kick off the orchestrator in the background
     return run
+
+
+# --- users: a tenant administers its own (P5-14 / #46) -------------------
+#
+# `/users` is a **new first path segment**, which means it had to be added to
+# both proxy allowlists -- nginx's `location ~ ^/(...)` and `apiPaths` in
+# web/vite.config.js. A path missing from those does not 404: it falls through
+# to the SPA shell and answers 200 with HTML, which `api.js` raises on and a
+# forgiving caller swallows, so the panel renders nothing with no error
+# anywhere. tests/test_api_proxy_paths.py is what makes forgetting a failure.
+#
+# Admin-gated as a whole, listing included: who else has an account in your
+# tenant is an administrative question, and the portal shows this panel only
+# to the people who can act on it.
+
+@router.get("/users", response_model=list[UserOut], dependencies=[AdminDep])
+def list_users(session: Session = Depends(get_session)):
+    """This tenant's accounts. No tenant in the path: there is none to name but
+    your own, and the read guard is what scopes it."""
+    return accounts.list_users(session)
+
+
+@router.post(
+    "/users",
+    response_model=InvitedUserOut,
+    status_code=201,
+    dependencies=[AdminDep],
+)
+def invite_user(body: InviteBody, session: Session = Depends(get_session)):
+    """Create an account in this tenant and return its one-time password.
+
+    201 with the password in the body -- the only response in this API that
+    carries a credential in the clear, and the reason is in `InvitedUserOut`.
+    A duplicate address is 409 rather than 422: the request is well formed and
+    the state is what refuses it, which is the same distinction a busy app's
+    409 draws.
+    """
+    try:
+        added = accounts.add_user(session, email=body.email, role=body.role)
+    except accounts.AccountError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return InvitedUserOut(
+        id=added.user.id,
+        email=added.user.email,
+        role=UserRole(added.user.role),
+        password=added.password,
+    )
+
+
+@router.delete("/users/{user_id}", status_code=204, dependencies=[AdminDep])
+def remove_user(user_id: int, session: Session = Depends(get_session)):
+    """Remove an account from this tenant.
+
+    Two refusals, kept apart because the remedies are different and only one
+    of them is the operator's to fix:
+
+    * **404** -- no such user *in this tenant*. Deliberately the same answer
+      for an id that does not exist and one that belongs to somebody else: the
+      ids are small integers, and a 403 on another tenant's id would confirm
+      the account exists, which is exactly what someone trying ids wants.
+    * **409** -- the last admin. The body carries the sentence, because "make
+      another admin first" is the remedy and a status code cannot say it.
+    """
+    try:
+        accounts.remove_user(session, user_id)
+    except accounts.AccountError as exc:
+        message = str(exc)
+        status = 404 if message.startswith("no such user") else 409
+        raise HTTPException(status_code=status, detail=message) from exc
 
 
 @router.get("/usage", response_model=UsageOut)

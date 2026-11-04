@@ -219,3 +219,18 @@ input:focus, select:focus { border-color: var(--accent); }
 .caps-editor { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); }
 .caps-field { display: flex; align-items: baseline; gap: 6px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 .caps-field input { width: 86px; }
+
+/* User administration (P5-14 / #46). A table and one form: invite and remove
+   are the only two operations the backend has, and a role change is not one. */
+.users-panel { display: flex; flex-direction: column; gap: 12px; }
+table.users { width: 100%; border-collapse: collapse; }
+table.users td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+table.users td:last-child { text-align: right; }
+.pill-admin { background: var(--amber-dim, var(--panel-2)); }
+.pill-member { background: var(--panel-2); }
+.invite { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.invite label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+/* The one-time password: big, monospaced and selectable, because the operator
+   has to copy it accurately and will not get a second look at it. */
+.invited { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.one-time-password { font-size: 18px; letter-spacing: .04em; padding: 6px 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; user-select: all; }

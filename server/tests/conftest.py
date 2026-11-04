@@ -301,6 +301,30 @@ def _truncate_all(engine):
                 seeded=DEFAULT_TENANT_ID,
             )
         )
+        # **The seeded admin must still be there**, and this says so loudly
+        # rather than letting the next test find out.
+        #
+        # The restore above works by deleting everything *else*, so it cannot
+        # put back a row a test removed -- and the seeded admin is the one row
+        # the suite cannot re-create, because nothing here knows the password
+        # whose hash the migration wrote. A test that deletes it therefore
+        # breaks every later test that logs in, with a failure that names some
+        # innocent neighbour twenty tests away. P5-14 wrote exactly that test
+        # (removing "yourself" is one of the behaviours #46 asks for) and lost
+        # a while to it.
+        #
+        # Checked at teardown, so the test that did it is the test that fails.
+        (still_there,) = conn.execute(
+            text("SELECT count(*) FROM users WHERE id = :seeded").bindparams(
+                seeded=_SEED_ADMIN_ID
+            )
+        ).one()
+        assert still_there == 1, (
+            "this test deleted the seeded admin (users.id = "
+            f"{_SEED_ADMIN_ID}). Nothing can put it back -- its password hash "
+            "comes from the migration -- so every later test that logs in "
+            "will fail. Act on a user the test created instead."
+        )
 
 
 @pytest.fixture()

@@ -143,6 +143,16 @@ export const api = {
   // same shape as `usage()`, recomputed, so the panel renders what was stored.
   setUsageCaps: (caps) => req("PUT", "/usage/caps", caps),
 
+  // users: a tenant administers its own (P5-14). Admin-only, enforced
+  // server-side. No tenant id anywhere -- there is none to name but your own.
+  //
+  // `inviteUser` returns the new account **and its one-time password**: there
+  // is no mail in this deployment, so the password exists exactly once, in
+  // this response. The caller has to show it, because nothing can get it back.
+  listUsers: () => req("GET", "/users"),
+  inviteUser: (email, role) => req("POST", "/users", { email, role }),
+  removeUser: (id) => req("DELETE", `/users/${id}`),
+
   // runs
   listRuns: (targetId) =>
     req("GET", targetId ? `/runs?target_id=${targetId}` : "/runs"),

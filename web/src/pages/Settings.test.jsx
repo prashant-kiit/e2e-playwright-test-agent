@@ -10,6 +10,10 @@ vi.mock("../api.js", () => ({
     getPrompts: vi.fn(),
     savePrompt: vi.fn(),
     getPromptHistory: vi.fn(),
+    // The page asks who is logged in, to decide whether to render the
+    // user-administration panel (P5-14). These tests are about prompts, so it
+    // answers "member" and the panel stays away; `Users.test.jsx` owns it.
+    me: vi.fn(),
   },
 }));
 
@@ -33,6 +37,7 @@ describe("Settings: the Prompts panel (P5-06)", () => {
     vi.clearAllMocks();
     api.getSettings.mockResolvedValue(SETTINGS);
     api.getPrompts.mockResolvedValue(PROMPTS);
+    api.me.mockResolvedValue({ email: "dev@example.com", role: "member" });
   });
 
   it("marks a prompt still on the shipped default apart from one the tenant has tuned", async () => {
@@ -138,6 +143,7 @@ describe("Settings: a prompt's revision history (#39)", () => {
     vi.clearAllMocks();
     api.getSettings.mockResolvedValue(SETTINGS);
     api.getPrompts.mockResolvedValue(PROMPTS);
+    api.me.mockResolvedValue({ email: "dev@example.com", role: "member" });
     api.getPromptHistory.mockResolvedValue(HISTORY);
   });
 

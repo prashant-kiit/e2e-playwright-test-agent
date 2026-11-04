@@ -18,6 +18,18 @@ _Avoid_: Organization, account, workspace, customer (in code)
 A person who drives the harness through the portal. Belongs to exactly one
 tenant and holds one role there.
 _Avoid_: User (in prose), admin, tester, QA engineer
+_But_: the table is `users`, the model is `User`, and the portal's own panel
+and route are `/users` — the spelling an operator expects to click and the one
+the schema already uses. Those are legacy-and-interface spellings of this
+concept, not a second concept, exactly as `targets.app` is for **Target**
+(ADR 0001). Prose says operator; columns, routes and UI labels say user.
+
+**Onboarding**:
+Creating a tenant together with its first admin. One operation, because a
+tenant with no admin can never be administered: it is refused on the way out
+(the last admin cannot be removed) and so is never created on the way in. It
+is an operator-run command rather than a portal action — see ADR 0002.
+_Avoid_: Signup, registration, provisioning, tenant creation (alone)
 
 **Project**:
 A tenant's grouping of targets, used to organize work. Carries no

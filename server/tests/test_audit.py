@@ -560,35 +560,45 @@ def test_the_actor_scope_does_not_leak_past_its_block(session):
     assert current_actor() == SYSTEM_ACTOR
 
 
-def test_the_two_mutations_with_no_surface_are_recorded_as_a_gap():
-    """#37 lists `user add/remove`; this asserts the absence is deliberate.
+def test_every_mutation_the_spec_lists_now_has_an_action():
+    """#37's list of seven, complete -- and the inverse of the test that used
+    to be here.
 
-    There is no user-administration code path in the tree -- no route, no repo
-    function, nothing but the migration that seeds the single operator. So
-    there is no mutation to audit, and an `Action` member for it would read as
-    covered while nothing could ever write it.
+    This assertion used to run the other way: there was no user-administration
+    code path in the tree, so `USER_ADD`/`USER_REMOVE` were deliberately
+    absent, and the test said "if you built that surface, come back and audit
+    it". P5-14 (#46) built it, so the tripwire has done its job and becomes the
+    thing it was guarding.
 
-    This test fails the moment somebody adds that surface, which is exactly
-    when the audit row has to be written: the assertion is "if you built user
-    administration, come back and audit it". The sibling note is in
-    `app/domain/audit.py`.
+    Kept as a list-versus-vocabulary check rather than deleted, because the
+    next mutation to arrive has the same question to answer, and
+    `app/domain/audit.py`'s rule -- a member exists iff a code path performs
+    it -- is only enforced if something reads both halves.
     """
-    from app import repo
-    from app.api import router
+    from app.domain.audit import Action
 
-    paths = {route.path for route in router.routes}
-    assert not [p for p in paths if "user" in p.lower()], (
-        "a user-administration route now exists; #37 lists user add/remove as "
-        "an audited mutation -- add the Action member and record it"
+    spec_lists = {
+        "delivery approval": Action.DELIVERY_APPROVE,
+        "PAT save/rotate": Action.PAT_SAVE,
+        "PAT clear": Action.PAT_CLEAR,
+        "infra sync": Action.INFRA_SYNC,
+        "target reset": Action.TARGET_RESET,
+        "quota change": Action.QUOTA_CHANGE,
+        "user add": Action.USER_ADD,
+        "user remove": Action.USER_REMOVE,
+    }
+    assert set(spec_lists.values()) <= set(Action)
+
+    # The other direction: a member with nothing that writes it reads as
+    # covered while being decorative, which is what the module docstring
+    # forbids. `accounts` is the only module that adds or removes a user.
+    from app import accounts
+
+    assert hasattr(accounts, "add_user") and hasattr(accounts, "remove_user")
+    assert not hasattr(accounts, "change_role"), (
+        "a role-change path now exists; it needs its own Action member, since "
+        "`user.add`/`user.remove` cannot describe it (see app/domain/audit.py)"
     )
-    assert not [
-        name
-        for name in dir(repo)
-        if not name.startswith("_")
-        and "user" in name
-        # `get_user_for_login` is a read, not a mutation.
-        and name not in {"get_user_for_login"}
-    ], "a user-administration repo function now exists; audit it (see #37)"
 
 
 # --- a dry run is not a mutation ------------------------------------------
