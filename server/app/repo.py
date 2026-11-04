@@ -428,7 +428,7 @@ def tenant_usage(session: Session, *, now: datetime | None = None) -> quotas.Usa
     """What the current tenant has spent: live runs, and runs started this month.
 
     Both counts are the tenant's across every one of its apps, and both are
-    ordinary ORM selects, so `tenancy.install_read_guard` adds the `tenant_id`
+    ordinary ORM selects, so `tenancy.install_tenant_guard` adds the `tenant_id`
     filter -- the same mechanism as every other read. A quota that counted
     another tenant's runs would be worse than no quota at all, so
     `test_quotas.py` proves the scoping rather than trusting it.

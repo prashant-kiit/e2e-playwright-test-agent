@@ -45,7 +45,7 @@ from .domain.quotas import DEFAULT_MAX_CONCURRENT_RUNS, DEFAULT_MONTHLY_RUN_QUOT
 from .domain.roles import UserRole
 from .domain.status import RunStatus
 from .domain.steps import Step
-from .tenancy import install_read_guard
+from .tenancy import install_tenant_guard
 
 
 def _enum_col(enum_cls: type[_Enum]) -> SAEnum:
@@ -65,7 +65,7 @@ class TenantOwned:
 
     It was a `_tenant_col()` helper returning the column. It is a mixin now
     because P5-02 needs a **single type naming every tenant-owned entity**:
-    `tenancy.install_read_guard` filters all of this class's mapped subclasses
+    `tenancy.install_tenant_guard` filters all of this class's mapped subclasses
     in one `with_loader_criteria`, so one listener covers the whole schema and
     a table added later is covered by inheriting from here. The column itself
     is unchanged -- same type, nullability, index and FK -- which
@@ -621,4 +621,4 @@ class AuditLog(TenantOwned, Base):
 # and the test suite alike -- anything that can query has already imported the
 # models. There is deliberately no way to turn it off: a flag would let the
 # suite prove isolation in a configuration production does not run in.
-install_read_guard(TenantOwned)
+install_tenant_guard(TenantOwned)

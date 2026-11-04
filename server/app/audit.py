@@ -134,7 +134,7 @@ def record(
 def entries(session: Session, *, limit: int | None = None) -> list[AuditLog]:
     """This tenant's trail, most recent first.
 
-    An ordinary ORM select, so `tenancy.install_read_guard` adds the
+    An ordinary ORM select, so `tenancy.install_tenant_guard` adds the
     `tenant_id` filter -- the enforced read path #37's last criterion asks for,
     and the same mechanism as every other read in the tree rather than a
     hand-written `.where()` that could be forgotten.

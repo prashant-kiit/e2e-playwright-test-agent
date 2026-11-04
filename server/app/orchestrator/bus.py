@@ -47,7 +47,7 @@ from ..db import SessionLocal
 from ..domain import lease
 from ..domain.status import RunStatus, is_terminal
 from ..models import Run, RunLog
-from ..tenancy import current_tenant_id
+from ..tenancy import across_tenants, current_tenant_id
 from .runner import Emit
 
 log = logging.getLogger(__name__)
@@ -243,7 +243,18 @@ def prune_run_logs(session, *, days: int | None = None, now: datetime | None = N
     """
     window = timedelta(days=config.log_retention_days() if days is None else days)
     cutoff = (now or lease.utcnow()) - window
-    result = session.execute(delete(RunLog).where(RunLog.at < cutoff))
+    # **Across tenants deliberately, and now saying so** (P5-12). P5-12 put ORM
+    # bulk UPDATE/DELETE under the tenant guard, which is right for every bulk
+    # write except this one: the retention sweep runs on a timer with no
+    # request and no run behind it, and its job is the whole table. Guarded, it
+    # would have become "prune whichever tenant happens to be bound" -- and the
+    # reaper binds none before it, so it would have raised `NoTenantScope`
+    # every thirty seconds behind a "pruning the run log failed" warning while
+    # the table grew for ever. The bypass is the documented way to say that
+    # (`tenancy.across_tenants`), which puts this on the allowlist in
+    # tests/test_tenant_isolation_repo.py rather than letting it escape the
+    # guard quietly.
+    result = session.execute(across_tenants(delete(RunLog).where(RunLog.at < cutoff)))
     session.commit()
     return result.rowcount or 0
 

@@ -21,15 +21,25 @@ import ast
 from pathlib import Path
 
 import pytest
+from sqlalchemy import delete, update
 from sqlalchemy.orm import sessionmaker
 
 from app import audit, repo, revisions
 from app.db import Base
 from app.domain.audit import Action
-from app.models import Artifact, FileIndex, Revision, RunLog, Tenant, TenantOwned
+from app.models import (
+    Artifact,
+    FileIndex,
+    Project,
+    Revision,
+    RunLog,
+    Tenant,
+    TenantOwned,
+)
 from app.orchestrator.bus import PostgresLogBus
 from app.tenancy import (
     DEFAULT_TENANT_ID,
+    across_tenants,
     actor_scope,
     current_tenant_id,
     tenant_scope,
@@ -242,7 +252,7 @@ def test_every_tenant_owned_table_inherits_the_mixin():
     """A new table with a `tenant_id` must inherit `TenantOwned`, or it has no
     filter at all.
 
-    `install_read_guard` filters the mapped subclasses of that one mixin, so
+    `install_tenant_guard` filters the mapped subclasses of that one mixin, so
     inheriting it is not decoration -- it is the whole of what makes a table's
     rows readable only by their owner. `test_tenancy.py` asserts the *column*
     exists everywhere; this asserts the column arrives by the route the guard
@@ -282,6 +292,12 @@ ALLOWED_BYPASSES = {
     # the comment above asks for.
     # Resolves a reaped run's tenant before its sandbox is destroyed.
     "reaper: _tenant_of",
+    # The retention sweep, which is the one bulk write whose job *is* every
+    # tenant's rows. It arrived here when P5-12 put ORM UPDATE/DELETE under the
+    # guard: before that it needed no opt-out because the guard did not reach
+    # writes, and the honest way to keep it spanning tenants is to declare it
+    # rather than to leave the guard not covering deletes at all.
+    "bus: prune_run_logs",
 }
 
 # The identifiers that mean "this read is not tenant-filtered". `ACROSS_TENANTS`
@@ -377,3 +393,79 @@ def test_the_bypass_scan_catches_a_hand_written_opt_out():
     assert _mentions_a_bypass(ast.parse("opts = {'qa_across_tenants': True}"))
     # ...and does not fire on an ordinary query.
     assert not _mentions_a_bypass(ast.parse("rows = session.scalars(select(Run)).all()"))
+
+
+# --- the guard covers writes, not only reads (P5-12) ---------------------
+
+def test_a_bulk_update_cannot_reach_another_tenants_row_by_id(session, theirs):
+    """Story 6's "a missing filter is a bug that fails closed rather than a
+    leak" applies to writes with the same force it applies to reads.
+
+    The guard was a `SELECT`-time loader filter, and its own docstring said so:
+    `is_select` is false for an ORM bulk `UPDATE`, so `update(Project).where(
+    Project.id == n)` reached any tenant's row by id. The decision in #30 that
+    reads go through "a single enforced path ... so a new query cannot forget
+    the filter" has no reading under which writes are exempt -- a bulk update
+    that forgets `tenant_id` looks exactly like one that does not need it,
+    which is the property the read guard exists to remove.
+
+    Asserted on the row being *unchanged* rather than on a raised error,
+    because the filter is a `WHERE` clause and not an assertion: the statement
+    runs, matches nothing, and the other tenant's row is untouched.
+    """
+    project_id = theirs["project"].id
+    before = session.scalars(
+        across_tenants(repo.select(Project).where(Project.id == project_id))
+    ).one().name
+
+    # Acting as the tenant that owns nothing here.
+    with tenant_scope(OTHER):
+        session.execute(
+            update(Project).where(Project.id == project_id).values(name="stolen")
+        )
+        session.commit()
+
+    after = session.scalars(
+        across_tenants(repo.select(Project).where(Project.id == project_id))
+    ).one().name
+    assert after == before == "theirs", (
+        f"another tenant renamed project {project_id} to {after!r}; a bulk "
+        f"UPDATE reached outside the acting tenant"
+    )
+
+
+def test_a_bulk_delete_cannot_reach_another_tenants_row_by_id(session, theirs):
+    """The sibling, and the more consequential half: an unfiltered bulk delete
+    by id destroys another tenant's data rather than merely disclosing it."""
+    run_id = theirs["run"].id
+
+    with tenant_scope(OTHER):
+        session.execute(delete(RunLog).where(RunLog.run_id == run_id))
+        session.commit()
+
+    survived = session.scalars(
+        across_tenants(repo.select(RunLog).where(RunLog.run_id == run_id))
+    ).all()
+    assert survived, (
+        f"another tenant deleted every log line of run {run_id}; a bulk "
+        f"DELETE reached outside the acting tenant"
+    )
+
+
+def test_a_bulk_update_still_reaches_the_acting_tenants_own_rows(session, theirs):
+    """The guard filters writes; it does not block them.
+
+    Without this the two tests above would pass against a guard that made every
+    bulk write match nothing at all, which would be a silent data-loss bug
+    rather than isolation.
+    """
+    project_id = theirs["project"].id
+
+    session.execute(
+        update(Project).where(Project.id == project_id).values(name="renamed")
+    )
+    session.commit()
+
+    assert session.scalars(
+        repo.select(Project).where(Project.id == project_id)
+    ).one().name == "renamed"

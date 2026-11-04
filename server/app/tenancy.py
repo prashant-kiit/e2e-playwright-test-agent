@@ -187,9 +187,9 @@ def actor_scope(actor: str) -> Iterator[None]:
         _current_actor.reset(token)
 
 
-# --- the enforced read path -----------------------------------------------
+# --- the enforced read and write path --------------------------------------
 #
-# The write side of tenancy was always one line at each insert
+# The *insert* side of tenancy was always one line at each call site
 # (`tenant_id=current_tenant_id()`), visible in review and asserted
 # structurally by tests/test_tenancy.py. The read side was not: a `select()`
 # that forgot `.where(tenant_id == ...)` looked exactly like one that did not
@@ -242,8 +242,14 @@ def across_tenants(statement):
     return statement.execution_options(**ACROSS_TENANTS_OPTION)
 
 
-def install_read_guard(tenant_owned: type) -> None:
-    """Filter every ORM SELECT of a tenant-owned entity by the current tenant.
+def install_tenant_guard(tenant_owned: type) -> None:
+    """Filter every ORM read *and bulk write* of a tenant-owned entity by the
+    current tenant.
+
+    Named `install_read_guard` until P5-12, when it grew to cover ORM bulk
+    `UPDATE` and `DELETE`: the old name made the same claim the old docstring
+    did, and a guard whose name says "read" is one a reviewer will assume does
+    not cover a write.
 
     `tenant_owned` is the mixin every table with a `tenant_id` inherits
     (`models.TenantOwned`); `with_loader_criteria` applies the criteria to all
@@ -253,9 +259,22 @@ def install_read_guard(tenant_owned: type) -> None:
     **What it covers**, each confirmed against a real session rather than
     assumed: entity selects, `Session.get()` (so a direct-id read of someone
     else's row answers `None`, and every `repo.get_*` raises `NotFound`),
-    column and aggregate selects, and lazy relationship loads -- the criteria
+    column and aggregate selects, lazy relationship loads -- the criteria
     propagates from the originating query, so `run.steps` cannot walk into
-    another tenant.
+    another tenant -- and, since P5-12, **ORM bulk `UPDATE` and `DELETE`**.
+
+    The writes were the half this guard spent its first version not covering,
+    and the docstring said so where the code could not. "A missing filter is a
+    bug that fails closed rather than a leak" (#30, story 6) has no reading
+    under which a bulk write is exempt: `update(Project).where(Project.id == n)`
+    reached any tenant's row by id, and renaming or deleting another customer's
+    rows is worse than reading them. The filter arrives as a `WHERE` clause, so
+    such a statement now matches nothing rather than raising -- the row is
+    untouched, which is the same shape as a filtered read coming up empty.
+
+    An `INSERT` is deliberately not in that list: there is no existing row to
+    narrow, and the write side sets `tenant_id` from `current_tenant_id()` at
+    each call site, which is the seam the column was carried for.
 
     **What it asks a tenant for.** Every statement except one it can prove
     touches nothing tenant-owned -- a select of `tenants` itself, the one table
@@ -267,18 +286,18 @@ def install_read_guard(tenant_owned: type) -> None:
 
     **What it does not cover**, and must not be mistaken for covering:
 
-    * **ORM UPDATE and DELETE.** `is_select` is false for them, so a bulk
-      `delete(RunLog)` is unfiltered. Writes are reached through a guarded read
-      first everywhere in `repo.py` (every mutator calls `get_run`/`get_target`
-      before touching a row), and the one bulk delete there is --
-      `bus.prune_run_logs` -- is a retention sweep that *should* span tenants.
-      A future bulk write that must not span tenants has to say so itself.
     * **Raw SQL.** `session.execute(text(...))` is not an ORM statement.
       The test fixtures' TRUNCATE is the only such thing in the tree.
     * **The identity map.** A row already loaded in a session is returned by
       `get()` without a SELECT, so a session that bypassed the filter once can
       hand that object back afterwards. No request does: the bypass is used by
       login and by background sweeps, which open their own sessions.
+
+    The one bulk write that *must* span tenants -- `bus.prune_run_logs`, the
+    retention sweep, whose job is the whole table -- declares it with
+    `across_tenants()` and is on the allowlist for it. That is the shape every
+    such path takes: a cross-tenant write is the detectable exception, not the
+    silent default.
 
     Installed once, at import of app/models.py, so it is in force for the API,
     the orchestrator, the CLI and the tests alike. There is no "guard off"
@@ -287,10 +306,15 @@ def install_read_guard(tenant_owned: type) -> None:
     """
     @event.listens_for(Session, "do_orm_execute")
     def _filter_by_tenant(state) -> None:
-        if not state.is_select or state.is_column_load or state.is_relationship_load:
+        if state.is_column_load or state.is_relationship_load:
             # A column load is a refresh of an already-loaded row, and a
             # relationship load inherits the criteria from the query that
             # loaded its parent; re-applying to either is at best redundant.
+            return
+        if not (state.is_select or state.is_update or state.is_delete):
+            # An insert sets `tenant_id` from this module at each call site,
+            # which is the write seam the column was carried for; there is no
+            # existing row for a filter to narrow.
             return
         if state.execution_options.get(ACROSS_TENANTS):
             return

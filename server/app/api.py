@@ -321,7 +321,7 @@ def list_audit_entries(
     the customer's repo, who rotated which credential. That is an admin's view
     of their own organisation rather than something every member reads.
 
-    Scoped to the caller's tenant by `tenancy.install_read_guard`, like every
+    Scoped to the caller's tenant by `tenancy.install_tenant_guard`, like every
     other read -- there is no `.where(tenant_id == ...)` here because a filter
     a route remembers is a filter a route can forget (P5-02, #32).
 

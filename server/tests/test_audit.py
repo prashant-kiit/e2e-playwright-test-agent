@@ -452,7 +452,7 @@ def test_a_rejected_prompt_name_records_nothing(client, session):
 def test_the_trail_is_not_readable_across_tenants(session):
     """#37's last criterion, and inherited rather than implemented.
 
-    `AuditLog` is `TenantOwned`, so `tenancy.install_read_guard` filters the
+    `AuditLog` is `TenantOwned`, so `tenancy.install_tenant_guard` filters the
     select in `audit.entries` like every other read in the tree. Asserted all
     the same: a trail that leaked would show one customer who approved what in
     another customer's repo, which is a worse disclosure than most of the rows
