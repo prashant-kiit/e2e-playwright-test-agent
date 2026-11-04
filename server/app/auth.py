@@ -281,9 +281,15 @@ async def require_auth(request: Request) -> CurrentUser:
     Async on purpose: a value a sync dependency sets does not reach the
     threadpooled endpoint, but one an async dependency sets does, so this is
     where `current_tenant_id()` is made to answer the acting user's tenant for
-    the whole request. Tests override this dependency to bypass auth, which
-    leaves the tenant unset and so the default -- exactly what a single-tenant
-    test wants.
+    the whole request.
+
+    **A route that loses this dependency now fails rather than serving the
+    first tenant** (P5-11). It used to leave the tenant unset, and the resolver
+    answered the seeded default -- so the mistake was invisible, and a test that
+    overrode this dependency to bypass auth relied on that fallback. The
+    resolver raises instead, the suite binds its tenant in an autouse fixture
+    (tests/conftest.py), and the failure is asserted at the boundary in
+    tests/test_tenant_isolation.py.
     """
     token = request.cookies.get(ACCESS_COOKIE)
     user = read_access(token) if token else None

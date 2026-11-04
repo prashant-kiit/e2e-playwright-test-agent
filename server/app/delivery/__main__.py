@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 from ..domain.audit import Action
+from ..tenancy import DEFAULT_TENANT_ID, tenant_scope
 from .bootstrap import bootstrap, is_bootstrapped
 from .errors import DeliveryError, redact
 from .push import push_artifacts
@@ -79,11 +80,59 @@ def _record(action: Action, app: str, after: dict) -> None:
         )
 
 
+def _resolve_tenant_id(slug: str | None) -> int:
+    """Which tenant this invocation acts for.
+
+    With no `--tenant`, the seeded default -- which is what every one of these
+    commands already operated on, so `make deliver` is unchanged. It is
+    returned as the constant rather than looked up by slug on purpose: `check`
+    needs no database today, and making the common path open one to learn a
+    number the migration seeds would be a new failure mode for nothing.
+
+    With `--tenant`, the slug is resolved to its id, and an unknown slug is an
+    error rather than a fallback. That refusal is the point: silently acting as
+    the seeded tenant because a slug was mistyped would deliver one customer's
+    artifacts into another customer's repo, which is exactly the class of
+    failure P5-11 exists to make impossible.
+
+    The ORM is imported here rather than at module scope for the reason given
+    in `_record`: the delivery package keeps the models out of its import graph
+    until a command actually needs them.
+    """
+    if slug is None:
+        return DEFAULT_TENANT_ID
+
+    from sqlalchemy import select
+
+    from ..db import SessionLocal
+    from ..models import Tenant
+
+    with SessionLocal() as session:
+        # `tenants` carries no `tenant_id` -- its own id *is* the tenant -- so
+        # it is not a guarded entity and this read needs no bypass.
+        tenant_id = session.scalar(select(Tenant.id).where(Tenant.slug == slug))
+    if tenant_id is None:
+        raise DeliveryError(f"no such tenant: {slug!r}")
+    return tenant_id
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app.delivery",
         description="Deliver QA artifacts to an app's target repo.",
     )
+    # Global rather than per-command: every command acts *as* someone, and an
+    # option that only some subcommands accepted would be one more thing to get
+    # wrong. Being a parent-level option it goes *before* the subcommand --
+    # `python -m app.delivery --tenant acme push ...` -- which is the usual
+    # shape for "who am I" and keeps it out of each command's own options.
+    parser.add_argument(
+        "--tenant",
+        default=None,
+        metavar="SLUG",
+        help="the tenant to act as (default: the seeded `default` tenant)",
+    )
+
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_check = sub.add_parser(
@@ -119,6 +168,27 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
+    try:
+        # Bound around the whole command, not around each read: `check` reads
+        # the catalog, `push` reads a revision and writes an audit row, and all
+        # of it is one operator acting as one tenant. P5-11 removed the
+        # resolver's fallback, so this binding is now what makes any of these
+        # commands able to touch a tenant-owned row at all.
+        tenant_id = _resolve_tenant_id(args.tenant)
+    except DeliveryError as exc:
+        print(f"ERROR: {redact(str(exc))}", file=sys.stderr)
+        return EXIT_ERROR
+
+    with tenant_scope(tenant_id):
+        return _run(args)
+
+
+def _run(args) -> int:
+    """One command, inside the tenant scope `main` bound.
+
+    Split out so the scope is one `with` around the whole body rather than an
+    extra level of indentation on two hundred lines of command dispatch.
+    """
     try:
         tools = default_tools()
 

@@ -15,9 +15,11 @@ inject and the seam has to be substituted deliberately.
 from __future__ import annotations
 
 import pytest
+from sqlalchemy.orm import sessionmaker
 
 from app.delivery import __main__ as cli
 from app.delivery import errors
+from app.tenancy import DEFAULT_TENANT_ID, current_tenant_id
 from tests.delivery_helpers import (
     DictCatalog,
     FakeGitHub,
@@ -239,3 +241,93 @@ def test_a_missing_credential_is_reported_as_an_error(env, monkeypatch, capsys):
     monkeypatch.setattr(cli, "default_tools", boom)
     assert cli.main(["check", "demo"]) == cli.EXIT_ERROR
     assert "no GitHub token" in capsys.readouterr().err
+
+
+# --- the CLI binds its tenant explicitly (P5-11) -------------------------
+
+@pytest.mark.unscoped_tenant
+def test_the_cli_binds_the_seeded_tenant_by_default(env, monkeypatch):
+    """An operator at a console is a legitimate scope-less path, so it binds one.
+
+    The CLI is a process, not a request: there is no session to resolve a tenant
+    from, and before P5-11 it bound nothing at all -- its own docstring said the
+    tenant was "whatever `current_tenant_id()` answers with nothing bound: the
+    seeded default". That was the fallback this ticket removes, so the CLI has
+    to say what it meant instead of inheriting it.
+
+    Marked `unscoped_tenant` so the binding under test is the CLI's own and not
+    the harness's.
+    """
+    source, remote = env
+    seen: list[int] = []
+
+    catalog = DictCatalog(source, CONFIG)
+    catalog.record_delivered("demo", "a" * 40)
+    _stub_tools(monkeypatch, source, remote, FakeGitHub(), catalog)
+    original = catalog.state
+
+    def observe(app_slug):
+        seen.append(current_tenant_id())
+        return original(app_slug)
+
+    monkeypatch.setattr(catalog, "state", observe)
+
+    assert cli.main(["check", "demo"]) == cli.EXIT_OK
+    assert DEFAULT_TENANT_ID in seen, (
+        "the CLI ran a catalog read with no tenant bound; it must bind one"
+    )
+
+
+@pytest.mark.unscoped_tenant
+def test_the_cli_acts_as_the_tenant_named_by_the_tenant_option(env, monkeypatch, session):
+    """`--tenant <slug>` is how an operator acts for a second customer.
+
+    The half of follow-up 20 that P5-11 forces: once the resolver refuses to
+    guess, "which tenant is this delivery for?" has to be answerable, and the
+    slug is the handle a person can type (it is already what login resolves a
+    tenant by).
+    """
+    from app.models import Tenant
+
+    source, remote = env
+    other = Tenant(id=2, slug="second", name="Second")
+    session.add(other)
+    session.commit()
+
+    seen: list[int] = []
+    catalog = DictCatalog(source, CONFIG)
+    catalog.record_delivered("demo", "a" * 40)
+    _stub_tools(monkeypatch, source, remote, FakeGitHub(), catalog)
+
+    original = catalog.state
+
+    def observe(app_slug):
+        seen.append(current_tenant_id())
+        return original(app_slug)
+
+    monkeypatch.setattr(catalog, "state", observe)
+    monkeypatch.setattr(
+        "app.db.SessionLocal",
+        sessionmaker(bind=session.get_bind(), expire_on_commit=False, future=True),
+    )
+
+    assert cli.main(["--tenant", "second", "check", "demo"]) == cli.EXIT_OK
+    # On the resolved tenant, not on how many reads the command happened to
+    # make: `check` reads the catalog's state more than once.
+    assert seen, "the CLI ran no tenant-scoped read"
+    assert set(seen) == {2}, f"the CLI acted as {set(seen)} rather than tenant 2"
+
+
+@pytest.mark.unscoped_tenant
+def test_an_unknown_tenant_slug_is_refused_rather_than_guessed(env, monkeypatch, session):
+    """A typo'd slug must not fall back to the seeded tenant: that would deliver
+    one customer's artifacts into another's repo, which is the precise failure
+    the whole ticket is about."""
+    source, remote = env
+    _stub_tools(monkeypatch, source, remote, FakeGitHub(), DictCatalog(source, CONFIG))
+    monkeypatch.setattr(
+        "app.db.SessionLocal",
+        sessionmaker(bind=session.get_bind(), expire_on_commit=False, future=True),
+    )
+
+    assert cli.main(["--tenant", "nope", "check", "demo"]) == cli.EXIT_ERROR

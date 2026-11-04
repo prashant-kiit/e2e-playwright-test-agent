@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 import threading
 from collections.abc import Callable, Iterator
@@ -123,7 +124,21 @@ def heartbeat_during(
                 exc_info=True,
             )
 
-    thread = threading.Thread(target=_beat, name=f"heartbeat-{run_id}", daemon=True)
+    # The thread beats inside *this* caller's context, which is what carries
+    # the tenant scope across the thread boundary (P5-11). `threading.Thread`
+    # does not: a bare thread starts with an empty context, so the beat
+    # resolved the tenant with nothing bound. That was invisible while the
+    # resolver answered the seeded default and wrong in the worst way -- every
+    # run heartbeated as tenant 1, so for any other tenant `repo.heartbeat`
+    # read its run through the tenant filter, found nothing, and the loop read
+    # that `NotFound` as "no longer live" and returned. The lease then expired
+    # under a perfectly healthy run and the reaper reaped it. `copy_context()`
+    # is the thread-boundary equivalent of what `asyncio.to_thread` already
+    # does for the sweeps above.
+    context = contextvars.copy_context()
+    thread = threading.Thread(
+        target=lambda: context.run(_beat), name=f"heartbeat-{run_id}", daemon=True
+    )
     thread.start()
     try:
         yield
