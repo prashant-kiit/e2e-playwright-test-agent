@@ -56,7 +56,7 @@ A token table would have closed this too, and is still the cost app/auth.py
 declines to pay for sessions. This is one integer on a row that is already
 read on every call.
 
-The four exempt operations below are unaffected, and that is load-bearing
+The three exempt operations below are unaffected, and that is load-bearing
 rather than incidental: a sandbox being torn down at a pause still flushes its
 last log lines and still records what it spent, and the exemptions are what let
 it. See `scoped_run`.
@@ -166,7 +166,8 @@ def scoped_run(session: Session, scope: RunScope) -> Run:
     What is missing is the liveness gate, which is why this is not the thing
     operations call -- `authorized_run` is.
 
-    **Four operations use this deliberately, and they are the whole list:**
+    **Three operations use this deliberately, and they are the whole list**
+    (`authorized_run` below is the fourth caller, and it is the gate itself):
 
     - `run_status`, because the sandbox entrypoint reads it *after* the run ends
       to choose its exit code;
@@ -178,9 +179,10 @@ def scoped_run(session: Session, scope: RunScope) -> Run:
       reads first. Gating them cost a container-path debugging session: every
       line appeared except the ones that said how the run ended.
 
-    None of the four is a weakening of the gate, because none of them can change
-    a run's work: two are reads of one field, one writes two accounting columns,
-    and one appends to an append-only log belonging to the run the token names.
+    None of the three is a weakening of the gate, because none of them can
+    change a run's work: one is a read of one field, one writes two accounting
+    columns, and one appends to an append-only log belonging to the run the
+    token names.
     What the gate exists to stop is a finished run's token being used to commit a
     revision, drive a status or upload an artifact -- and all of those still go
     through `authorized_run`.
@@ -223,7 +225,7 @@ def authorized_run(session: Session, scope: RunScope) -> Run:
     `scoped_run` plus the liveness gate, and deliberately nothing else: writing
     the three checks out again here would be the thing this module's docstring
     argues against two paragraphs up ("five operations each doing their own
-    three checks is how one of them ends up doing two"), with the four exempt
+    three checks is how one of them ends up doing two"), with the three exempt
     operations as the fifth caller.
     """
     run = scoped_run(session, scope)
@@ -233,10 +235,16 @@ def authorized_run(session: Session, scope: RunScope) -> Run:
             f"authorizes anything"
         )
     if run.sandbox_attempt != scope.sandbox_attempt:
+        # The run's *current* attempt is deliberately not in the message. This
+        # class's own docstring says a sandbox probing must not be able to tell
+        # one refusal from another, and the current attempt is a fact about the
+        # run as it is now -- which is exactly what the holder of a superseded
+        # token has stopped being entitled to. Its own attempt is something it
+        # already knows.
         raise RunNotLive(
-            f"run {scope.run_id} is on attempt {run.sandbox_attempt}; this token was "
-            f"minted for attempt {scope.sandbox_attempt} and no longer authorizes "
-            f"anything"
+            f"run {scope.run_id} is no longer on attempt "
+            f"{scope.sandbox_attempt}; its sandbox is gone and this token no "
+            f"longer authorizes anything"
         )
     return run
 

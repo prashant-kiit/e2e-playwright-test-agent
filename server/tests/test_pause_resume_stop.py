@@ -16,7 +16,7 @@ from app.domain.steps import Step
 from app.models import AppLock
 from app.orchestrator.driver import run_pipeline
 from app.orchestrator.fake import FakeRunner
-from tests.control_helpers import control_for, resumed_control_for
+from tests.control_helpers import control_for, resume_and_control_for
 from tests.storage_helpers import FakeStorage
 from tests.target_helpers import create_target
 
@@ -106,7 +106,7 @@ def test_resume_continues_from_checkpoint_to_completion(
     # Resume: clear flags, re-run; it should begin at EXPLORE and finish.
     # Through a *freshly minted* gateway, because the resumed run is a new
     # sandbox and the paused one's token no longer authorizes anything (#48).
-    resumed = resumed_control_for(run_id, session_factory, store, monkeypatch)
+    resumed = resume_and_control_for(run_id, session_factory, store, monkeypatch)
     run_pipeline(resumed, run_id, FakeRunner())
 
     with session_factory() as s:

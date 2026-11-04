@@ -362,10 +362,13 @@ def _persist_session(control: RunGateway, run_key: str, emit: Emit) -> None:
     and raises `RunNotLive` for exactly the runs this guard exists to skip, so
     the guard against logging a failure logged one -- with a traceback -- on
     the way out of every run that succeeded. `run_status` is the first of the
-    four operations app/control/service.py exempts, and the reason it gives is
+    three operations app/control/service.py exempts, and the reason it gives is
     this one: a read of one field, made after the run has ended.
     """
     try:
+        # Re-parsed from a string because the gateway seam is JSON: the HTTP
+        # transport can only carry the value, so the enum is rebuilt on this
+        # side rather than the two transports disagreeing about the wire.
         if RunStatus(control.run_status()) is not RunStatus.RUNNING:
             return
         agent_session.save(control, run_key, GatewayStorage(control), emit=emit)

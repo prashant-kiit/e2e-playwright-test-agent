@@ -165,7 +165,14 @@ def test_a_run_driven_over_http_produces_the_rows_a_thread_run_produces(
         artifacts = list(
             s.scalars(repo.select(Artifact).where(Artifact.run_id == run_id))
         )
-        assert artifacts, "artifacts were uploaded and indexed over the HTTP seam"
+        assert artifacts, "artifacts were indexed over the HTTP seam"
+        # The row and the bytes, because the two halves fail separately: an
+        # index with no object is what a store adapter bound to the wrong
+        # interface produces, and that was a real bug on this path (P5-05's
+        # record, the object store binding one of its two interfaces).
+        for artifact in artifacts:
+            blob, _ct = world["store"].objects[artifact.s3_key]
+            assert blob, f"{artifact.s3_key} was uploaded, not just indexed"
 
     lines, _cursor = PostgresLogBus(session_factory=session_factory).read_from(run_id, 0)
     assert any("hydrate" in line for line in lines), lines[:5]

@@ -1,4 +1,4 @@
-"""P5-16: runs.attempt, the generation a run-scoped token names
+"""P5-16: runs.sandbox_attempt, the sandbox generation a run token names
 
 #48 / #30's story 22: "the run-scoped token … rejected after the run ends, so
 that a leaked token is useless beyond the run it was minted for". A pause ends
@@ -21,6 +21,16 @@ reason the quota caps keep theirs: a run that arrived with no attempt would
 match no token at all, and unlike a quota there is no "unset" reading of this
 column that means anything. New rows get 1 from the ORM default as well, so
 the two paths into this table agree without either depending on the other.
+
+**Every run-scoped token in flight stops working when this deploys**, and that
+is worth stating because the rows are backfilled and the tokens cannot be.
+`run_token.verify` requires the claim, fail-closed and deliberately -- a
+missing `sandbox_attempt` defaulting to 1 is the shape #43 spent a slice
+removing from the tenant resolver -- so a sandbox started before the deploy is
+refused on its next operation and its run fails with that reason rather than
+silently continuing on an unchecked token. Runs are minutes long and a deploy
+restarts the control plane anyway, so the blast radius is the runs in flight at
+that moment; they are resumable, and a resume mints afresh.
 
 Revision ID: c4f91b280e36
 Revises: b7e04c91a2d5

@@ -80,10 +80,13 @@ def control_for_session(
     return control_for(run_id, BorrowedSessionFactory(session), store, monkeypatch)
 
 
-def resumed_control_for(
+def resume_and_control_for(
     run_id: int, session_factory, store: Storage, monkeypatch=None
 ) -> LocalGateway:
-    """The gateway a **resumed** run's sandbox carries.
+    """Resume the run, then mint the gateway its new sandbox carries.
+
+    Named for both halves, because it does both: it calls `repo.resume_run`
+    and a name like `resumed_control_for` would read as a getter.
 
     The same mint as `control_for`, named separately because carrying the
     pre-pause gateway across a resume is exactly what #48 made impossible: a

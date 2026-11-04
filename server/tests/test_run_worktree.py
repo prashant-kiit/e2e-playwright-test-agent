@@ -27,7 +27,7 @@ from app.domain.steps import Step
 from app.models import AppLock
 from app.orchestrator.driver import run_pipeline
 from app.orchestrator.fake import FakeRunner
-from tests.control_helpers import control_for, resumed_control_for
+from tests.control_helpers import control_for, resume_and_control_for
 from tests.delivery_helpers import make_worktree
 from tests.storage_helpers import FakeStorage
 from tests.target_helpers import create_target
@@ -316,7 +316,7 @@ def test_a_resumed_run_re_hydrates_from_the_head_and_continues(
 
     # A fresh gateway for the resumed attempt: the sandbox the pause destroyed
     # took its authority with it (#48).
-    resumed = resumed_control_for(run_id, session_factory, store, monkeypatch)
+    resumed = resume_and_control_for(run_id, session_factory, store, monkeypatch)
     resumed_steps: list[Step] = []
     rehydrated: list[bool] = []
 

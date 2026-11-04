@@ -372,8 +372,12 @@ def test_a_token_from_before_a_pause_is_a_403_over_http(client, world):
 
     The pause route destroys the container and moves the run to `paused`, so
     the token that container was handed names a sandbox that no longer exists.
-    403, the same answer every other unauthorized scope gets -- a sandbox must
-    not be able to tell "my attempt was superseded" from "not yours".
+    403, the same answer every other unauthorized scope gets.
+
+    The body names the attempt the *token* carries and deliberately not the one
+    the run is now on: a sandbox holding a superseded token has stopped being
+    entitled to facts about the run as it currently is, and its own attempt is
+    something it already knows.
     """
     demo = world["demo"]
     with tenant_scope(demo["scope"].tenant_id):
@@ -388,7 +392,13 @@ def test_a_token_from_before_a_pause_is_a_403_over_http(client, world):
     )
 
     assert response.status_code == 403
-    assert "attempt" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert f"no longer on attempt {demo['scope'].sandbox_attempt}" in detail
+    with tenant_scope(demo["scope"].tenant_id), world["session_factory"]() as s:
+        current = repo.get_run(s, demo["run_id"]).sandbox_attempt
+    assert str(current) not in detail, (
+        "the run's current attempt is not handed to a superseded token"
+    )
 
 
 def test_the_resumed_attempts_token_works_over_http(client, world):

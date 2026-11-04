@@ -679,7 +679,7 @@ test suite had its own copy of the service's borrow-don't-close shim.
   asking whether the sandbox the token was minted for is still the one doing the work.
   `is_live` still answers the first question and still includes `PAUSED` everywhere — the
   lock trio and the reaper are untouched — and a fourth field on the scope answers the
-  second. `runs.attempt` is a generation counter; `repo.pause_run` moves it on; the token
+  second. `runs.sandbox_attempt` is a generation counter; `repo.pause_run` moves it on; the token
   names the attempt it was minted for; `authorized_run` compares the two. One integer on a
   row that was already being read on every call.
   Two things about the shape are worth keeping, because the first attempt at it was wrong.
@@ -694,6 +694,12 @@ test suite had its own copy of the service's borrow-don't-close shim.
   boundary** is what covers it, and that save exists for this exact reason — a pause gives
   no warning — so what a pause now costs is still the exploration of the step it
   interrupted and no more.
+  Two readings of "not running" now share one answer there, and the guard reads
+  `run_status` rather than `run_state` because only the former is exempt from the gate —
+  which is #50's find, and is why a normally-ending run no longer logs a warning with a
+  traceback about a session it deliberately did not save. This is a behaviour change on
+  the thread path that none of the three tickets asked for in those words; it is forced by
+  the token retirement, and it is bounded by the per-boundary save.
 - **The run-scoped token is not revocable.** Expiry is the backstop and liveness is the gate;
   between them there is no way to cut a specific token short while its run continues.
 - **No real agent run.** The container test uses `QA_RUNNER=fake`, so what is proven is the
@@ -1735,7 +1741,7 @@ documentation, and none of them is fixed.
     it was minted for has been destroyed. Recorded as a trade-off in item 33; it is also a
     deviation from "rejected after the run ends" and belongs in the same list as that story.
 
-    **Closed on 2026-11-04 (#48).** `runs.attempt`, carried by the token and moved on by
+    **Closed on 2026-11-04 (#48).** `runs.sandbox_attempt`, carried by the token and moved on by
     `repo.pause_run`; see the struck-through trade-off in §P5-05 for the shape and for the
     two things the first attempt got wrong. Proven at the service
     (`tests/test_control_service.py`: refused during the pause, still refused after the
@@ -1774,6 +1780,11 @@ documentation, and none of them is fixed.
     tests remain the only thing that proves the rest — which is the honest measure of what
     is left, since P5-05's record says four real bugs here were found by running a
     container and none by the suite.
+
+    The test asserts both halves of each upload — the `artifacts` row **and** the bytes
+    under its key in the store — because the two fail separately: an index with no object
+    is what a store adapter bound to the wrong one of its two interfaces produces, which is
+    one of the four bugs P5-05 found by running a container.
 53. **`test_a_resume_that_changes_nothing_does_not_manufacture_a_version` is flaky, and it
     fails in the liveness gate.** Observed on 2026-11-04: one full-suite run failed it with
     `RunNotLive: run 1 is completed; its token no longer authorizes anything` from
@@ -1798,6 +1809,22 @@ documentation, and none of them is fixed.
     five of the file's resumes through a helper that asserts `PAUSED` first — the one-line
     piece of work this item asked for — the assertion has never fired, in the targeted run
     or the full suite.
+
+    **The repeated-run evidence the criterion asked for**, since the original item was
+    reported off run counts and a closure that did not give any would be weaker than the
+    report. On the finished tree: **three consecutive clean full-suite runs**
+    (`QA_REQUIRE_DB=1 uv run pytest`, 1177 → 1183 → 1183 passed as the later tickets added
+    tests), plus three consecutive runs of `tests/test_sandbox_session.py` alone while the
+    fix was being made. The targeted file had been failing on *every* run before the fix,
+    not intermittently — this machine is slow enough that the run's last two archives
+    straddled a second boundary every time, which is why "passes in isolation every time"
+    had stopped being true and why the cause was reproducible at all.
+    One honest caveat about method: two full-suite runs taken in the middle of this work
+    failed with 15 and 7 failures and dozens of errors, and that was **test-database
+    contention** — a review sub-agent was running its own `pytest` against the same
+    `qa_test` database at the same time, and the fixtures `TRUNCATE` between tests. Worth
+    writing down because it is a convincing-looking way to misread a green tree as broken,
+    and the suite gives no hint that a second runner is present.
 
     The real cause is that **the session archive was not versioned on its content**.
     `agent_session.save` built the archive with `tarfile.open(path, "w:gz")`, and that

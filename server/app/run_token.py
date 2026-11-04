@@ -7,17 +7,17 @@ trusted not to use it. The envelope made the sealed PATs it could read harmless
 still the honest description of a process running a model that executes
 TypeScript against a web page an attacker may control.
 
-This replaces that with a token that can say exactly three things:
+This replaces that with a token that can say exactly four things:
 
-    run_id      the run this sandbox is working on, and no other
-    target_id   the one target whose tree it may read and commit to
-    tenant_id   the one tenant whose blobs it may name
-    sandbox_attempt
-                which sandbox of that run this is
+    run_id           the run this sandbox is working on, and no other
+    target_id        the one target whose tree it may read and commit to
+    tenant_id        the one tenant whose blobs it may name
+    sandbox_attempt  which sandbox of that run this is
 
 Everything the internal API will do for a sandbox is authorized against those
-three fields (app/control/service.py), so the blast radius of a leaked token is
-one run of one target of one tenant, for as long as that run is live.
+four fields (app/control/service.py), so the blast radius of a leaked token is
+one run of one target of one tenant -- and, since #48, one sandbox of that run:
+it stops authorizing when that sandbox does, rather than when the run ends.
 
 **Signed and timestamped, not stored.** The same mechanism and the same library
 as the portal's session cookies (app/auth.py): a stateless token costs no table
