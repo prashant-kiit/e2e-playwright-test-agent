@@ -1143,6 +1143,144 @@ same thing to this one.
 
 ---
 
+## Verified on 2026-11-04 — P5-18 / #52 (UAT 1: fail-closed against live tenants)
+
+The first of P5's three UAT checkpoints, and the first evidence in this phase that
+**fail-closed holds against a running stack rather than against a fixture.** The ticket's
+own reason for existing is that the suite structurally cannot gather it: every test in it
+reads as one tenant at a time, and the thing being proved is what happens when **no** tenant
+is acting — a test that binds a scope to assert the unscoped path fails has already lost the
+condition it is testing.
+
+Against the live compose stack (`make up`, api rebuilt from this tree), on the **dev
+database, which holds real data** — a project, the `saucedemo` target, 9 runs, 4 revisions
+and 25 artifacts from P4's walkthrough.
+
+**Four migrations met that data for the first time.** The database was at `f1a62c90d4e7`
+(P5-04's default caps); the entrypoint's `alembic upgrade head` applied `a3f70c2e8b91`
+(prompts), `b7e04c91a2d5` (audit_log and its append-only trigger), `c4f91b280e36`
+(`runs.sandbox_attempt`) and `d5e82a013f47` (`purge_log`). Checked afterwards: every row
+still there (1 tenant, 1 user, 1 project, 1 target, 9 runs, 4 revisions, 25 artifacts), the
+trigger present, both new columns present. Additive migrations are the low-risk kind, but
+four unapplied ones meeting real rows is still worth observing rather than assuming.
+
+**Two tenants, created without raw SQL** — the thing follow-up 6 blocked until #46:
+
+```
+$ docker compose exec api python -m app.accounts create-tenant \
+      --name "Acme Ltd" --slug acme --admin boss@acme.test
+tenant: Acme Ltd (log in with slug 'acme')
+admin: boss@acme.test
+password: ...
+```
+
+…and the same for `Globex Inc` / `globex`. Both arrived **bounded** at 3 concurrent / 500
+monthly from the column's server default, which is the first evidence for #35's
+"a tenant arrives bounded" on a path that is neither the migration seed nor raw SQL — the
+two paths that argument was written about. Each wrote one `user.add` audit row against its
+own new tenant with `system` as the actor, as the CLI binds no user.
+
+Each tenant then logged in over HTTP and created a project and a target of its own
+(`acme-app`, `globex-app`, both at revision 1 in blob storage).
+
+**Every tenant is refused every other tenant's rows, in every direction.** Three cookie
+jars, `curl`, HTTP status only:
+
+| Request | as tenant 1 | as `acme` | as `globex` |
+|---|---|---|---|
+| `GET /projects` | `['P4 walkthrough']` | `['acme-project']` | `['globex-project']` |
+| `GET /targets` | `['saucedemo']` | `['acme-app']` | `['globex-app']` |
+| `GET /runs` | 9 rows | 0 | 0 |
+| `GET /targets/1/revisions` (tenant 1's) | 200 | **404** | **404** |
+| `GET /runs/1`, `GET /artifacts/1/content` | 200 | **404** | **404** |
+| `GET /targets/4/revisions` (`acme`'s) | **404** | 200 | **404** |
+| `GET /targets/5/revisions` (`globex`'s) | **404** | **404** | 200 |
+
+The reverse direction matters as much as the forward one, and is the half a single-tenant
+fixture cannot show: tenant 1 is the seeded operator and an admin, and it is refused both new
+tenants' rows just the same.
+
+**A route that forgot its authentication dependency fails closed.** `AuthDep` is on the
+whole router (`app/api.py`), so the way to forget it is to mount a route on a router that
+does not carry it — which is exactly what a new feature router looks like if nobody notices.
+A temporary `GET /uat-unguarded-projects` was added on a bare `APIRouter`, the api image
+rebuilt, and the route called **with no cookie**:
+
+```
+HTTP 500
+  File "/app/app/tenancy.py", line 368, in _filter_by_tenant
+    tenant_id = current_tenant_id()
+  File "/app/app/tenancy.py", line 113, in current_tenant_id
+    raise NoTenantScope(
+app.tenancy.NoTenantScope: no tenant scope is active, so there is no tenant to act as.
+A request resolves one from the authenticated user (auth.require_auth -- check the route
+has its auth dependency); ...
+```
+
+Not a leak and not a silent default: a 500 raised **inside the read guard**, with a message
+that names the probable cause and the dependency to check. Before #43 this route would have
+answered **200 with tenant 1's projects**, which is the whole of story 6's "a missing filter
+is a bug that fails closed rather than a leak". The probe was then reverted, the image
+rebuilt, and the path confirmed 404.
+
+**An ORM `UPDATE` and an ORM `DELETE` outside any tenant scope are refused** (#44's
+guarantee, observed rather than asserted). Run inside the api container with no
+`tenant_scope()` anywhere in the process, aimed at tenant 2's throwaway project rather than
+tenant 1's real data — the guard is supposed to raise before touching anything, so which row
+is named cannot matter, and if it did the row lost is one this UAT created minutes earlier:
+
+```
+RESOLVER: raised NoTenantScope
+UPDATE:   refused, NoTenantScope      # update(Project).where(id==3).values(name="stolen")
+DELETE:   refused, NoTenantScope      # delete(Project).where(id==3)
+AFTER:    [(3, 'acme-project')]       # read back inside tenant_scope(2)
+```
+
+**The reaper still sees every tenant across a real timer tick.** A crashed run cannot be
+produced through the API — a crash *is* a run whose process stopped renewing its lease — so
+one was seeded per tenant with SQL, recorded here verbatim in intent: a live run holding its
+target's lock with a lease that lapsed an hour ago, for tenant 2 and tenant 3, with tenant
+1's rows untouched. Then one real 30-second tick:
+
+```
+api-1  | reaped 2 run(s) with expired leases: [11, 12]
+```
+
+Run 11 is tenant 2's and run 12 is tenant 3's; both ended `failed` with
+`lease expired (reaped)` and `app_locks` went to 0. **Neither belongs to the default
+tenant**, which is what makes this an observation rather than a formality: a sweep that
+quietly resolved to tenant 1 — the failure `reaper._for_each_tenant` exists to prevent —
+would have reaped neither and reported a clean pass.
+
+**The bypass allowlist: the criterion as written does not pass, and here is why.** It asked
+that the list be "no larger than it was before the wave". It is larger by one. Before wave 1
+(`e24c9cf`) it held three entries; it now holds four:
+
+| Entry | Why it is allowed to cross the boundary |
+|---|---|
+| `repo: get_user_for_login` | Login resolves *which* tenant is acting, so it cannot already be scoped. Scoped by the slug the caller typed instead. |
+| `repo: get_run_across_tenants` | The cross-tenant primary-key read itself, used by the reaper entry below. |
+| `reaper: _tenant_of` | Resolves a reaped run's tenant in order to *open* its scope, so it cannot already be inside it. |
+| `bus: prune_run_logs` | **The new one.** |
+
+The new entry arrived in `b8fb7a5` — #44 itself, the commit that put ORM `UPDATE`/`DELETE`
+under the guard. It is not a new bypass: the log retention sweep was *already* a cross-tenant
+bulk delete, and it needed no opt-out only because the guard did not reach writes. Once it
+did, the sweep had to declare itself. So the honest reading is that **the set of things
+crossing the tenant boundary did not grow; the set of things that must say so grew by one,
+because the guard got wider** — and the alternative was to leave deletes unguarded, which is
+what #44 existed to fix. Wave 3 added nothing: #47's purge deliberately runs inside
+`tenant_scope` and takes no bypass at all, which is why the list is unchanged after five more
+tickets.
+
+`make ci-test` green: ruff clean, **1307 backend tests, 115 frontend tests.**
+
+**What this does not prove.** No run executed during UAT 1 — the stack came up with
+`QA_RUNNER=fake` and nothing was dispatched, so nothing here says anything about a real agent
+or a container. That is UAT 2 (#53). The two new tenants and their rows were left in place
+for it, and for UAT 3 (#54) to offboard.
+
+
 ## Decisions recorded during this phase
 
 | Decision | Why |
