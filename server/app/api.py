@@ -48,6 +48,7 @@ from .sandbox import dispatch, egress
 from .schemas import (
     ArtifactOut,
     AuditEntryOut,
+    CapsBody,
     CredentialOut,
     DeliverBody,
     DeliveryOut,
@@ -990,6 +991,65 @@ def get_usage(session: Session = Depends(get_session)):
         # predicates `quotas.breach` is built on. Both can be full at once --
         # `breach` picks one to refuse with, which is the right answer for a
         # rejection message and the wrong one for a pair of gauges.
+        at_concurrency_cap=quotas.at_concurrency_cap(caps, usage),
+        at_monthly_quota=quotas.at_monthly_quota(caps, usage),
+    )
+
+
+@router.put("/usage/caps", response_model=UsageOut, dependencies=[AdminDep])
+def set_usage_caps(body: CapsBody, session: Session = Depends(get_session)):
+    """Change this tenant's plan caps. Tenant-admin only (P5-13, story 5).
+
+    **Under `/usage` on purpose**: this is the write half of a surface that
+    already reads, so it shares the read's prefix, its response shape and --
+    free, and the reason it matters -- its entry in both proxy allowlists
+    (`docker/nginx.conf` and `web/vite.config.js`). A new first segment would
+    have needed adding to both, and a path missing from them does not 404: it
+    answers 200 with the SPA shell, which is how P5-04's quota panel shipped
+    invisible.
+
+    **No tenant in the path**, like the read above: there is no tenant to name
+    but your own. `repo.set_tenant_caps` writes to `current_tenant_id()`, which
+    `require_auth` bound from the session, so "change another tenant's caps" is
+    not a request this surface can express rather than one it checks for.
+
+    Returns the same `UsageOut` the read returns, recomputed, so the panel can
+    render the result of the change without a second round trip -- and so the
+    caps an admin sees afterwards are the stored ones rather than the ones they
+    typed.
+
+    The audit row is written by `repo.set_tenant_caps` rather than here, which
+    is where it already was: that function is also reached from a console, and
+    auditing the function covers both callers. The actor comes from the request
+    scope (`tenancy.current_actor()`), so this route names the admin who
+    pressed it without passing anything.
+
+    One thing worth stating, because the function's own docstring argues the
+    other way. It says a route was declined because "a tenant that could raise
+    its own caps would not have caps", and that is true of a *platform* ceiling
+    -- which this is not. Story 5 makes quota change an intra-tenant
+    authorization question (admin yes, member no), and that is what this
+    implements. A ceiling the tenant cannot raise would be a second, separate
+    limit above this one, and nothing in P5 asks for one yet.
+    """
+    try:
+        provided = body.model_fields_set
+        caps = repo.set_tenant_caps(
+            session,
+            **{
+                name: getattr(body, name)
+                for name in ("max_concurrent_runs", "monthly_run_quota")
+                if name in provided
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    usage = repo.tenant_usage(session)
+    return UsageOut(
+        live_runs=usage.live_runs,
+        runs_this_month=usage.runs_this_month,
+        max_concurrent_runs=caps.max_concurrent_runs,
+        monthly_run_quota=caps.monthly_run_quota,
         at_concurrency_cap=quotas.at_concurrency_cap(caps, usage),
         at_monthly_quota=quotas.at_monthly_quota(caps, usage),
     )

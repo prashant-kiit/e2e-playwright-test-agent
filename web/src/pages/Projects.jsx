@@ -20,6 +20,11 @@ export default function Projects() {
   const [newProject, setNewProject] = useState("");
   const [error, setError] = useState("");
   const [usage, setUsage] = useState(null);
+  // Whether to offer the quota editor. Presentation only: the server's admin
+  // dependency is what enforces it, and a member who got to the route anyway
+  // is refused there (P5-13). Read here rather than threaded down from App,
+  // which discards the role, because this is the only page that wants it.
+  const [isAdmin, setIsAdmin] = useState(false);
 
   async function load() {
     const [p, t] = await Promise.all([api.listProjects(), api.listTargets()]);
@@ -30,6 +35,12 @@ export default function Projects() {
     // failed would be trading the thing the operator came for against a
     // nice-to-have. The enqueue enforces the caps either way.
     api.usage().then(setUsage).catch(() => setUsage(null));
+    // Quietly, for the same reason: not knowing the role hides a button, and
+    // hiding a button is not an error worth failing the page over.
+    api
+      .me()
+      .then((who) => setIsAdmin(who.role === "admin"))
+      .catch(() => setIsAdmin(false));
   }
   useEffect(() => {
     load().catch((e) => setError(String(e.message || e)));
@@ -71,7 +82,11 @@ export default function Projects() {
           </button>
         </form>
       </div>
-      <UsageMeter usage={usage} />
+      <UsageMeter
+        usage={usage}
+        canEdit={isAdmin}
+        onSave={api.setUsageCaps}
+      />
       {error && <div className="error">{error}</div>}
       {projects.length === 0 && <p className="muted">No projects yet. Create one above.</p>}
       {projects.map((p) => (

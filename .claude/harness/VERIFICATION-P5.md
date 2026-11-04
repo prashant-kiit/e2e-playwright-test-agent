@@ -1728,6 +1728,31 @@ documentation, and none of them is fixed.
     Separately, `repo.set_tenant_caps` has **no route and no role check**, so story 5's "only
     authorized users can … change quotas" is unenforced — `AdminDep` reaches `deliver`,
     `reset`, the `pat` writes and `/audit`, and nothing else.
+
+    **The quota half closed on 2026-11-04 (#45).** `PUT /usage/caps`, behind `AdminDep`:
+    under `/usage` on purpose, so it inherits the read's entry in both proxy allowlists
+    rather than needing a new first segment in each (a path missing from them answers 200
+    with the SPA shell, which is how P5-04's own panel shipped invisible). No tenant in the
+    path — `set_tenant_caps` writes to `current_tenant_id()`, so "change another tenant's
+    caps" is a request the surface cannot express rather than one it checks for, and a test
+    smuggles an id into the body to say so.
+    An omitted cap and an explicit `null` stay different requests, through
+    `model_fields_set` into the existing `UNSET` sentinel: collapsing them is how raising
+    one cap silently deletes the other, which already happened once at the function. The
+    portal gets the editor inline with the gauges, shown to an admin only — presentation,
+    with the 403 as the enforcement, and the panel renders the caps the **server** returned
+    rather than the ones that were typed.
+    Role gating is driven through *real* auth and real roles in `tests/test_auth.py` rather
+    than an overridden dependency, and the audit row is proven to name the acting admin
+    rather than `system` for the same reason. The commit is proven across two sessions.
+    **A conflict resolved rather than ignored**: `set_tenant_caps`'s docstring argued
+    against ever having this route — "a tenant that could raise its own caps would not have
+    caps". That is an argument about a *platform ceiling*, which these columns are not;
+    story 5 makes the quota an intra-tenant authorization question. The docstring now says
+    so, and says a real ceiling would be a second limit above this one that nothing in P5
+    asks for yet. **Worth deciding before there are paying customers.**
+    Story 5's remaining half is user administration (#46): there is still no way to make
+    the admin who would press this, other than SQL.
 50. **Story 6 fails open, not closed.** "a missing filter is a bug that fails closed rather
     than a leak". `tenancy.current_tenant_id()` returns `DEFAULT_TENANT_ID = 1` outside any
     scope, so an unscoped path — a route that forgets `require_auth`, or future background

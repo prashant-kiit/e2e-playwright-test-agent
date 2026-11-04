@@ -258,6 +258,52 @@ def test_an_admin_passes_the_gate(client):
     assert r.status_code == 404
 
 
+# --- the quota route is one of those actions (P5-13 / #45) ---------------
+#
+# Story 5 is "only authorized users can approve deliveries, rotate credentials
+# or change quotas". The first two were gated; the third had no route at all,
+# so the requirement was unenforced rather than enforced. These drive the gate
+# through **real** auth and real roles rather than an overridden dependency,
+# because what is being asserted is which role gets through.
+
+def test_a_member_is_refused_a_quota_change(client):
+    _add_user(client_session(client), email="member@example.com", password="pw")
+    client.post(
+        "/auth/login",
+        json={"tenant": SEED_TENANT_SLUG, "email": "member@example.com", "password": "pw"},
+    )
+
+    r = client.put("/usage/caps", json={"max_concurrent_runs": 99})
+
+    assert r.status_code == 403
+    assert "admin" in r.json()["detail"]
+
+
+def test_an_admin_changes_their_tenants_caps(client):
+    client.post(
+        "/auth/login",
+        json={
+            "tenant": SEED_TENANT_SLUG,
+            "email": SEED_ADMIN_EMAIL,
+            "password": SEED_ADMIN_PASSWORD,
+        },
+    )
+
+    r = client.put("/usage/caps", json={"max_concurrent_runs": 7, "monthly_run_quota": 50})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["max_concurrent_runs"] == 7
+    assert r.json()["monthly_run_quota"] == 50
+    # The read surface the panel already uses agrees, which is the only thing
+    # an operator will actually look at.
+    usage = client.get("/usage").json()
+    assert (usage["max_concurrent_runs"], usage["monthly_run_quota"]) == (7, 50)
+
+
+def test_an_unauthenticated_caller_is_refused_a_quota_change(client):
+    assert client.put("/usage/caps", json={"max_concurrent_runs": 1}).status_code == 401
+
+
 # --- the tenant slug is what disambiguates the email ---------------------
 
 def test_the_same_email_logs_into_the_tenant_its_slug_names(client):

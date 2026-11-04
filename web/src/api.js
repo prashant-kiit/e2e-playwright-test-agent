@@ -134,6 +134,15 @@ export const api = {
   // your own.
   usage: () => req("GET", "/usage"),
 
+  // The write half (P5-13). Tenant-admin only, enforced server-side; the
+  // portal hides the control for a member but the 403 is what decides.
+  //
+  // `caps` carries **only the caps being changed**: the route distinguishes an
+  // omitted key (leave it alone) from an explicit `null` (unmetered), so this
+  // must not helpfully fill in the ones the admin did not touch. Returns the
+  // same shape as `usage()`, recomputed, so the panel renders what was stored.
+  setUsageCaps: (caps) => req("PUT", "/usage/caps", caps),
+
   // runs
   listRuns: (targetId) =>
     req("GET", targetId ? `/runs?target_id=${targetId}` : "/runs"),

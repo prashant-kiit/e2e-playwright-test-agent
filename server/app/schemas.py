@@ -341,6 +341,28 @@ class DeliveryOut(BaseModel):
     detail: dict = {}
 
 
+class CapsBody(BaseModel):
+    """A quota change: the caps you name, and only those (P5-13 / #45).
+
+    **An omitted cap and an explicit `null` are different requests**, which is
+    the same distinction `repo.set_tenant_caps` takes an `UNSET` sentinel for:
+    `null` means *unmetered*, a real value an admin may choose on purpose,
+    while a cap left out of the body is left exactly as it was. Collapsing them
+    is how raising a concurrency cap silently deletes the monthly quota -- a
+    bug that was already found once at the function (its docstring says so),
+    and this is the surface that would have reintroduced it.
+
+    Pydantic keeps the two apart in `model_fields_set`, so the route reads
+    which keys arrived rather than comparing against a default. That is why
+    both fields are plainly optional here and the validation of the *values*
+    stays in `repo.set_tenant_caps`: one rule, one place, and a route that
+    duplicated "not negative" would be a second thing to get out of step.
+    """
+
+    max_concurrent_runs: int | None = None
+    monthly_run_quota: int | None = None
+
+
 class UsageOut(BaseModel):
     """What this tenant has spent against what its plan allows (P5-04).
 

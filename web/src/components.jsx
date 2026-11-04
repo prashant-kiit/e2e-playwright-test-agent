@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 // Small shared UI bits.
 
 export function StatusPill({ status }) {
@@ -42,15 +43,23 @@ export function LiveRunBanner({ detail }) {
 //
 // Shown where the runs are started, so an operator sees what is left *before*
 // pressing Start rather than discovering it in a 429.
-export function UsageMeter({ usage }) {
-  if (!usage) return null;
+export function UsageMeter({ usage, canEdit = false, onSave }) {
+  // The caps the server last told us about. Seeded from the prop and then
+  // owned here, because a save returns the stored values and those are what
+  // the gauges must show -- the panel is not entitled to render what was
+  // typed.
+  const [stored, setStored] = useState(usage);
+  const [editing, setEditing] = useState(false);
+  useEffect(() => setStored(usage), [usage]);
+  const shown = stored || usage;
+  if (!shown) return null;
   const gauges = [
     {
       key: "concurrency",
       label: "Running now",
-      used: usage.live_runs,
-      cap: usage.max_concurrent_runs,
-      full: usage.at_concurrency_cap,
+      used: shown.live_runs,
+      cap: shown.max_concurrent_runs,
+      full: shown.at_concurrency_cap,
       // The remedy differs per cap, which is the whole reason they are
       // separate: one clears itself, the other does not.
       note: "at your concurrent-run cap — wait for a run to finish, or stop one",
@@ -58,9 +67,9 @@ export function UsageMeter({ usage }) {
     {
       key: "monthly",
       label: "This month",
-      used: usage.runs_this_month,
-      cap: usage.monthly_run_quota,
-      full: usage.at_monthly_quota,
+      used: shown.runs_this_month,
+      cap: shown.monthly_run_quota,
+      full: shown.at_monthly_quota,
       note: "out of runs for this calendar month — the quota resets on the 1st",
     },
   ];
@@ -79,6 +88,107 @@ export function UsageMeter({ usage }) {
           {g.full && <span className="usage-note">{g.note}</span>}
         </div>
       ))}
+      {canEdit && !editing && (
+        <button className="btn ghost" onClick={() => setEditing(true)}>
+          Change caps
+        </button>
+      )}
+      {canEdit && editing && (
+        <CapsEditor
+          caps={shown}
+          onSave={onSave}
+          onDone={(saved) => {
+            if (saved) setStored(saved);
+            setEditing(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// The write half of the panel above (P5-13 / #45).
+//
+// Shown only to an admin, and that is presentation: the server's admin
+// dependency is what enforces story 5, and a member who reached the route
+// anyway is refused there. A hidden button is a tidier portal, not a
+// permission -- which is why a refusal is rendered rather than treated as
+// impossible.
+//
+// The editor's whole subtlety is in what it *sends*. Three states have to stay
+// distinguishable, because the route treats them as three different requests:
+//
+//   untouched   not sent at all -- the stored cap is left alone
+//   emptied     sent as `null` -- unmetered, a value an admin may choose
+//   a number    sent as that number
+//
+// Collapsing the first two is how raising one cap silently deletes the other,
+// which already happened once at `repo.set_tenant_caps` before it took an
+// `UNSET` sentinel. So the fields start from the stored values and only those
+// whose text actually changed are put in the body.
+function CapsEditor({ caps, onSave, onDone }) {
+  const fields = [
+    { name: "max_concurrent_runs", label: "Concurrent runs" },
+    { name: "monthly_run_quota", label: "Runs per month" },
+  ];
+  // `null` (unmetered) edits as an empty box, which is also how it is cleared.
+  const asText = (value) => (value == null ? "" : String(value));
+  const initial = Object.fromEntries(
+    fields.map((f) => [f.name, asText(caps[f.name])]),
+  );
+  const [text, setText] = useState(initial);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  function body() {
+    const out = {};
+    for (const f of fields) {
+      if (text[f.name] === initial[f.name]) continue; // untouched: not sent
+      out[f.name] = text[f.name].trim() === "" ? null : Number(text[f.name]);
+    }
+    return out;
+  }
+
+  async function save() {
+    const changes = body();
+    if (Object.keys(changes).length === 0) {
+      onDone(null); // nothing to say to the server
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      onDone(await onSave(changes));
+    } catch (e) {
+      // Left open, so a refused save does not also discard what was typed.
+      setError(String(e.message || e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="caps-editor">
+      {fields.map((f) => (
+        <label key={f.name} className="caps-field">
+          {f.label}
+          <input
+            type="number"
+            min="0"
+            value={text[f.name]}
+            placeholder="no cap"
+            onChange={(e) => setText({ ...text, [f.name]: e.target.value })}
+          />
+        </label>
+      ))}
+      <span className="muted">Empty means no cap.</span>
+      <button className="btn" disabled={saving} onClick={save}>
+        Save
+      </button>
+      <button className="btn ghost" disabled={saving} onClick={() => onDone(null)}>
+        Cancel
+      </button>
+      {error && <div className="banner banner-bad">{error}</div>}
     </div>
   );
 }

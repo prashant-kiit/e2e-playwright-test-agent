@@ -379,11 +379,19 @@ def set_tenant_caps(
     which the only caller this docstring names -- a console operator -- would
     have no reason to expect (found in review).
 
-    The write half of P5-04, and for now the *only* way a cap gets set: there
-    is still no tenant-admin surface (`VERIFICATION-P5.md` follow-up 6), so
-    this is reached from the tests and from a console rather than from a route.
-    Deliberately not exposed as an API endpoint by this ticket -- a tenant that
-    could raise its own caps would not have caps.
+    The write half of P5-04. **P5-13 gave it a route** (`PUT /usage/caps`,
+    tenant-admin only), so the callers are now that route, a console and the
+    tests; the audit row is written here rather than at the route precisely so
+    all three are covered by one place.
+
+    This docstring used to say the opposite -- "deliberately not exposed as an
+    API endpoint ... a tenant that could raise its own caps would not have
+    caps" -- and that argument is about a **platform ceiling**, which these
+    columns are not. #30's story 5 makes a quota change an intra-tenant
+    authorization question ("only authorized users can ... change quotas"), and
+    that is what the route enforces: admin yes, member no. A ceiling a tenant
+    could not raise would be a second limit above this one, and nothing in P5
+    asks for one yet. Worth knowing before adding paying customers.
     """
     tenant = session.get(Tenant, current_tenant_id())
     if tenant is None:  # pragma: no cover - a session always has its tenant
