@@ -1751,6 +1751,42 @@ documentation, and none of them is fixed.
     `server/app/`; `app/audit.py` and `app/models.py` each defer it in a comment naming this
     story, and no ticket of the seven covered it. Offboarding today is raw SQL plus an
     un-swept object-store prefix. **This is the largest missing piece of #30.**
+
+    **Its storage precondition landed on 2026-11-04 (#40 and #42).** The purge itself is
+    still unbuilt (#47), but the two things it could not have been written against are done:
+    `Storage` can delete a key and list a prefix with paging (#40, nothing calls either
+    yet), and **artifacts have moved under the tenant prefix** (#42), so "that tenant's
+    entire storage prefix" is now a true description rather than half of one.
+    Artifacts were keyed `<run_key>/<path>` and a run key carries no tenant, so they sat
+    outside the prefix blobs were already inside. That was never a leak — artifact rows
+    carry `tenant_id` and the read guard filters them, and the content route resolves the
+    row before touching the store — but it meant the purge had no single prefix to delete
+    and an operator could not answer "what does this tenant have in the bucket?" from the
+    bucket. `app/domain/store_keys.py` now owns the whole layout:
+    `tenant/<id>/blobs/<sha>` and `tenant/<id>/runs/<run_key>/<path>`, with the separator on
+    the prefix because `tenant/1` is a prefix of `tenant/11` and S3's `Prefix` is a byte
+    comparison.
+    Expand then contract, so a deploy breaks nothing: an artifact downloads by the `s3_key`
+    on its own row, so legacy objects resolve unchanged, and `python -m app.artifacts rekey`
+    moves them — per row, in the order copy → row → delete, which makes it both re-runnable
+    and safe to interrupt at either point. **Not an Alembic revision**, and the reason is
+    worth keeping: a revision can rewrite `artifacts.s3_key` but cannot move bytes, so it
+    would point every existing row at nothing and turn a cosmetic inconsistency into an
+    outage for every artifact in the system.
+    Two things found on the way, both now pinned by tests. The discriminator between a blob
+    key and an artifact key used to be "does it start with the run key?", which only worked
+    while the two shapes had nothing in common; it is now `blobs/` versus `runs/`, which is
+    a property of the layout rather than of the caller. And `rekey_all` first took
+    `session_factory=SessionLocal` as a **default argument** — bound at import, so the
+    test's monkeypatch did nothing and the pass connected to the *developer's* database and
+    read 25 artifact rows from a real October run. It wrote nothing only because the fake
+    store held none of those objects. `_no_dev_database`'s docstring claims every such
+    caller takes an injectable factory; it resolves `db.SessionLocal` at call time now, and
+    a test asserts the guard actually bites this module.
+    **Still not proven**: nothing has run `rekey` against a real object store. The paging in
+    #40 is driven through a botocore-shaped stub and the move through `FakeStorage`, so what
+    is unproven is SeaweedFS's behaviour, not the logic. UAT 3 (#54) is where offboarding
+    gets observed end to end.
 49. **Stories 1, 2 and 5 — no tenant or user administration.** `app/domain/audit.py` states
     there is no user-administration surface at all, which is why `Action` has no
     `USER_ADD`/`USER_REMOVE` and why #37 could not record two of the mutations its own spec

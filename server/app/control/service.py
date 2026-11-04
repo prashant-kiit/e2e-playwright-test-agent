@@ -100,6 +100,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import prompt_store, repo, revisions
+from ..domain import store_keys
 from ..domain.status import is_live
 from ..domain.steps import Step
 from ..models import Artifact, Run
@@ -346,36 +347,62 @@ def authorize_blob_key(scope: RunScope, key: str) -> None:
     from the same function that builds the keys so the two cannot disagree about
     the layout.
     """
-    prefix = revisions.blob_key(scope.tenant_id, "")
+    prefix = store_keys.blobs_prefix(scope.tenant_id)
     if not key.startswith(prefix) or "/" in key[len(prefix) :]:
         raise NotAuthorized(f"blob key {key!r} is not this tenant's to name")
 
 
 def authorize_artifact_key(scope: RunScope, run_key: str, key: str) -> None:
-    """Refuse an artifact key outside this run's own prefix.
+    """Refuse an artifact key that is not this run's.
 
-    Artifact keys are `<run_key>/<path>` (app/artifacts.py), so one run's
-    evidence is one prefix, and a run may read and write only its own. `..` is
-    refused rather than normalized: the key is about to be handed to an object
-    store that has no notion of a parent directory, so a key containing one is a
-    caller doing something it has not explained.
+    Artifact keys are `tenant/<id>/runs/<run_key>/<path>` since P5-10
+    (app/domain/store_keys.py), so one run's evidence is one prefix and a run
+    may read and write only its own.
+
+    **The legacy `<run_key>/<path>` shape is accepted on read-side paths and is
+    written nowhere**, which is the expand-then-contract half of #42: a
+    deployment's existing objects keep resolving until `python -m app.artifacts
+    rekey` has moved them. It is safe to accept because the run key is what
+    both shapes are authorized against -- the old shape carries no tenant, but
+    `run_key` here comes from the run row the token already authorized, so a
+    key naming another run is refused either way.
+
+    `..` is refused rather than normalized: the key is about to be handed to an
+    object store that has no notion of a parent directory, so a key containing
+    one is a caller doing something it has not explained. Checked **first**,
+    because `tenant/1/runs/<key>/../../2/...` would otherwise pass the prefix
+    test on its way to another tenant.
     """
-    if key != run_key and not key.startswith(f"{run_key}/"):
-        raise NotAuthorized(f"artifact key {key!r} is not this run's to name")
     if ".." in key.split("/"):
         raise NotAuthorized(f"artifact key {key!r} walks out of its own prefix")
+    current = store_keys.run_artifacts_prefix(scope.tenant_id, run_key)
+    if key.startswith(current):
+        return
+    # The legacy shape, and only for this run. `== run_key` is the run's own
+    # prefix, which this function has always accepted.
+    if key == run_key or key.startswith(f"{run_key}/"):
+        return
+    raise NotAuthorized(f"artifact key {key!r} is not this run's to name")
 
 
 def _is_artifact_key(run_key: str, key: str) -> bool:
-    """Whether `key` is in this run's artifact prefix rather than a blob key.
+    """Whether `key` is an artifact key rather than a blob key.
 
     One bucket holds both and a run reaches for both through the same `Storage`
-    protocol, so every operation has to decide which rule applies. Decided by
-    the run's own prefix rather than by the blob prefix, because `run_key` is
-    exact: a key under it is this run's artifact and a key that is not is a blob
-    key to be judged as one.
+    protocol, so every operation has to decide which rule applies. Since P5-10
+    the two share the tenant prefix, so the discriminator is the segment after
+    it -- `blobs/` versus `runs/` -- which `store_keys.is_blob_key` owns.
+
+    It used to be "does this start with the run key?", which worked only while
+    the two shapes had nothing in common. The new question is better anyway: it
+    is a property of the layout rather than of the caller's identity, so a key
+    belonging to *another* run is now classified as an artifact key and refused
+    by `authorize_artifact_key` -- where before it fell through to the blob rule
+    and was refused for the wrong reason.
     """
-    return key == run_key or key.startswith(f"{run_key}/")
+    if store_keys.is_blob_key(key):
+        return False
+    return store_keys.artifact_run_key(key) is not None
 
 
 def blob_exists(session: Session, scope: RunScope, store: Storage, key: str) -> bool:

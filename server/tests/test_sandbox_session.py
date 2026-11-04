@@ -43,6 +43,7 @@ from app.models import Artifact
 from app.orchestrator.bus import InMemoryLogBus
 from app.orchestrator.fake import FakeRunner
 from app.sandbox import session as agent_session
+from app.tenancy import DEFAULT_TENANT_ID
 from tests.control_helpers import control_for
 from tests.delivery_helpers import make_worktree
 from tests.storage_helpers import FakeStorage
@@ -129,7 +130,9 @@ def test_the_agent_session_is_archived_at_run_end(
 
     artifacts = _session_artifacts(session_factory, run_id)
     assert len(artifacts) == 1
-    assert artifacts[0].s3_key == f"{run_key}/{agent_session.ARCHIVE_NAME}"
+    assert artifacts[0].s3_key == agent_session.archive_key(
+        DEFAULT_TENANT_ID, run_key
+    )
     assert artifacts[0].kind == "session"
     assert store.objects[artifacts[0].s3_key][0], "the archive has bytes"
 
@@ -146,7 +149,7 @@ def test_the_session_is_archived_at_every_step_boundary(
     pause costs is the exploration of the step it interrupted and no more.
     """
     run_id, run_key, _target_id, store = run_env
-    key = f"{run_key}/{agent_session.ARCHIVE_NAME}"
+    key = agent_session.archive_key(DEFAULT_TENANT_ID, run_key)
     seen: list[tuple[Step, bool]] = []
 
     class ExploresAndLooks(FakeRunner):
@@ -170,7 +173,9 @@ def test_the_archive_holds_what_the_cli_keeps(run_env, session_factory, config_d
     _drive(session_factory, run_id, store)
 
     archive = tmp_path / "out.tgz"
-    archive.write_bytes(store.objects[f"{run_key}/{agent_session.ARCHIVE_NAME}"][0])
+    archive.write_bytes(
+        store.objects[agent_session.archive_key(DEFAULT_TENANT_ID, run_key)][0]
+    )
     with tarfile.open(archive) as tar:
         names = tar.getnames()
     assert any(name.endswith("projects/qa/session.json") for name in names), names
@@ -379,7 +384,7 @@ def test_an_unchanged_session_archives_to_the_same_bytes_a_second_later(
     """
     run_id, run_key, _target_id, store = run_env
     control = control_for(run_id, session_factory, store)
-    key = agent_session.archive_key(run_key)
+    key = agent_session.archive_key(DEFAULT_TENANT_ID, run_key)
 
     control.begin_run()
     agent_session.save(control, run_key, store, emit=lambda line: None)
@@ -400,7 +405,7 @@ def test_a_changed_session_still_archives_to_different_bytes(
     a session the agent wrote into is a new version."""
     run_id, run_key, _target_id, store = run_env
     control = control_for(run_id, session_factory, store)
-    key = agent_session.archive_key(run_key)
+    key = agent_session.archive_key(DEFAULT_TENANT_ID, run_key)
 
     control.begin_run()
     agent_session.save(control, run_key, store, emit=lambda line: None)

@@ -249,7 +249,8 @@ queued → hydrating → running → paused(live) → reaped → resuming → ru
   > What a paused run must not lose is the **agent session**, and that is now explicit
   > rather than incidental: `--resume` worked only because the CLI's session store
   > happened to sit on the host that started the run. The session directory is archived
-  > as a run artifact under a reserved name (`<run_key>/agent-session.tar.gz`) **at every
+  > as a run artifact under a reserved name (`tenant/<id>/runs/<run_key>/agent-session.tar.gz`,
+  > re-keyed by P5-10 so a tenant's whole storage is one prefix) **at every
   > step boundary** and at the end of every run, and restored into the next container
   > before the CLI is invoked. At the boundary and not only on the way out, because a
   > sandbox killed outright archives nothing: the boundary is the last moment the session

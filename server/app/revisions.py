@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from .control.model import HeadRevision, RevisionFile
 from .delivery.render import tracked_tree
+from .domain import store_keys
 from .models import FileIndex, Revision, Target
 from .storage import Storage
 from .tenancy import current_tenant_id
@@ -48,11 +49,14 @@ BLOB_CONTENT_TYPE = "application/octet-stream"
 def blob_key(tenant_id: int, sha256: str) -> str:
     """`tenant/<tenant_id>/blobs/<sha256>` (DESIGN.md §9).
 
-    Content addressing is scoped per tenant deliberately: cross-tenant dedup is
-    worth nothing (different customers' tests do not collide) and would make
-    blob existence a side channel.
+    Delegated to `app/domain/store_keys.py` since P5-10, which owns the whole
+    layout of the bucket -- blobs and artifacts now share the tenant prefix, so
+    "what does this tenant have in the store?" has to be answerable in one
+    place. Kept as a name here because it is what ingest and the read route
+    already call, and moving every caller would be churn in a ticket about
+    key shapes.
     """
-    return f"tenant/{tenant_id}/blobs/{sha256}"
+    return store_keys.blob_key(tenant_id, sha256)
 
 
 def sha256_from_blob_key(key: str) -> str:

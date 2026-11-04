@@ -13,7 +13,8 @@ pause destroys the container at once (app/api.py) and a killed sandbox archives
 nothing: the boundary is the last moment the session is known good, so a pause
 costs the exploration of the step it interrupted and no more.
 
-    <run_key>/agent-session.tar.gz        kind "session", versioned per run
+    tenant/<id>/runs/<run_key>/agent-session.tar.gz
+                                          kind "session", versioned per run
 
 A run artifact rather than a new store: the artifacts table already keys blobs
 by run, already streams them back through the API, and is already garbage
@@ -50,6 +51,7 @@ import tempfile
 from pathlib import Path
 
 from ..control.gateway import RunGateway
+from ..domain import store_keys
 from ..orchestrator.runner import Emit
 from ..storage import Storage
 
@@ -69,8 +71,15 @@ def config_dir() -> Path | None:
     return Path(raw) if raw else None
 
 
-def archive_key(run_key: str) -> str:
-    return f"{run_key}/{ARCHIVE_NAME}"
+def archive_key(tenant_id: int, run_key: str) -> str:
+    """Under the tenant prefix, like every other artifact (P5-10 / #42).
+
+    Takes the tenant because the session archive *is* a run artifact -- its own
+    reserved name, but the same key space and the same authorization -- so it
+    had to move with the rest or it would be the one object left outside the
+    prefix story 32's purge enumerates.
+    """
+    return store_keys.artifact_key(tenant_id, run_key, ARCHIVE_NAME)
 
 
 def save(
@@ -86,7 +95,7 @@ def save(
     if source is None or not source.is_dir() or not any(source.iterdir()):
         return False
 
-    key = archive_key(run_key)
+    key = archive_key(control.scope.tenant_id, run_key)
     try:
         with tempfile.TemporaryDirectory(prefix="qa-session-") as tmp:
             # Built outside the run directory on purpose: anything in there is
@@ -121,7 +130,7 @@ def restore(
     dest = config_dir()
     if dest is None:
         return False
-    key = archive_key(run_key)
+    key = archive_key(control.scope.tenant_id, run_key)
     if not any(row.key == key for row in control.artifacts()):
         return False
 
