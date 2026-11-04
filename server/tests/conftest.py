@@ -24,7 +24,7 @@ from sqlalchemy.orm import sessionmaker
 
 import app.models  # noqa: F401  (register the ORM tables on Base.metadata)
 from app.db import Base, database_url
-from app.tenancy import DEFAULT_TENANT_ID
+from app.tenancy import DEFAULT_TENANT_ID, tenant_scope
 
 TEST_DB = "qa_test"
 SERVER_DIR = Path(__file__).resolve().parents[1]
@@ -85,6 +85,40 @@ def pg_engine():
     engine = create_engine(test_url, future=True)
     yield engine
     engine.dispose()
+
+
+# The marker a test uses to say it acts outside any tenant scope. Registered
+# in pyproject.toml's `markers`, so a typo is an error rather than a test that
+# quietly runs scoped after all.
+UNSCOPED_MARKER = "unscoped_tenant"
+
+
+@pytest.fixture(autouse=True)
+def _tenant_scope(request):
+    """Every test acts as an explicit tenant, in one place rather than sixty-five.
+
+    The resolver used to answer `DEFAULT_TENANT_ID` outside any scope, and the
+    suite leaned on that: a test wrote tenant 1's rows because nothing had said
+    otherwise. That coupling is what stops the resolver from being made strict
+    -- with the fallback gone, every unscoped test would fail for a reason that
+    has nothing to do with what it tests, and P5-11 would become an edit to
+    every test file instead of an edit to `tenancy.py`.
+
+    So the harness says it: each test runs inside `tenant_scope(
+    DEFAULT_TENANT_ID)`, which is the same tenant the fallback used to supply.
+    Behaviour is unchanged today, and tomorrow an unscoped call is a bug the
+    suite catches rather than a behaviour it depends on.
+
+    A test that deliberately exercises unscoped or cross-tenant resolution opts
+    out with `@pytest.mark.unscoped_tenant`, which is explicit at the test and
+    greppable -- the opt-out has to be visible, or "every test is scoped" stops
+    being true without anything saying so.
+    """
+    if request.node.get_closest_marker(UNSCOPED_MARKER) is not None:
+        yield
+        return
+    with tenant_scope(DEFAULT_TENANT_ID):
+        yield
 
 
 @pytest.fixture(autouse=True)

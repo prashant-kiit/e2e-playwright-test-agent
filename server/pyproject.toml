@@ -43,6 +43,11 @@ markers = [
     # daemon into a failure there, the way QA_REQUIRE_DB does for Postgres --
     # and the marker is for running or excluding them deliberately in local work.
     "docker: really starts containers (needs a Docker daemon)",
+    # The opt-out from the harness's autouse tenant scope (tests/conftest.py's
+    # `_tenant_scope`). Registered here so a misspelled marker is an error
+    # rather than a test that quietly runs scoped after all -- the opt-out is
+    # only meaningful if it cannot be gotten wrong silently.
+    "unscoped_tenant: acts outside any tenant scope, on purpose",
 ]
 
 [tool.ruff]

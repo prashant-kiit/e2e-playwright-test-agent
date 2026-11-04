@@ -54,12 +54,20 @@ def test_no_table_keeps_the_backfill_server_default():
             )
 
 
+@pytest.mark.unscoped_tenant
 def test_current_tenant_id_is_the_single_seeded_tenant():
     """Outside any request/run scope it is the seeded default -- which is what
-    keeps the thread/CI path and every pure-domain test writing tenant 1."""
+    keeps the thread/CI path and every pure-domain test writing tenant 1.
+
+    Opted out of the harness's autouse scope (P5-09): the claim *is* what the
+    resolver answers with nothing bound, so a test of it cannot run inside a
+    binding. Without the marker this would pass by reading the harness's own
+    tenant and assert nothing about the fallback at all.
+    """
     assert current_tenant_id() == DEFAULT_TENANT_ID == 1
 
 
+@pytest.mark.unscoped_tenant
 def test_current_tenant_id_resolves_from_an_active_scope():
     """P5's replacement: inside a scope (a request's authenticated user, or a
     run on the thread path) the resolver answers that tenant, not the constant.
@@ -71,6 +79,7 @@ def test_current_tenant_id_resolves_from_an_active_scope():
     assert current_tenant_id() == DEFAULT_TENANT_ID
 
 
+@pytest.mark.unscoped_tenant
 def test_tenant_scopes_nest_and_restore():
     with tenant_scope(7):
         assert current_tenant_id() == 7
@@ -97,6 +106,7 @@ def test_the_migration_seeds_the_single_operator_as_a_tenant_admin(session):
     assert admin.credential != "admin"
 
 
+@pytest.mark.unscoped_tenant
 def test_the_background_path_binds_the_runs_tenant_from_its_token(session):
     """The background equivalent of `require_auth`, as P5-05 left it.
 
