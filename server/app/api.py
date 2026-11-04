@@ -57,6 +57,7 @@ from .schemas import (
     ProjectCreate,
     ProjectOut,
     PromptOut,
+    PromptRevisionOut,
     PromptSave,
     ResetBody,
     RevisionOut,
@@ -207,6 +208,39 @@ def get_delivery_tools() -> delivery.Tools:
 @router.get("/prompts", response_model=list[PromptOut])
 def list_prompts(session: Session = Depends(get_session)):
     return apphub.read_prompts(session)
+
+
+@router.get(
+    "/prompts/{name:path}/history", response_model=list[PromptRevisionOut]
+)
+def prompt_history(name: str, session: Session = Depends(get_session)):
+    """Every revision of one prompt, oldest first (#39).
+
+    The read half of #30's story 24: P5-06 made the rows append-only and
+    recorded which revision a run used, and left "so that I can see what
+    changed and when" with no surface at all -- the data was there and nothing
+    could reach it.
+
+    **Declared before `PUT /prompts/{name:path}`** and sharing its path
+    converter. `:path` is greedy because a prompt's name carries slashes
+    (`steps/2-plan.md`), and the literal `/history` suffix is what keeps this
+    unambiguous: the name is everything before it.
+
+    A name the package never shipped is a 404, the same answer the `PUT`
+    gives. An empty list would be a worse answer than a 404 here, because it
+    reads as "this prompt has never been edited" -- a true-sounding statement
+    about a prompt that does not exist.
+
+    No new proxy entry: `/prompts` is already in `docker/nginx.conf` and
+    `web/vite.config.js`, both of which match on the first path segment, so
+    this sub-path is forwarded by the entries that already exist. Checked
+    rather than assumed, because P5-04 shipped a panel that was invisible in
+    the real app for exactly this reason while 84 frontend tests passed.
+    """
+    try:
+        return apphub.read_prompt_history(session, name)
+    except prompt_store.PromptNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"no such prompt: {name}") from exc
 
 
 @router.put("/prompts/{name:path}", response_model=PromptOut)

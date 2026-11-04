@@ -184,6 +184,25 @@ class PromptSave(BaseModel):
     content: str
 
 
+class PromptRevisionOut(BaseModel):
+    """One historical revision of a prompt, for `GET /prompts/{name}/history`.
+
+    `content` rather than `body`, to match `PromptOut` and the page that reads
+    it -- the wire name for a prompt's text has been `content` since P3 and
+    this is not the surface to change it on.
+
+    `created_at` is **nullable**, and not because a row might lack one: a
+    tenant who has never overridden a prompt has no row at all, and their one
+    entry is the shipped default, which became theirs at no particular moment
+    (see `prompt_store.PromptRevision`).
+    """
+
+    name: str
+    content: str
+    rev: int
+    created_at: datetime | None
+
+
 class AuditEntryOut(BaseModel):
     """One row of the audit trail, for `GET /audit` (P5-07).
 

@@ -77,6 +77,14 @@ export class ApiError extends Error {
 }
 export class AuthError extends Error {}
 
+// A prompt's name carries a slash ("steps/2-plan.md") and the routes take it
+// as a path parameter, so the slash must survive: each segment is encoded
+// rather than the whole name. One function because three callers had the same
+// `split/map/join` inline and a fourth would have copied it too.
+function promptPath(name) {
+  return `/prompts/${name.split("/").map(encodeURIComponent).join("/")}`;
+}
+
 export const api = {
   // auth
   me: () => req("GET", "/auth/me"),
@@ -156,14 +164,12 @@ export const api = {
 
   // prompts + settings
   getPrompts: () => req("GET", "/prompts"),
-  // A prompt's name carries a slash ("steps/2-plan.md"), and the route takes
-  // it as a path parameter, so the slash must survive: encode each segment
-  // rather than the whole name.
   savePrompt: (name, content) =>
-    req(
-      "PUT",
-      `/prompts/${name.split("/").map(encodeURIComponent).join("/")}`,
-      { content },
-    ),
+    req("PUT", promptPath(name), { content }),
+  // Every revision of one prompt, oldest first (#39). Fetched when a customer
+  // opens the history rather than with the prompt list: a body is the largest
+  // column in this schema and a page of prompts would otherwise pull every
+  // superseded version of all of them on load.
+  getPromptHistory: (name) => req("GET", `${promptPath(name)}/history`),
   getSettings: () => req("GET", "/settings"),
 };

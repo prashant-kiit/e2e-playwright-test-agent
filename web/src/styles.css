@@ -139,6 +139,18 @@ input:focus, select:focus { border-color: var(--accent); }
    look so what you edit reads like what the agent is sent. */
 .prompt-edit { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
 .prompt-body { width: 100%; box-sizing: border-box; resize: vertical; white-space: pre; overflow-wrap: normal; overflow-x: auto; }
+/* A prompt's revision history (#39). The versioning was already there and had
+   no surface: "see what changed and when" is a diff question, so a revision
+   shows one rather than a body a customer has to compare by eye. */
+.prompt-history { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--border); padding-top: 10px; }
+.prompt-revision-head { width: 100%; display: flex; justify-content: space-between; align-items: center; gap: 12px; background: none; border: 1px solid var(--border); color: var(--text); padding: 7px 11px; border-radius: 8px; cursor: pointer; font: inherit; font-size: 13px; }
+.prompt-revision-body, .prompt-diff { margin: 6px 0 2px; max-height: 320px; overflow: auto; white-space: pre; }
+/* Colour carries the same information as the +/- prefix the markers already
+   print, never on its own: the prefix is what a screen reader and a
+   colour-blind reader get, and it is in the text rather than in CSS. */
+.diff-added { color: var(--green); }
+.diff-removed { color: var(--red); }
+.diff-same { color: var(--muted); }
 .form-grid { display: flex; flex-direction: column; gap: 14px; max-width: 520px; }
 .form-grid textarea { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 9px 11px; font: inherit; resize: vertical; }
 .checkbox { display: flex; align-items: center; gap: 8px; color: var(--muted); }

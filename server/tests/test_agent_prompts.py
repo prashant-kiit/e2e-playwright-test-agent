@@ -498,3 +498,89 @@ def test_a_run_started_concurrently_with_another_still_seeds_once(session_factor
     with session_factory() as s:
         rows = s.scalar(select(func.count()).select_from(Prompt))
         assert rows == len(prompt_store.shipped_defaults()), "seeded twice"
+
+
+# --- the history read surface (#39) ---------------------------------------
+#
+# P5-06 built the versioning and the run recording; the "see what changed and
+# when" half of #30's story 24 had no surface. `history` existed, was called by
+# nothing outside these tests, and dropped `created_at` on the floor -- so even
+# a caller that wanted a timestamp could not get one through the type.
+
+
+def test_a_revision_carries_when_it_was_saved(session):
+    """The missing half of "what changed **and when**".
+
+    `PromptRevision` rather than a widened `ResolvedPrompt`: only one of the
+    two is ever sent to an agent, and a resolved prompt carrying a timestamp
+    nothing renders invites a caller to pass a historical revision where the
+    runner expects the live one.
+    """
+    prompt_store.save_override(session, "qa_system_prompt.md", "mine\n")
+
+    history = prompt_store.history(session, "qa_system_prompt.md")
+
+    assert [r.rev for r in history] == [prompt_store.SEED_REV, 2]
+    assert all(r.created_at is not None for r in history)
+    # Oldest first, and time agrees with the revision order -- the two are
+    # independent facts about the row and a page sorted by one while labelled
+    # by the other would be quietly wrong.
+    assert history[0].created_at <= history[1].created_at
+
+
+def test_a_prompt_with_no_overrides_reports_its_seeded_default(session):
+    """#39's fourth acceptance criterion, and the one with a trap in it.
+
+    A tenant that has never overridden this prompt has no rows at all, so the
+    obvious implementation answers an empty tuple -- a page that says "no
+    history" about a prompt that demonstrably has a current body. It reports
+    the shipped default instead, the same bytes `current_all` shows, **without
+    writing a row**: this is a GET's read path, and seeding here would make a
+    page load a write with no transaction to commit it (the bug `read_prompts`
+    exists to avoid).
+    """
+    before = session.query(Prompt).count()
+
+    history = prompt_store.history(session, "steps/3-explore.md")
+
+    assert [r.rev for r in history] == [prompt_store.SEED_REV]
+    assert history[0].body == prompt_store.shipped_defaults()["steps/3-explore.md"]
+    assert session.query(Prompt).count() == before, "a read seeded a row"
+
+
+def test_an_unseeded_default_has_no_timestamp_rather_than_a_pretended_one(session):
+    """It is not a row yet, so there is no "when" to report.
+
+    `None` rather than "now": a shipped default's timestamp would otherwise
+    change on every page load, and the one question this surface exists to
+    answer is when something changed. The portal renders it as the release
+    rather than a date.
+    """
+    history = prompt_store.history(session, "steps/3-explore.md")
+
+    assert history[0].created_at is None
+
+
+def test_an_unknown_prompt_name_is_not_found(session):
+    """The same answer `resolve` gives, for the same reason: the name is wrong
+    and the client can fix it. An empty history would read as "this prompt has
+    never been edited", which is a different and wrong statement."""
+    with pytest.raises(prompt_store.PromptNotFound):
+        prompt_store.history(session, "steps/no-such-prompt.md")
+
+
+def test_one_tenants_history_is_invisible_to_another(session):
+    """#39's third acceptance criterion. Inherited from `TenantOwned`, asserted
+    because "inherited" is exactly the kind of claim that stops being true."""
+    session.add(Tenant(id=78, slug="third", name="Third"))
+    session.commit()
+
+    with tenant_scope(DEFAULT_TENANT_ID):
+        prompt_store.save_override(session, "qa_system_prompt.md", "tenant one\n")
+
+    with tenant_scope(78):
+        theirs = prompt_store.history(session, "qa_system_prompt.md")
+
+    # The other tenant sees the shipped default and nothing of the override.
+    assert [r.rev for r in theirs] == [prompt_store.SEED_REV]
+    assert all("tenant one" not in r.body for r in theirs)

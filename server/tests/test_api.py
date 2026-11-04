@@ -383,3 +383,53 @@ def test_overriding_a_prompt_that_does_not_exist_is_a_404_not_a_new_prompt(clien
     nothing will ever send."""
     r = client.put("/prompts/steps/99-invented.md", json={"content": "hi\n"})
     assert r.status_code == 404
+
+
+# --- a prompt's history: the read surface (#39) ----------------------------
+
+def test_a_prompts_history_is_readable_with_a_body_rev_and_timestamp(client):
+    """#39's first acceptance criterion, over HTTP.
+
+    `GET /prompts/{name:path}/history` -- the shape `PUT /prompts/{name:path}`
+    suggested, and a sub-path of a prefix both proxy lists already carry, so
+    the surface the P5-04 lesson is about needs no new entry in either.
+    """
+    client.put("/prompts/steps/2-plan.md", json={"content": "first edit\n"})
+    client.put("/prompts/steps/2-plan.md", json={"content": "second edit\n"})
+
+    r = client.get("/prompts/steps/2-plan.md/history")
+
+    assert r.status_code == 200
+    revisions = r.json()
+    assert [v["rev"] for v in revisions] == [1, 2, 3]
+    assert [v["content"] for v in revisions[1:]] == ["first edit\n", "second edit\n"]
+    assert all(v["name"] == "steps/2-plan.md" for v in revisions)
+    # Every one of these was a real row, so every one has a time.
+    assert all(v["created_at"] for v in revisions)
+
+
+def test_the_history_of_an_untouched_prompt_is_its_default(client):
+    """#39's fourth criterion: not an empty list. A page told "no history"
+    about a prompt whose body it is displaying is a page that looks broken."""
+    r = client.get("/prompts/steps/3-explore.md/history")
+
+    assert r.status_code == 200
+    revisions = r.json()
+    assert len(revisions) == 1
+    assert revisions[0]["rev"] == 1
+    assert revisions[0]["content"]
+    # Not yet a row, so there is no "when" -- see `PromptRevision`.
+    assert revisions[0]["created_at"] is None
+
+
+def test_the_history_of_a_prompt_that_does_not_exist_is_a_404(client):
+    r = client.get("/prompts/steps/99-invented.md/history")
+
+    assert r.status_code == 404
+
+
+def test_the_history_route_does_not_shadow_the_prompt_list(client):
+    """`{name:path}` is greedy, so the two GETs on this prefix have to stay
+    distinguishable: `/prompts` must still be the list."""
+    assert isinstance(client.get("/prompts").json(), list)
+    assert "rev" in client.get("/prompts").json()[0]

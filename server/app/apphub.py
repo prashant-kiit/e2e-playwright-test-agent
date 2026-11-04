@@ -49,6 +49,31 @@ def read_prompts(session: Session) -> list[dict]:
     ]
 
 
+def read_prompt_history(session: Session, name: str) -> list[dict]:
+    """Every revision of one prompt, oldest first, for the portal (#39).
+
+    The counterpart of `read_prompts`: that answers "what is this prompt now",
+    this answers "what has it been, and when did it change" -- the half of
+    #30's story 24 that P5-06 recorded without ever showing.
+
+    **Writes nothing**, for the reason `read_prompts` has a paragraph about: a
+    tenant with no rows still gets their inherited default back, reported
+    rather than seeded, because a GET has no transaction of its own to commit
+    a row with.
+
+    `prompt_store.PromptNotFound` propagates; the route maps it to a 404.
+    """
+    return [
+        {
+            "name": revision.name,
+            "content": revision.body,
+            "rev": revision.rev,
+            "created_at": revision.created_at,
+        }
+        for revision in prompt_store.history(session, name)
+    ]
+
+
 def save_prompt(session: Session, name: str, content: str) -> dict:
     """Record this tenant's new version of one prompt.
 

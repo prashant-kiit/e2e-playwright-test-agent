@@ -58,6 +58,7 @@ for five phases to avoid.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.exc import IntegrityError
@@ -107,6 +108,33 @@ class ResolvedPrompt:
     name: str
     body: str
     rev: int
+
+
+@dataclass(frozen=True)
+class PromptRevision:
+    """One *historical* version of a prompt: what it said, and when it was saved.
+
+    A separate type from `ResolvedPrompt` rather than three extra fields on it
+    (#39 left the choice open). They are different things: a `ResolvedPrompt`
+    is what an agent is about to be sent, and a `PromptRevision` is a record of
+    something a tenant did. Widening the first would put a timestamp nothing
+    renders on the type the runner consumes, and -- the reason that matters --
+    would let a historical revision be passed wherever the live prompt is
+    expected, which is how a run comes to be given revision 2 of a prompt it
+    recorded as revision 5.
+
+    `created_at` is **`None` for a shipped default that is not yet a row**. A
+    tenant who has never overridden a prompt still has a history of one entry
+    -- the bytes they inherited -- and there is no moment at which those bytes
+    became theirs. Reporting "now" would be a timestamp that changed on every
+    page load, in the one surface whose entire job is to say when things
+    changed.
+    """
+
+    name: str
+    body: str
+    rev: int
+    created_at: datetime | None
 
 
 def shipped_defaults() -> dict[str, str]:
@@ -303,13 +331,42 @@ def save_override(session: Session, name: str, body: str) -> ResolvedPrompt:
     return ResolvedPrompt(name=row.name, body=row.body, rev=row.rev)
 
 
-def history(session: Session, name: str) -> tuple[ResolvedPrompt, ...]:
-    """Every version of one prompt for the current tenant, oldest first."""
+def history(session: Session, name: str) -> tuple[PromptRevision, ...]:
+    """Every version of one prompt for the current tenant, oldest first.
+
+    The read surface behind `GET /prompts/{name}/history` (#39), and the answer
+    to the half of #30's story 24 -- "so that I can see what changed and when"
+    -- that P5-06 recorded without exposing.
+
+    **Reads only, and never empty for a prompt that exists.** A tenant who has
+    never overridden this prompt has no rows, and answering `()` would tell a
+    page there is no history for a prompt whose current body it is displaying.
+    So the shipped default is reported at `SEED_REV`, exactly as `current_all`
+    does and for the same reason -- and, as there, *without* seeding it: this
+    is a GET's path, and a read that wrote would have no transaction of its own
+    to commit (see `read_prompts`).
+
+    An unknown name raises `PromptNotFound`, like `resolve`. An empty tuple
+    would read as "never edited", which is a different claim and a wrong one.
+    """
     rows = session.scalars(
         select(Prompt).where(Prompt.name == name).order_by(Prompt.rev)
     ).all()
-    return tuple(
-        ResolvedPrompt(name=r.name, body=r.body, rev=r.rev) for r in rows
+    if rows:
+        return tuple(
+            PromptRevision(
+                name=r.name, body=r.body, rev=r.rev, created_at=r.created_at
+            )
+            for r in rows
+        )
+
+    shipped = shipped_defaults()
+    if name not in shipped:
+        raise PromptNotFound(name)
+    return (
+        PromptRevision(
+            name=name, body=shipped[name], rev=SEED_REV, created_at=None
+        ),
     )
 
 
