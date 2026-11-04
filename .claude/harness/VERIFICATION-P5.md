@@ -1217,7 +1217,10 @@ impression.
 ## Follow-ups
 
 The reason this file exists. Items 1–8 are consequences of what shipped; 9–13 are scope and
-hygiene.
+hygiene; 14–47 were added by the slices after the first, each under the heading of the slice
+that introduced it. **Items 48–52 are different in kind**: they are not consequences of a
+slice but requirements of #30 that no slice implemented, found by the two-axis review at the
+end of the phase. They are what #30 is waiting on in code, as opposed to in evidence.
 
 ### Introduced by the expiring session
 
@@ -1677,6 +1680,64 @@ hygiene.
     which is append-only-friendly, and #39 named it as the obvious next ask once history is
     visible. Deliberately out of scope; the `GET` does not make a sibling `POST` awkward.
 
+### Found by the two-axis review of #30 (2026-11-04)
+
+The review ran both axes against `c99cbef...HEAD`. Its documentation findings are fixed in
+the same pass that wrote this section — `DESIGN.md` §6 still described a sandbox holding
+`DATABASE_URL` and the `S3_*` credentials that P5-05 removed, §15 left three shipped rows
+unmarked, and three docstrings plus `app/delivery/__init__.py` cited functions and an
+environment variable that no longer exist. The items below are what it found that is **not**
+documentation, and none of them is fixed.
+
+48. **Story 32 — tenant purge — does not exist.** "deleting a tenant to purge that tenant's
+    entire storage prefix and rows". There is no `purge` or `delete_tenant` anywhere in
+    `server/app/`; `app/audit.py` and `app/models.py` each defer it in a comment naming this
+    story, and no ticket of the seven covered it. Offboarding today is raw SQL plus an
+    un-swept object-store prefix. **This is the largest missing piece of #30.**
+49. **Stories 1, 2 and 5 — no tenant or user administration.** `app/domain/audit.py` states
+    there is no user-administration surface at all, which is why `Action` has no
+    `USER_ADD`/`USER_REMOVE` and why #37 could not record two of the mutations its own spec
+    lists; `app/domain/quotas.py` states there is no `create_tenant` in the application.
+    Separately, `repo.set_tenant_caps` has **no route and no role check**, so story 5's "only
+    authorized users can … change quotas" is unenforced — `AdminDep` reaches `deliver`,
+    `reset`, the `pat` writes and `/audit`, and nothing else.
+50. **Story 6 fails open, not closed.** "a missing filter is a bug that fails closed rather
+    than a leak". `tenancy.current_tenant_id()` returns `DEFAULT_TENANT_ID = 1` outside any
+    scope, so an unscoped path — a route that forgets `require_auth`, or future background
+    work — reads and writes **tenant 1's** rows rather than failing. Relatedly
+    `install_read_guard` filters `SELECT` only, as its own docstring says: ORM `UPDATE`/
+    `DELETE` and raw SQL are unguarded, so fail-closed does not hold on the write side
+    either. Changing the resolver to raise will surface every unscoped call site at once and
+    should be its own slice, with `reaper` already known to need the bypass.
+51. **Story 22's token outlives its sandbox across a pause.** `control.service.authorized_run`
+    treats `paused` as live, so a token copied before a pause stays valid though the sandbox
+    it was minted for has been destroyed. Recorded as a trade-off in item 33; it is also a
+    deviation from "rejected after the run ends" and belongs in the same list as that story.
+52. **The HTTP control-plane seam is never exercised by the real pipeline.** #30 says "The
+    run-scoped API is consumed by both the thread and docker paths so the suite exercises
+    it." `control.factory.local_for_run` hands the thread path `LocalGateway`, which calls
+    the service in process, so `app/internal_api.py` and `app/control/http.py` are covered
+    by their own tests and by the container checks in §P5-05 — but no suite run drives the
+    HTTP seam through `drive_run`.
+53. **`test_a_resume_that_changes_nothing_does_not_manufacture_a_version` is flaky, and it
+    fails in the liveness gate.** Observed on 2026-11-04: one full-suite run failed it with
+    `RunNotLive: run 1 is completed; its token no longer authorizes anything` from
+    `control.service.authorized_run`, and two further full-suite runs — one of them on an
+    otherwise identical tree — passed. Test ordering is deterministic here (`addopts = "-q"`,
+    no randomizer), so order is not the variable. The mechanism is visible in the test:
+    `_PausesAfter` requests the pause *after* `Step.PLAN` returns, and unlike its sibling
+    `test_a_resumed_run_gets_its_session_back_before_the_first_step` — which asserts
+    `status is RunStatus.PAUSED` before resuming — this test resumes without checking. When
+    the pause does not take, the run runs to `completed`, `resume_run` does not restore it,
+    and the next `_drive` is refused by the liveness gate several calls later. So the
+    assertion that fires is unrelated to the thing that broke.
+    Two separate pieces of work: **assert `PAUSED` before `resume_run`**, which costs one
+    line and makes the failure name its own cause; and then find why a requested pause is
+    sometimes not honoured, which is the part that might be a real defect in the pause path
+    rather than in the test. Worth noting that item 51 is about the same gate reading run
+    status, and that this flake was found by a full-suite run rather than by the targeted
+    run — the test passes in isolation every time.
+
 ---
 
 ## Closing
@@ -1732,9 +1793,16 @@ real; the key is in the wrong place until that variable is set.
 
 **P5 is open.** Six of seven tickets are implemented in the tree (#31–#37 less #30's parent
 role), all six are now closed on the tracker, and #39 — a read surface #36 deliberately left
-out — is in with them. What keeps the phase open is not missing code: it is that **#36 still
-has no verification section**, that #37 and #39 have been seen only by their suites, and that
-the follow-up list below has grown rather than shrunk.
+out — is in with them. What keeps the phase open is partly evidence and **partly missing
+code**, and the earlier version of this paragraph claimed only the first. The evidence half:
+**#36 still has no verification section**, #37 and #39 have been seen only by their suites,
+and the follow-up list below has grown rather than shrunk. The code half, found by the
+two-axis review of #30 recorded in items 48–52: **story 32's tenant purge does not exist at
+all**, stories 1 and 2 have no tenant- or user-administration path, and story 6's
+fail-closed guarantee does not hold — `current_tenant_id()` answers the seeded default
+outside a scope, which fails *open onto tenant 1* rather than closed. Those are not
+deferrals this record had written down; they were simply absent, and #30 cannot close over
+them.
 
 Two things changed in the closing paragraph above rather than in the list. The largest hole
 this phase left was **not in the code** — `QA_SECRET_KEY` protecting every stored PAT as well

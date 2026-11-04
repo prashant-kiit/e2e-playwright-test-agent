@@ -180,8 +180,10 @@ def across_tenants(statement):
     1. **Login.** `repo.get_user_for_login` runs before a current tenant
        exists -- deciding which tenant is acting is its job. It is scoped by
        the slug the caller typed instead.
-    2. **Resolving a run's own tenant.** `launcher._run_tenant_scope` reads the
-       run row in order to *open* the scope, so it cannot already be inside it.
+    2. **Resolving a reaped run's tenant.** `reaper._tenant_of` reads the run
+       row in order to *open* the scope, so it cannot already be inside it.
+       (This reason used to name `launcher._run_tenant_scope`; P5-05 deleted
+       that function, because the run-scoped token now carries the tenant.)
     3. **The background sweeps.** The reaper and the log prune run on a timer
        with no request and no run behind them, so `current_tenant_id()` would
        answer the seeded default and they would quietly maintain tenant 1

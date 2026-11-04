@@ -126,8 +126,9 @@ def acting_as(scope: RunScope) -> Iterator[None]:
     of tenancy at once -- the enforced read filter is what refuses another
     tenant's run, and every row the run writes (its revisions, its step rows,
     its log lines) is attributed to its own tenant rather than the resolver's
-    default. `launcher._run_tenant_scope` is the same seam for the thread path's
-    own composition, and this is the one for the control plane it talks to.
+    default. It is the only such seam on the run path: the thread path's
+    `launcher._run_tenant_scope` did this job until P5-05, and both paths now
+    bind their tenant here, from the scope the run-scoped token carries.
     """
     with tenant_scope(scope.tenant_id):
         yield

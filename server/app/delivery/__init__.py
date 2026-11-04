@@ -11,8 +11,11 @@ that execute a run legitimately need this package's *tracked-tree* definition --
 `write_infra` for hydrate's render step, `tracked_tree` for ingest,
 `resolve_story` for the agent's prompt. Importing `app.delivery.render` imports
 this file, and an eager re-export of `default_tools` here would pull
-`app.delivery.github`, the one module that reads `GITHUB_PAT`, into the import
-graph of every sandbox.
+`app.delivery.github`, the module that performs the authenticated push, into the
+import graph of every sandbox. (It read `GITHUB_PAT` from the environment when
+this rule was written; P5-03 retired that source, and the module now reads no
+credential from anywhere -- it is handed a target's decrypted token. The import
+still does not belong in a sandbox, which is why the laziness stays.)
 
 **`app.delivery.credentials` is not in the table at all** (P5-03), and that
 is one step further than lazy. Lazy keeps a module out of the sandbox's import

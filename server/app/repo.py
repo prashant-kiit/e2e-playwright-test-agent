@@ -671,13 +671,16 @@ def get_run(session: Session, run_id: int) -> Run:
 
 
 def get_run_across_tenants(session: Session, run_id: int) -> Run:
-    """One run by id, **without** the tenant filter. Two callers, both correct.
+    """One run by id, **without** the tenant filter. One caller, and it is correct.
 
-    `launcher._run_tenant_scope` reads a run in order to open its tenant scope,
-    so it cannot already be inside one; `reaper`'s sweeps run on a timer with
-    no tenant acting and must see every tenant's runs or they would maintain
-    tenant 1 alone. Both are in the allowlist in
-    tests/test_tenant_isolation_repo.py.
+    `reaper._tenant_of` resolves a reaped run's tenant before destroying its
+    sandbox: the sweeps run on a timer with no tenant acting, and must see
+    every tenant's runs or they would maintain tenant 1 alone. It is in the
+    allowlist in tests/test_tenant_isolation_repo.py.
+
+    It had a second caller, `launcher._run_tenant_scope`, until P5-05 removed
+    the need for it -- the run-scoped token carries the tenant now, so nothing
+    on the launcher path reads a row in order to discover whose it is.
 
     It is deliberately *not* a flag on `get_run`: an `across_tenants=False`
     parameter would make the unscoped read reachable from every existing call

@@ -332,19 +332,22 @@ read, and a run against one target structurally cannot reach another's host. The
 runtime's telemetry and error reporting are **disabled by environment rather than
 allowlisted**, so the list stays the length of what a run genuinely needs.
 
-*The allowlist includes the internal stores, and that is a decision with a successor.*
-Postgres and the object store are reachable from the sandbox network by name, because
-hydrate reads the head revision and ingest commits N+1 — those **are** the run. So a
-sandbox holds `DATABASE_URL` and the `S3_*` credentials, and that is **accepted exposure
-for this phase, deliberately**. The credential rule above is specifically about GitHub,
-for a stated reason: delivery is human-approved and happens in the control plane, so the
-push need not happen where the agent is — and after P4 it cannot, because no sandbox
-environment, image or compose service carries a GitHub credential and no module reachable
-from the sandbox entrypoint can read one (both enforced by structural tests). The store
-credentials have no such argument available to them; what they have is a successor.
-**P5 replaces them with a narrow, run-scoped internal control-plane API**, where the token
-that authorizes one run's target is the same mechanism that authorizes one tenant's data.
-Bundling that into P4 would have been building P5's tenant scoping early and worse.
+*The allowlist no longer includes the internal stores — P5-05 removed them.*
+Through P4, Postgres and the object store were reachable from the sandbox network by name,
+because hydrate reads the head revision and ingest commits N+1 — those **are** the run.
+A sandbox therefore held `DATABASE_URL` and the `S3_*` credentials, and that was accepted
+exposure for that phase, deliberately. The credential rule above is specifically about
+GitHub, for a stated reason: delivery is human-approved and happens in the control plane,
+so the push need not happen where the agent is — and after P4 it cannot, because no
+sandbox environment, image or compose service carries a GitHub credential and no module
+reachable from the sandbox entrypoint can read one (both enforced by structural tests).
+The store credentials had no such argument available to them; what they had was a
+successor, and **P5-05 built it**. A sandbox now carries neither `DATABASE_URL` nor any
+`S3_*` variable, and the stores are off its network entirely; in their place it holds a
+short-lived, run-scoped bearer token and reaches the control plane through the narrow
+internal API (`app/control/`, `app/internal_api.py`), where the token that authorizes one
+run's target is the same mechanism that authorizes one tenant's data. Bundling that into
+P4 would have been building P5's tenant scoping early and worse.
 
 ### Quotas and timeouts
 
@@ -737,11 +740,11 @@ does not have to reconstruct which were considered.
 | ~~**Per-tenant concurrency caps and monthly run quotas**~~ | ~~P5~~ | **Done (P5-04).** Enforced in `repo.start_run` above the `AppLock` trio, as a typed 429 rejection that writes no run row; `NULL` means unmetered. See §6 |
 | **The run queue and batch runs** | not scheduled | A second run on a busy target is refused with a 409, not queued. The queue is a scheduler *above* the lock trio, and §5 says to leave that trio alone |
 | **A K8s or Fargate scheduler** | when there is a cluster | The dispatch seam exists for them; Docker is the one implementation P4 ships, and the dev stack's socket mount is what the seam exists to replace (§6) |
-| **The run-scoped internal control-plane API** | P5 | It would remove `DATABASE_URL` and the `S3_*` credentials from a sandbox. It is the same mechanism as P5's tenant-scoped reads, and building it earlier would have meant building that worse (§6) |
+| ~~**The run-scoped internal control-plane API**~~ | ~~P5~~ | **Done (P5-05).** `DATABASE_URL` and the `S3_*` credentials are gone from a sandbox and the stores are off its network; a run-scoped bearer token and the narrow internal API (`app/control/`, `app/internal_api.py`) replace them. It is the same mechanism as P5's tenant-scoped reads, which is why building it earlier would have meant building that worse (§6) |
 | ~~**KMS envelope encryption of PATs**~~ | ~~P5~~ | **Done (P5-03).** See §8 |
-| **Prompts in Postgres with tenant overrides** | P5 | Done in P5-06 (§12) |
+| ~~**Prompts in Postgres with tenant overrides**~~ | ~~P5~~ | **Done (P5-06).** A `prompts` table seeded from the code-shipped defaults, overridable per tenant and versioned, with a run recording the revisions it used; the read surface followed in #39 (§12) |
 | **A GitHub App replacing PATs** | not scheduled | §8 names it the better long-term answer; PATs were chosen for launch and remain the credential after P5-03. The envelope, the scope check and the fail-loud path are all independent of which kind of credential it is |
-| **`audit_log`** | P5 | Delivery approvals are the thing it exists to record, and the approving actor is a per-tenant user (§10) |
+| ~~**`audit_log`**~~ | ~~P5~~ | **Done (P5-07).** Append-only, enforced by a trigger, recording delivery approval, PAT save/rotate, infra re-sync, target reset, prompt save and quota change, with a tenant-scoped `GET /audit`. Delivery approvals are the thing it exists to record, and the approving actor is a per-tenant user (§10). **User add/remove is not recorded because no user-administration code path exists** — see #30 stories 2 and 27 |
 
 ### What P5 inherits
 
