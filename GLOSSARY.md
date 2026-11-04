@@ -121,6 +121,14 @@ with it. Holds no store credential, no GitHub credential, and no route out
 except an allowlist built from its target.
 _Avoid_: Container, runner, executor, VM
 
+**Sandbox attempt**:
+Which sandbox of a run is the current one. A run may go through several -- a
+pause destroys one and a resume creates the next -- so the run-scoped token
+names the attempt it was minted for, and a destroyed sandbox's token
+authorizes nothing. Not a **Run**, which this glossary already calls "one
+attempt at one user story", and not a step's retry count.
+_Avoid_: Attempt (bare), generation, epoch, incarnation
+
 **Target lock**:
 The guarantee that one target has at most one live run. Held as a lease, so a
 run whose sandbox died loses it by expiry rather than holding it forever. A

@@ -367,7 +367,12 @@ def test_the_run_facts_carry_the_pinned_prompt_bodies(session):
 
     run = repo.start_run(session, target_id=target.id, story_id="SCRUM-1", mode="full")
     repo.begin_run(session, run.id)
-    scope = RunScope(run_id=run.id, target_id=target.id, tenant_id=run.tenant_id)
+    scope = RunScope(
+        run_id=run.id,
+        target_id=target.id,
+        tenant_id=run.tenant_id,
+        sandbox_attempt=run.sandbox_attempt,
+    )
 
     facts = service.run_facts(session, scope)
 

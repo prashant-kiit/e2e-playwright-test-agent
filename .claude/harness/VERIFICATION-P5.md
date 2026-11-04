@@ -666,13 +666,34 @@ test suite had its own copy of the service's borrow-don't-close shim.
   transports and `test_internal_api.py` drives the routes directly. What no in-process test
   can cover is what the Docker test is for — and two of the three bugs above were found
   there, which is the honest measure of that gap's size.
-- **A paused run's token stays valid.** `is_live` includes `PAUSED`, deliberately: it is the
+- **A paused run's token stays valid.** ~~`is_live` includes `PAUSED`, deliberately: it is the
   definition the whole repository already uses (`repo.live_run_holding` turns on it) and a
   second definition of "live" would be a second thing that can be wrong. Pause destroys the
   container at once and a resume mints a new token, so the token of a paused run belongs to a
   sandbox that no longer exists — but a copy taken before the pause works until the run ends
   or the signature expires. Closing that needs a token table, which is the cost `app/auth.py`
-  already declined to pay for sessions, for the same reason.
+  already declined to pay for sessions, for the same reason.~~
+  **Closed on 2026-11-04 by #48 (P5-16), and without a token table.** The trade-off was
+  stated as a choice between "one definition of live" and "a token that dies with its
+  sandbox", and it was a false one: the gate is not asking whether the run is over, it is
+  asking whether the sandbox the token was minted for is still the one doing the work.
+  `is_live` still answers the first question and still includes `PAUSED` everywhere — the
+  lock trio and the reaper are untouched — and a fourth field on the scope answers the
+  second. `runs.attempt` is a generation counter; `repo.pause_run` moves it on; the token
+  names the attempt it was minted for; `authorized_run` compares the two. One integer on a
+  row that was already being read on every call.
+  Two things about the shape are worth keeping, because the first attempt at it was wrong.
+  **The increment belongs at the pause, not at the resume**: the window being closed *is*
+  the pause, and a run may stay paused for an hour or for ever. And **refusing a paused run
+  outright does not work**: a resumed sandbox calls `run_facts` before `begin_run` has moved
+  the row out of `PAUSED`, so that reading refuses the resume itself — which the suite said
+  immediately, in three files. The counter has no such ordering to get wrong.
+  One consequence, deliberate and documented where it happens:
+  `launcher._persist_session` no longer archives the session on the way out of a pause,
+  because the token it would write with has just been retired. The save at **every step
+  boundary** is what covers it, and that save exists for this exact reason — a pause gives
+  no warning — so what a pause now costs is still the exploration of the step it
+  interrupted and no more.
 - **The run-scoped token is not revocable.** Expiry is the backstop and liveness is the gate;
   between them there is no way to cut a specific token short while its run continues.
 - **No real agent run.** The container test uses `QA_RUNNER=fake`, so what is proven is the
@@ -1713,6 +1734,21 @@ documentation, and none of them is fixed.
     treats `paused` as live, so a token copied before a pause stays valid though the sandbox
     it was minted for has been destroyed. Recorded as a trade-off in item 33; it is also a
     deviation from "rejected after the run ends" and belongs in the same list as that story.
+
+    **Closed on 2026-11-04 (#48).** `runs.attempt`, carried by the token and moved on by
+    `repo.pause_run`; see the struck-through trade-off in §P5-05 for the shape and for the
+    two things the first attempt got wrong. Proven at the service
+    (`tests/test_control_service.py`: refused during the pause, still refused after the
+    resume, and the resumed attempt's own token works) and over HTTP
+    (`tests/test_internal_api.py`: 403 on the pre-pause token, 200 on the freshly minted
+    one, which is the transport a container actually uses). The four gate exemptions are
+    unchanged and are asserted to be: a sandbox torn down at a pause still flushes its last
+    log lines and still records what it spent.
+    **What is not proven here**: a resume end to end *in a container*. Both dispatch paths
+    mint through the one function (`control.factory.mint_for_run`, which reads the row), and
+    the HTTP transport is covered above, but the Docker-backed resume is still a
+    `QA_REQUIRE_DOCKER=1` check rather than something the default suite runs. UAT 2 (#53) is
+    where that is meant to be observed.
 52. **The HTTP control-plane seam is never exercised by the real pipeline.** #30 says "The
     run-scoped API is consumed by both the thread and docker paths so the suite exercises
     it." `control.factory.local_for_run` hands the thread path `LocalGateway`, which calls

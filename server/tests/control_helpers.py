@@ -19,6 +19,7 @@ tests/test_internal_api.py drives the routes directly.
 
 from __future__ import annotations
 
+from app import repo
 from app.control import factory, service
 from app.control.local import LocalGateway
 from app.storage import Storage
@@ -77,3 +78,26 @@ def control_for_session(
     wrong one does.
     """
     return control_for(run_id, BorrowedSessionFactory(session), store, monkeypatch)
+
+
+def resumed_control_for(
+    run_id: int, session_factory, store: Storage, monkeypatch=None
+) -> LocalGateway:
+    """The gateway a **resumed** run's sandbox carries.
+
+    The same mint as `control_for`, named separately because carrying the
+    pre-pause gateway across a resume is exactly what #48 made impossible: a
+    run-scoped token names the attempt it was minted for, and `repo.pause_run`
+    moves that on, so the token of the sandbox a pause destroyed authorizes
+    nothing afterwards -- during the pause or after the resume.
+
+    Nothing in production can get this wrong: the resume route mints after
+    `repo.resume_run` has committed (app/api.py), and the Docker scheduler
+    mints per container. A test holding one `control` fixture across a pause
+    can, and several did -- which is the useful half of the mistake, because a
+    test that can keep driving a run with the destroyed sandbox's credential is
+    a test asserting the behaviour the ticket set out to remove.
+    """
+    with session_factory() as session:
+        repo.resume_run(session, run_id)
+    return control_for(run_id, session_factory, store, monkeypatch)

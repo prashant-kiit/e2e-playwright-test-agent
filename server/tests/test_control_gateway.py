@@ -49,7 +49,10 @@ def world(session_factory, tmp_path, monkeypatch):
         )
         run = repo.start_run(s, target_id=target.id, story_id="SCRUM-1", mode="full")
         scope = RunScope(
-            run_id=run.id, target_id=target.id, tenant_id=run.tenant_id
+            run_id=run.id,
+            target_id=target.id,
+            tenant_id=run.tenant_id,
+            sandbox_attempt=run.sandbox_attempt,
         )
         return {
             "scope": scope,

@@ -102,7 +102,7 @@ def run_token(monkeypatch):
     from app import run_token as tokens
 
     monkeypatch.setenv("QA_SECRET_KEY", "the-suite-signing-key")
-    return tokens.mint(tokens.RunScope(run_id=7, target_id=3, tenant_id=42))
+    return tokens.mint(tokens.RunScope(run_id=7, target_id=3, tenant_id=42, sandbox_attempt=1))
 
 
 @pytest.fixture()

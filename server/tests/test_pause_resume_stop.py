@@ -16,7 +16,7 @@ from app.domain.steps import Step
 from app.models import AppLock
 from app.orchestrator.driver import run_pipeline
 from app.orchestrator.fake import FakeRunner
-from tests.control_helpers import control_for
+from tests.control_helpers import control_for, resumed_control_for
 from tests.storage_helpers import FakeStorage
 from tests.target_helpers import create_target
 
@@ -32,13 +32,20 @@ def run_env(session_factory, tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def control(run_env, session_factory, monkeypatch):
+def store():
+    """Named rather than inline, because a resumed attempt mints a second
+    gateway (#48) and the two must reach the same store."""
+    return FakeStorage()
+
+
+@pytest.fixture()
+def control(run_env, session_factory, store, monkeypatch):
     """The run's gateway: what the driver takes instead of a session factory.
 
     A `LocalGateway` carrying a real run-scoped token, so these tests drive the
     same authorization the container path goes through (tests/control_helpers.py).
     """
-    return control_for(run_env[0], session_factory, FakeStorage(), monkeypatch)
+    return control_for(run_env[0], session_factory, store, monkeypatch)
 
 
 class _HookRunner:
@@ -82,7 +89,9 @@ def test_pause_halts_after_current_step_and_keeps_lock(run_env, session_factory,
     }
 
 
-def test_resume_continues_from_checkpoint_to_completion(run_env, session_factory, control):
+def test_resume_continues_from_checkpoint_to_completion(
+    run_env, session_factory, control, store, monkeypatch
+):
     run_id, run_key, runs_dir, target_id = run_env
 
     def pause_hook(step):
@@ -95,9 +104,10 @@ def test_resume_continues_from_checkpoint_to_completion(run_env, session_factory
         assert repo.get_run(s, run_id).status is RunStatus.PAUSED
 
     # Resume: clear flags, re-run; it should begin at EXPLORE and finish.
-    with session_factory() as s:
-        repo.resume_run(s, run_id)
-    run_pipeline(control, run_id, FakeRunner())
+    # Through a *freshly minted* gateway, because the resumed run is a new
+    # sandbox and the paused one's token no longer authorizes anything (#48).
+    resumed = resumed_control_for(run_id, session_factory, store, monkeypatch)
+    run_pipeline(resumed, run_id, FakeRunner())
 
     with session_factory() as s:
         run = repo.get_run(s, run_id)

@@ -27,15 +27,39 @@ What it checks, and why each one is load-bearing:
   is the backstop; this is the gate. A token for a finished run is worthless the
   moment the run finishes, however long its signature has left.
 
-A **paused** run is still live here, and that is deliberate: `is_live` is the
-definition the whole repository already uses (app/domain/status.py, and
-`repo.live_run_holding` turns on it), and a second definition of "live" would be
-a second thing that can be wrong. The practical consequence is small and worth
-naming: pause destroys the container at once, so the token of a paused run
-belongs to a sandbox that no longer exists, and a resume mints a new one. A copy
-taken before the pause stays valid until the run ends or the signature expires.
-Closing that would need a token table, which is the cost app/auth.py already
-declined to pay for sessions, for the same reason.
+A **paused** run is still live here, and `is_live` is still the whole of the
+status gate: it is the definition the whole repository uses
+(app/domain/status.py, and `repo.live_run_holding` turns on it), and a second
+definition of "live" would be a second thing that can be wrong. That was once
+the end of the paragraph, and it left a hole (#48, story 22): a token copied
+before a pause kept authorizing that run's config, blobs, revisions and
+uploads for as long as the pause lasted, which is unbounded, while the sandbox
+it was minted for had been destroyed at the instant of the pause.
+
+What closes it is the **sandbox attempt**, a fourth field on the scope and a
+counter on the run. The gate is not asking "is this run over?" -- `is_live` answers that
+-- but "is the sandbox this token was minted for still the one doing the
+work?". `repo.pause_run` moves the counter on, so:
+
+    during the pause     the old token names attempt N, the run is on N+1
+    after the resume     still N+1, so the old token does not come back to
+                         life along with the run -- which is the half a status
+                         check cannot do, because a resumed run is RUNNING
+                         again and looks exactly like the one that was paused
+
+It is deliberately **not** done by refusing a paused run, though that was the
+first thing tried: a resumed sandbox calls `run_facts` *before* `begin_run`
+has moved the row out of PAUSED, so refusing a paused run refuses the resume
+itself. The counter has no such ordering to get wrong.
+
+A token table would have closed this too, and is still the cost app/auth.py
+declines to pay for sessions. This is one integer on a row that is already
+read on every call.
+
+The four exempt operations below are unaffected, and that is load-bearing
+rather than incidental: a sandbox being torn down at a pause still flushes its
+last log lines and still records what it spent, and the exemptions are what let
+it. See `scoped_run`.
 
 **Nothing here trusts a key it is handed**, and the three blob operations are
 authorized *differently* because they leak differently. A blob key is a content
@@ -207,6 +231,12 @@ def authorized_run(session: Session, scope: RunScope) -> Run:
         raise RunNotLive(
             f"run {scope.run_id} is {run.status.value}; its token no longer "
             f"authorizes anything"
+        )
+    if run.sandbox_attempt != scope.sandbox_attempt:
+        raise RunNotLive(
+            f"run {scope.run_id} is on attempt {run.sandbox_attempt}; this token was "
+            f"minted for attempt {scope.sandbox_attempt} and no longer authorizes "
+            f"anything"
         )
     return run
 

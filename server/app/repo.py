@@ -888,10 +888,26 @@ def request_stop(session: Session, run_id: int) -> Run:
 def pause_run(session: Session, run_id: int) -> Run:
     """Driver-side: transition RUNNING -> PAUSED at a boundary. The app lock is
     kept (the run still owns the app) but the lease is cleared, and the reaper
-    skips PAUSED runs, so a deliberate pause is never mistaken for a crash."""
+    skips PAUSED runs, so a deliberate pause is never mistaken for a crash.
+
+    **The attempt moves on here**, which is what kills the token of the sandbox
+    this pause destroys (#48, story 22). This is the one transition both paths
+    go through -- the pause route calls it for a container it has just killed,
+    the driver calls it at a boundary on the thread path -- so it is the one
+    place that knows a sandbox's life has ended while its run's has not. The
+    run-scoped token names the attempt it was minted for
+    (app/control/service.py), so from here on the old sandbox's copy
+    authorizes nothing, for the length of the pause and after the resume
+    alike; the resumed attempt is minted into the new number.
+
+    Which is also why the increment is here rather than in `resume_run`: the
+    window the ticket is about is the *pause*, and a run may stay paused for
+    an hour or for ever.
+    """
     run = get_run(session, run_id)
     assert_transition(run.status, RunStatus.PAUSED)
     run.status = RunStatus.PAUSED
+    run.sandbox_attempt += 1
     run.pause_requested = False
     run.lease_expires_at = None
     run.current_step = None
@@ -911,7 +927,15 @@ def stop_run(session: Session, run_id: int) -> Run:
 
 def resume_run(session: Session, run_id: int) -> Run:
     """Clear a paused run's flags so a fresh orchestrator can re-begin it.
-    The actual PAUSED -> RUNNING transition happens in begin_run."""
+    The actual PAUSED -> RUNNING transition happens in begin_run.
+
+    **The attempt is not touched here**, and that is the subtle half of #48: it
+    was already moved on by `pause_run`, so by the time anything resumes, the
+    destroyed sandbox's token is dead and the fresh one is minted into the
+    attempt that is now current. Bumping it here instead would leave the old
+    token authorizing the whole length of the pause -- which is the window the
+    ticket is about -- and a resume can be an hour later or never.
+    """
     run = get_run(session, run_id)
     if run.status is not RunStatus.PAUSED:
         raise RepoError(f"run {run_id} is {run.status.value}, not paused; cannot resume")

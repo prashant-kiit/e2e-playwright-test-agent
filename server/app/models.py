@@ -305,6 +305,19 @@ class Run(TenantOwned, Base):
     last_completed_step: Mapped[Step | None] = mapped_column(_enum_col(Step), nullable=True)
     pause_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     stop_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Which sandbox of this run is the current one -- a generation counter,
+    # moved on by `repo.pause_run`. A run-scoped token names the attempt it was
+    # minted for (app/run_token.py), so the token of the sandbox a pause
+    # destroyed authorizes nothing afterwards, rather than staying valid for
+    # the length of the pause (#48, story 22).
+    #
+    # `sandbox_attempt` rather than `attempt`, because this table already has
+    # two other claims on that word: GLOSSARY.md defines a **Run** as "one
+    # attempt at one user story", and `RunStep.attempt` below is how many times
+    # one step has been tried. This is neither -- it counts sandboxes.
+    sandbox_attempt: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

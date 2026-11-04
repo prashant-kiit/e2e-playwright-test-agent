@@ -27,7 +27,7 @@ from app.domain.steps import Step
 from app.models import AppLock
 from app.orchestrator.driver import run_pipeline
 from app.orchestrator.fake import FakeRunner
-from tests.control_helpers import control_for
+from tests.control_helpers import control_for, resumed_control_for
 from tests.delivery_helpers import make_worktree
 from tests.storage_helpers import FakeStorage
 from tests.target_helpers import create_target
@@ -298,7 +298,7 @@ def test_teardown_removes_the_worktree_on_pause(
 
 
 def test_a_resumed_run_re_hydrates_from_the_head_and_continues(
-    run_env, session_factory, control, tmp_path
+    run_env, session_factory, control, tmp_path, monkeypatch
 ):
     """Mid-step work is lost, which is invariant 4 rather than a regression."""
     run_id, run_key, _target_id, store = run_env
@@ -314,8 +314,9 @@ def test_a_resumed_run_re_hydrates_from_the_head_and_continues(
     _run(control, run_key, PausesAfterPlan())
     assert _status(session_factory, run_id) is RunStatus.PAUSED
 
-    with session_factory() as s:
-        repo.resume_run(s, run_id)
+    # A fresh gateway for the resumed attempt: the sandbox the pause destroyed
+    # took its authority with it (#48).
+    resumed = resumed_control_for(run_id, session_factory, store, monkeypatch)
     resumed_steps: list[Step] = []
     rehydrated: list[bool] = []
 
@@ -325,7 +326,7 @@ def test_a_resumed_run_re_hydrates_from_the_head_and_continues(
             rehydrated.append((ctx.worktree / "seed.spec.ts").is_file())
             return super().run_step(ctx, emit)
 
-    _run(control, run_key, RecordingRunner())
+    _run(resumed, run_key, RecordingRunner())
 
     assert resumed_steps == [Step.EXPLORE, Step.GENERATE, Step.HEAL]
     assert all(rehydrated), "the worktree was rebuilt from the head revision"

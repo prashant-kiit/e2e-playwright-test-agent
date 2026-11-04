@@ -49,7 +49,7 @@ from .artifacts import ArtifactCollector
 from .control import factory
 from .control.gateway import GatewayStorage, RunGateway
 from .control.model import TrackedBlob
-from .domain.status import RunStatus, is_live
+from .domain.status import RunStatus
 from .domain.steps import Step
 from .orchestrator.bus import LogBus, bus_from_env
 from .orchestrator.claude import ClaudeRunner
@@ -340,13 +340,22 @@ def _persist_session(control: RunGateway, run_key: str, emit: Emit) -> None:
     Never allowed to fail the run: the tree is the carrier of the work, and the
     session is the context for continuing it.
 
-    **Skipped once the run is no longer live**, and that is not a workaround for
-    the token's liveness gate but the same judgement the gate encodes: a
-    completed, stopped or failed run cannot be resumed, so there is nothing for
-    an archive of its session to be *for*. The save that matters is the one at
-    each step boundary and the one on the way out of a pause, and a paused run is
-    live. Checked rather than attempted-and-swallowed so that a run ending
-    normally does not log a failure every time.
+    **Skipped unless the run is still RUNNING**, and that is not a workaround
+    for the token's authorization gate but the same judgement the gate encodes.
+    Two readings of "not running", with the same answer:
+
+    - *completed, stopped or failed*: a terminal run cannot be resumed, so
+      there is nothing for an archive of its session to be **for**.
+    - *paused*: the sandbox this archive would come from has been destroyed,
+      and `repo.pause_run` has already retired the token it would be written
+      with (#48). The save that matters on this path is the one at **each step
+      boundary**, which exists precisely because a pause gives no warning --
+      so by here the session is already in the store as of the last boundary,
+      and the only thing a second attempt could add is the exploration of the
+      step the pause interrupted, which the pause cost by definition.
+
+    Checked rather than attempted-and-swallowed so that a run ending normally
+    does not log a failure every time.
 
     **Through `run_status`, which is exempt from the token's liveness gate.**
     The obvious read, `run_state()`, is not: it goes through `authorized_run`
@@ -357,7 +366,7 @@ def _persist_session(control: RunGateway, run_key: str, emit: Emit) -> None:
     this one: a read of one field, made after the run has ended.
     """
     try:
-        if not is_live(RunStatus(control.run_status())):
+        if RunStatus(control.run_status()) is not RunStatus.RUNNING:
             return
         agent_session.save(control, run_key, GatewayStorage(control), emit=emit)
     except Exception:  # pragma: no cover - never lose a run over its session

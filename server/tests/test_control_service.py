@@ -69,7 +69,10 @@ def world(session, tmp_path):
                 "run_id": run.id,
                 "run_key": run.run_key,
                 "scope": RunScope(
-                    run_id=run.id, target_id=target.id, tenant_id=tenant_id
+                    run_id=run.id,
+                    target_id=target.id,
+                    tenant_id=tenant_id,
+                    sandbox_attempt=run.sandbox_attempt,
                 ),
             }
     return built, store
@@ -108,6 +111,7 @@ def test_a_scope_whose_run_belongs_to_another_target_is_refused(session, world):
         run_id=demo["run_id"],
         target_id=sibling.id,
         tenant_id=demo["tenant_id"],
+        sandbox_attempt=demo["scope"].sandbox_attempt,
     )
     with service.acting_as(inconsistent), pytest.raises(service.NotAuthorized):
         service.run_facts(session, inconsistent)
@@ -121,6 +125,7 @@ def test_a_token_for_one_tenant_cannot_act_on_another_tenants_run(session, world
         run_id=other["run_id"],
         target_id=other["target_id"],
         tenant_id=demo["tenant_id"],
+        sandbox_attempt=other["scope"].sandbox_attempt,
     )
     with service.acting_as(stolen), pytest.raises(service.NotAuthorized):
         service.run_facts(session, stolen)
@@ -146,6 +151,91 @@ def test_a_token_is_refused_once_its_run_is_no_longer_live(session, world, finis
 
     with service.acting_as(demo["scope"]), pytest.raises(service.RunNotLive):
         service.run_facts(session, demo["scope"])
+
+
+# --- a pause ends the token's authority, because it ends the sandbox -----
+#
+# Story 22 is "rejected after the run ends", and a pause ends the *sandbox*:
+# the route that pauses a run destroys its container at once (DESIGN.md §5).
+# A paused run used to be live here, so a token copied before the pause kept
+# authorizing that run's config, blobs, revisions and uploads for as long as
+# the pause lasted -- which is unbounded. Recorded as a trade-off during
+# P5-05 and closed by #48.
+#
+# Two halves, and both are needed. Liveness closes the pause itself; the
+# attempt counter closes what liveness cannot, because a resumed run is
+# RUNNING again and a token that only knew the run id would come back to life
+# with it.
+
+def _pause(session, demo):
+    with tenant_scope(demo["tenant_id"]):
+        repo.begin_run(session, demo["run_id"])
+        repo.request_pause(session, demo["run_id"])
+        repo.pause_run(session, demo["run_id"])
+
+
+def test_a_token_copied_before_a_pause_is_refused_during_it(session, world):
+    """The sandbox it was minted for no longer exists."""
+    built, _ = world
+    demo = built["demo"]
+    _pause(session, demo)
+
+    with service.acting_as(demo["scope"]), pytest.raises(service.RunNotLive):
+        service.run_facts(session, demo["scope"])
+
+
+def test_a_token_copied_before_a_pause_is_still_refused_after_the_resume(
+    session, world
+):
+    """The half a liveness gate cannot do. A resumed run is RUNNING again, so
+    anything that asked only "is this run live?" would hand the old sandbox's
+    token its authority back. The run's attempt is what the token names, and a
+    resume moves it on."""
+    built, _ = world
+    demo = built["demo"]
+    _pause(session, demo)
+    with tenant_scope(demo["tenant_id"]):
+        repo.resume_run(session, demo["run_id"])
+        repo.begin_run(session, demo["run_id"])
+
+    with service.acting_as(demo["scope"]), pytest.raises(service.RunNotLive):
+        service.run_facts(session, demo["scope"])
+
+
+def test_the_resumed_attempt_gets_a_token_that_works(session, world):
+    """The other side of it: a resume that could not be driven would be a
+    worse bug than the one being fixed."""
+    built, _ = world
+    demo = built["demo"]
+    _pause(session, demo)
+    with tenant_scope(demo["tenant_id"]):
+        run = repo.resume_run(session, demo["run_id"])
+        repo.begin_run(session, demo["run_id"])
+        fresh = RunScope(
+            run_id=run.id,
+            target_id=run.target_id,
+            tenant_id=run.tenant_id,
+            sandbox_attempt=run.sandbox_attempt,
+        )
+
+    with service.acting_as(fresh):
+        assert service.run_facts(session, fresh).run_key == demo["run_key"]
+
+
+def test_the_log_and_the_cost_of_a_paused_attempt_still_land(session, world):
+    """The four exemptions are unchanged, and they have to be: a sandbox being
+    torn down at a pause still reports what it spent and still flushes its last
+    lines, and those are reads and appends about the run the token names."""
+    built, _ = world
+    demo = built["demo"]
+    _pause(session, demo)
+
+    with service.acting_as(demo["scope"]):
+        service.publish_log(session, demo["scope"], ["=== run paused ==="])
+        service.record_cost(
+            session, demo["scope"], spend_usd=1.5, sandbox_seconds=30
+        )
+        assert service.run_status(session, demo["scope"]) == "paused"
 
 
 # --- blobs: a run may name its own tenant's, and its own run's -----------

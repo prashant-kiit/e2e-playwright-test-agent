@@ -12,6 +12,8 @@ This replaces that with a token that can say exactly three things:
     run_id      the run this sandbox is working on, and no other
     target_id   the one target whose tree it may read and commit to
     tenant_id   the one tenant whose blobs it may name
+    sandbox_attempt
+                which sandbox of that run this is
 
 Everything the internal API will do for a sandbox is authorized against those
 three fields (app/control/service.py), so the blast radius of a leaked token is
@@ -26,6 +28,15 @@ a row that says whether this token's run is still going: the service checks the
 run's status on every call, so a token for a finished, paused or stopped run is
 refused however long its signature has left. Expiry is the backstop, liveness is
 the gate, and that pairing is why this needs no token table.
+
+**`sandbox_attempt` is what makes that true across a pause** (#48). A pause destroys
+the sandbox at once, so its token must die with it -- but a resumed run is
+RUNNING again, and a gate that read only the status would hand the destroyed
+sandbox's token its authority back. The run row carries a generation counter
+that `repo.pause_run` moves on, the token names the generation it was minted
+for, and the service compares the two. It is a revocation list of one integer,
+kept on a row that is already read on every call: the token table this module
+declines to pay for, without the table.
 
 **A distinct salt**, for the reason app/auth.py splits its two cookies: a token
 minted here must not verify as a portal session, and a portal session must not
@@ -57,6 +68,11 @@ _SALT = "qa-run-token"
 # -- the final ingest, the artifact sweep, the session archive and the cost row.
 _GRACE_S = 15 * 60
 
+# Exactly these, no more and no fewer. A token missing a claim is rejected
+# rather than defaulted: `sandbox_attempt` defaulting to 1 would be the fail-open shape
+# #43 spent a slice removing from the tenant resolver.
+_CLAIMS = frozenset({"run_id", "target_id", "tenant_id", "sandbox_attempt"})
+
 
 @dataclass(frozen=True)
 class RunScope:
@@ -70,6 +86,7 @@ class RunScope:
     run_id: int
     target_id: int
     tenant_id: int
+    sandbox_attempt: int
 
 
 class RunTokenError(Exception):
@@ -126,11 +143,7 @@ def read_unverified(token: str) -> RunScope:
     cannot do anything else.
     """
     _ok, claims = _serializer().loads_unsafe(token)
-    if not isinstance(claims, dict) or set(claims) != {
-        "run_id",
-        "target_id",
-        "tenant_id",
-    }:
+    if not isinstance(claims, dict) or set(claims) != _CLAIMS:
         raise RunTokenError("not a run token")
     return RunScope(**claims)
 
@@ -147,10 +160,6 @@ def verify(token: str, *, max_age_s: float | None = None) -> RunScope:
         claims = _serializer().loads(token, max_age=age)
     except (BadSignature, SignatureExpired) as exc:
         raise RunTokenError(str(exc)) from exc
-    if not isinstance(claims, dict) or set(claims) != {
-        "run_id",
-        "target_id",
-        "tenant_id",
-    }:
+    if not isinstance(claims, dict) or set(claims) != _CLAIMS:
         raise RunTokenError("not a run token")
     return RunScope(**claims)

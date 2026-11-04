@@ -63,7 +63,14 @@ def mint_for_run(run_id: int, *, session_factory: SessionFactory = SessionLocal)
         run = repo.get_run(session, run_id)
         return run_token.mint(
             RunScope(
-                run_id=run.id, target_id=run.target_id, tenant_id=run.tenant_id
+                run_id=run.id,
+                target_id=run.target_id,
+                tenant_id=run.tenant_id,
+                # Read now rather than remembered: `resume_run` has already
+                # moved it on by the time either call site gets here, so the
+                # new sandbox is minted into the attempt it will be checked
+                # against and the old one's token is already dead (#48).
+                sandbox_attempt=run.sandbox_attempt,
             )
         )
 
