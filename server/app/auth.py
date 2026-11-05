@@ -329,14 +329,6 @@ async def require_auth(
     # a cookie naming another tenant's user id resolve to nothing there.
     set_current_tenant(user.tenant_id)
     if revocation.is_revoked(session, user.id, within=ACCESS_MAX_AGE):
-        # **The one database read this dependency does** (#56), and the window
-        # it closes is a removal's: `/auth/refresh` already refuses to mint a
-        # *new* cookie for a removed user, but the cookie they already hold
-        # verifies on its signature alone and was good for the rest of its
-        # fifteen minutes. UAT 3 (#54) watched a removed admin use them to
-        # create another admin, so a removal now takes effect on the next
-        # request rather than at the next expiry.
-        #
         # The same bare 401 as a missing or expired cookie, for the reason
         # `/auth/refresh` gives: "removed" and "expired" must not be
         # distinguishable to somebody probing with a withdrawn account's

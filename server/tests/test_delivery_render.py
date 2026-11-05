@@ -159,6 +159,21 @@ def test_two_targets_sharing_a_repo_get_different_branches(tmp_path):
     assert live.branch != staging.branch
 
 
+def test_a_legacy_upper_case_slug_still_delivers(tmp_path):
+    """A row saved before the write-path check existed, and still deliverable.
+
+    `app` is not editable, so refusing upper case here would leave such a
+    target with no remedy but deletion -- and git has no objection to
+    `qa/SauceDemo/...`. The write path lower-cases what an operator types, so
+    no new target looks like this.
+    """
+    root = _worktree(tmp_path, "SCRUM-101-checkout.md")
+
+    story = render.resolve_story(root, "SCRUM-101", paths=_paths(root), app="SauceDemo")
+
+    assert story.branch == "qa/SauceDemo/SCRUM-101-checkout"
+
+
 def test_a_slug_git_cannot_spell_is_refused_rather_than_sanitised(tmp_path):
     """A row saved before the write-path check existed, refused at the read.
 

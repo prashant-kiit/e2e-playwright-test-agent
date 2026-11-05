@@ -42,12 +42,36 @@ taking it in this change rather than recording it as a follow-up.
 **One consequence worth naming.** The slug is now part of a git ref, so a slug
 git cannot spell is a target that can be created and never delivered.
 `target_config.clean_app_slug` refuses one at the write path (lower-cased and
-stripped first, like a tenant's slug), and `delivery.render._branch_segment`
-asks the same question again at the read path for rows saved before the check
-existed. It **refuses** rather than sanitising: replacing the offending
-characters would map two distinct slugs onto one branch name, which is the
-collision this ADR is about, reintroduced by its own fix.
+stripped first, like a tenant's slug), and
+`delivery.render._assert_branch_safe` asks the same question again at the read
+path for rows saved before the check existed. It **refuses** rather than
+sanitising: replacing the offending characters would map two distinct slugs
+onto one branch name, which is the collision this ADR is about, reintroduced by
+its own fix.
 
-The agent's prompt renders `{BRANCH}` from the same function, so the name the
-agent is told and the name delivery pushes to cannot drift apart — the one
-caller that used to rely on the `app=""` default now passes the run's target.
+Two things follow from that, and neither is comfortable enough to leave
+implicit:
+
+- **The read-path check asks only what git asks**, which is why upper case is
+  accepted there while the write path lower-cases it. `targets.app` is
+  deliberately not editable (`repo.update_target_config`), so a row saved
+  before this check cannot be repaired in place: refusing a spelling git is
+  happy with would have left such a target permanently undeliverable with no
+  remedy but creating a new one. A slug git genuinely refuses — a space, a
+  `..` — is still stuck in exactly that way, and the remedy is a new target.
+  No migration surveys or rewrites existing slugs; lower-casing them in place
+  could collide with `uq_targets_tenant_id_app`, and a migration that can fail
+  on a customer's data to tidy a name is the worse trade.
+- **The refusal reaches a run, not only a delivery.** The agent's `{BRANCH}`
+  comes from the same function, so a target whose slug cannot be a ref fails
+  at the run's first step. That is the right direction — such a run would
+  produce a suite nobody can deliver, and it fails before the tokens are spent
+  rather than after — but it is a failure mode this ticket did not contemplate,
+  so it is asserted in `tests/test_agent_prompts.py` rather than left to be
+  discovered.
+
+The one caller that used to rely on the `app=""` default — the orchestrator,
+rendering `{BRANCH}` into the agent's prompt — now passes the run's target, so
+the name the agent is told and the name delivery pushes to cannot drift apart.
+The default is gone rather than kept for convenience: a caller that passed
+nothing would silently get the colliding shape back.

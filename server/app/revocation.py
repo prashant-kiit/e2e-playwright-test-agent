@@ -24,10 +24,21 @@ offboarding.
 **What keeps it small**, which is the whole reason it is not the token table
 `app/auth.py` and `app/run_token.py` both declined: a revocation stops
 mattering once no cookie minted before it can still verify -- `ACCESS_MAX_AGE`
-after it was written. So the list holds removals from the last fifteen minutes.
-A token table would have held a row per live session for as long as sessions
-live; this holds a row per *removal* for a quarter of an hour, and `revoke`
-prunes the expired ones as it writes, so nothing has to come back and sweep.
+after it was written. A token table would have held a row per live session for
+as long as sessions live; this holds a row per **removal**, and `revoke` prunes
+the expired ones as it writes, so there is no sweep to schedule.
+
+**What that prune does and does not reach**, stated exactly, because an earlier
+version of this paragraph claimed more than the code does. The prune is an ORM
+bulk `DELETE`, and since P5-12 those are under the tenant guard
+(`tenancy.install_tenant_guard`), so it deletes **the acting tenant's** expired
+rows and no others. A tenant that removes a user once and never again therefore
+keeps that one row until it next removes somebody. That is the bound worth
+having -- a row per removal, with every tenant's own removals keeping their own
+list trimmed -- and it is not "the table holds only the last fifteen minutes".
+Nothing reads an expired row: `is_revoked` bounds the question by `within`
+rather than trusting the prune, which is also what stops an unpruned old row
+from locking out an account that reuses the id.
 
 **The window is a parameter, not an import.** Both functions take `within`,
 and every caller passes `auth.ACCESS_MAX_AGE`. That is deliberate: how long a
@@ -49,12 +60,13 @@ from datetime import timedelta
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from .models import RevokedUser
 from .tenancy import current_tenant_id
 
 
-def _cutoff(within: int):
+def _cutoff(within: int) -> ColumnElement:
     """The database's "now" minus `within` seconds, as SQL.
 
     Built from `func.now()` rather than from Python's clock so the write and
@@ -74,9 +86,11 @@ def revoke(session: Session, user_id: int, *, within: int) -> None:
 
     It prunes while it writes: rows older than `within` cannot affect any
     cookie that still verifies, so they are deleted here rather than by a
-    sweep somebody has to remember to schedule. That is what bounds the table
-    to "removals in the last `within` seconds", and it means the only path
-    that grows the table is also the path that shrinks it.
+    sweep somebody has to remember to schedule -- the only path that grows the
+    list is also the path that shrinks it. **The prune is tenant-scoped**, like
+    every other ORM bulk delete in this tree, so it trims the acting tenant's
+    rows and leaves every other tenant's alone; see the module docstring for
+    what that does and does not bound.
     """
     session.execute(delete(RevokedUser).where(RevokedUser.revoked_at < _cutoff(within)))
     session.add(RevokedUser(tenant_id=current_tenant_id(), user_id=user_id))

@@ -43,16 +43,36 @@ answer worth giving a customer about an offboarding.
 declined.** Those would hold a row per live session for as long as sessions
 live. A revocation stops mattering once no cookie minted before it can still
 verify — `ACCESS_MAX_AGE` after it is written — so this holds a row per
-*removal* for fifteen minutes, and `revocation.revoke` prunes the expired rows
-as it writes, so there is no sweep to schedule and nothing to grow unbounded.
+**removal** rather than per session, and `revocation.revoke` deletes the
+expired ones as it writes the next, so there is no sweep to schedule.
+
+Precisely: that prune is an ORM bulk delete and therefore tenant-scoped like
+every other one, so it trims the acting tenant's expired rows and nothing else
+— a tenant that removes a user once and never again keeps that row until its
+next removal. That is the bound worth claiming, and it is not "the table holds
+only the last fifteen minutes". Nothing reads an expired row either way:
+`is_revoked` bounds the question by the window rather than trusting the prune,
+which is also what stops an unpruned row from locking out an id.
 
 **What it does not cover**, each by decision rather than oversight:
 
-- **A role change.** A demotion still takes effect at the next refresh. A
-  revocation here means "no access", so using it for a downgrade would log the
-  person out for up to fifteen minutes rather than lowering their role — and
-  for somebody who still works here, the refresh path already gives the right
-  answer.
+- **A role change, which the ticket's own first line asks for.** #56 opens "A
+  removed **or demoted** user loses access **now**", and a demotion still takes
+  effect at the user's next refresh rather than at once. Three reasons, in
+  order of weight. A revocation here means "no access", so using it for a
+  downgrade would log somebody out for up to fifteen minutes instead of
+  lowering their role — the wrong answer for a person who still works here,
+  and one they cannot work around, because `/auth/refresh` would mint them a
+  correct cookie that `require_auth` then refuses until the row expires.
+  Distinguishing the two would mean comparing the revocation against the
+  *cookie's* issue time rather than against now, which is a different and
+  larger mechanism. And there is **no role-change path in the application at
+  all** — no route, no function; a demotion happens out of band, in SQL or at
+  a console — so what the ticket's first line describes cannot be reached by
+  anything a customer presses. `/auth/refresh` re-reads the row, so a demotion
+  does take effect within `ACCESS_MAX_AGE` without this table. If a
+  role-change surface is ever built, this is the decision to revisit with it,
+  and the mechanism to want is the issue-time comparison.
 - **A purged tenant.** `revoked_users` is tenant-owned, so a purge deletes the
   tenant, its users *and* these rows; a purged tenant's user keeps a verifying
   cookie for up to fifteen minutes. What they can reach with it is nothing:

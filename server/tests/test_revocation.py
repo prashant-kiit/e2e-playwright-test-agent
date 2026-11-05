@@ -15,10 +15,14 @@ from __future__ import annotations
 import pytest
 
 from app import revocation
+from app.auth import ACCESS_MAX_AGE
 from app.models import RevokedUser, Tenant
 from app.tenancy import DEFAULT_TENANT_ID, tenant_scope
 
-WINDOW = 15 * 60
+# The window every caller passes: how long a session lives is `app/auth.py`'s
+# decision, and a second copy of the number here is how the test and the
+# production call would come to ask different questions.
+WINDOW = ACCESS_MAX_AGE
 
 
 def test_a_revoked_user_is_revoked_and_an_untouched_one_is_not(session):
@@ -72,6 +76,32 @@ def test_writing_a_revocation_prunes_the_expired_ones(session):
     session.commit()
 
     assert [r.user_id for r in session.query(RevokedUser).all()] == [8]
+
+
+@pytest.mark.unscoped_tenant
+def test_the_prune_is_tenant_scoped_like_every_other_bulk_delete(session):
+    """What the prune bounds, asserted rather than assumed.
+
+    The prune is an ORM bulk `DELETE`, and since P5-12 those are under the
+    tenant guard -- so it trims the acting tenant's expired rows and leaves
+    another tenant's alone. An earlier version of `revocation.py` claimed the
+    table held "removals from the last fifteen minutes and nothing else",
+    which this is the test that would have contradicted. Nothing *reads* an
+    expired row either way: `is_revoked` bounds the question by `within`.
+    """
+    other = Tenant(slug="other", name="Other")
+    session.add(other)
+    session.commit()
+    with tenant_scope(other.id):
+        revocation.revoke(session, 7, within=WINDOW)
+        session.commit()
+
+    with tenant_scope(DEFAULT_TENANT_ID):
+        revocation.revoke(session, 8, within=0)
+        session.commit()
+
+    with tenant_scope(other.id):
+        assert [r.user_id for r in session.query(RevokedUser).all()] == [7]
 
 
 @pytest.mark.unscoped_tenant

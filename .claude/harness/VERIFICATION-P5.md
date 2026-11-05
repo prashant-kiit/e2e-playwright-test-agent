@@ -1205,10 +1205,17 @@ same thing to this one.
     "a role change takes effect at next login".
 
     What it cost, and what it did not: one read per authenticated request, of a table that
-    holds removals from the last fifteen minutes and nothing else — not of `users`, so the
-    access cookie is still claim-carrying and `app/auth.py`'s argument survives with one
-    named exception. `revocation.revoke` prunes the expired rows as it writes, so there is
-    no sweep to schedule.
+    holds one row per removal — not of `users`, so the access cookie is still
+    claim-carrying and `app/auth.py`'s argument survives with one named exception.
+    `revocation.revoke` deletes the expired rows as it writes the next; that prune is an ORM
+    bulk delete and so tenant-scoped like every other one, which means each tenant's
+    removals trim that tenant's list and a tenant that removes somebody once keeps that row
+    until it removes somebody again. Nothing reads an expired row either way — `is_revoked`
+    bounds the question by the window rather than trusting the prune, which is also what
+    stops an unpruned row from locking out an id. The first version of this paragraph
+    claimed the table held "the last fifteen minutes and nothing else", which the guard's
+    coverage of bulk writes makes false; `tests/test_revocation.py` asserts what it really
+    bounds.
 
     Three residues, each by decision and each written down at the ADR: a **demotion** still
     waits for the next refresh (a revocation means "no access", so using it for a downgrade

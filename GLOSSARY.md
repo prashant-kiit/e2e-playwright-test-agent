@@ -215,8 +215,9 @@ _Avoid_: Push, deploy, publish, release
 
 **Delivery branch**:
 The branch in the target repo that a story's deliveries are appended to, named
-for **both the target and the story** (`qa/<target slug>/<story id>-<story
-slug>`). Named for both because two targets of one tenant may point at the same
+for **both the target and the story** (`qa/<app>/<story id>-<story slug>`,
+where `<app>` is the target's slug — the legacy spelling ADR 0001 keeps for the
+`targets.app` column and the CLI argument). Named for both because two targets of one tenant may point at the same
 target repo on purpose, and a branch named for the story alone belonged to
 whichever of them delivered last (ADR 0003).
 _Avoid_: Story branch, QA branch, feature branch

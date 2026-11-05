@@ -639,17 +639,18 @@ class RevokedUser(TenantOwned, Base):
     UAT 3 watched a removed admin use those minutes to create another admin.
 
     This table is what closes that window, and it is the option #56 chose out
-    of four: `require_auth` reads one small, bounded table per request instead
-    of reading `users` per request. The cost is a round trip either way; the
-    difference is what the round trip buys. A row lands here when a user is
-    removed, and it stops mattering `ACCESS_MAX_AGE` later, because no cookie
-    minted before the removal can still verify by then. So the table holds
-    *removals from the last fifteen minutes* and nothing else --
-    `app/revocation.py` prunes as it writes -- which is why it is a revocation
-    list rather than the session table `app/auth.py` and `app/run_token.py`
-    both declined. Those would have had to hold a row per live session for as
-    long as the session lives; this holds a row per removal for a quarter of an
-    hour.
+    of four: `require_auth` reads one small table per request instead of reading
+    `users` per request. The cost is a round trip either way; the difference is
+    what the round trip buys. A row lands here when a user is removed, and it
+    stops mattering `ACCESS_MAX_AGE` later, because no cookie minted before the
+    removal can still verify by then -- so `app/revocation.py` deletes the
+    expired ones as it writes the next, and nothing ever reads one. That is why
+    this is a revocation list rather than the session table `app/auth.py` and
+    `app/run_token.py` both declined: those would have held a row per live
+    session for as long as sessions live, where this holds a row per
+    **removal**. The prune is an ORM bulk delete and therefore tenant-scoped
+    like every other one, so each tenant's removals trim that tenant's rows;
+    `app/revocation.py` says exactly what that bounds.
 
     **`user_id` is a plain integer with no foreign key**, for the reason
     `PurgeLog.purged_tenant_id` and `AuditLog.actor` are: the row it would

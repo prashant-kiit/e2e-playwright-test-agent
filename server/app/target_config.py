@@ -41,31 +41,39 @@ OWNER_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*
 
 HTTP_SCHEMES = frozenset({"http", "https"})
 
-# A target's slug, which since #51 is **a segment of a git branch name**:
-# delivery pushes `qa/<app>/<STORY_ID>-<slug>`, so a slug git cannot spell is a
-# target that cannot deliver. Lower-case alphanumerics, dots, dashes and
-# underscores, starting with an alphanumeric -- a subset of what
+# A target's slug as a **segment of a git branch name**, which is what #51 made
+# it: delivery pushes `qa/<app>/<STORY_ID>-<slug>`, so a slug git cannot spell
+# is a target that cannot deliver. Letters (either case), digits, dots, dashes
+# and underscores, starting with a letter or digit -- a subset of what
 # `git check-ref-format` accepts, chosen to be obviously safe rather than
 # maximally permissive.
-APP_SLUG = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-
-# The three things that pattern still lets through and a ref may not hold: `..`
-# anywhere, a trailing `.lock`, and a trailing `.`.
-_REF_FORBIDDEN = ("..",)
+#
+# **Upper case is accepted here and refused at the write path**, and the
+# asymmetry is deliberate rather than sloppy. `clean_app_slug` lower-cases what
+# an operator types, so no *new* target has an upper-case slug; a target saved
+# before that existed may, and git is perfectly happy with `qa/SauceDemo/...`.
+# Rejecting it would have made such a row permanently undeliverable, because
+# `app` is not editable (`repo.update_target_config`) -- a target with no
+# remedy but deletion. So this asks only what git asks.
+APP_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def is_app_slug(value: str) -> bool:
-    """Is this a slug that can be a branch-name segment?
+    """Is this a slug a branch name can hold?
 
     The predicate rather than the refusal, because two layers refuse in their
     own terms: the write path raises `ConfigError` (a 422 while the operator is
     still around to be told), and `delivery.render` raises `DeliveryError` for
     a row saved before this check existed. One rule, two errors -- a second
     copy of the rule is how they would come to disagree.
+
+    The pattern leaves three things for this function, each of which
+    `git check-ref-format` refuses: `..` anywhere, a trailing `.lock`, and a
+    trailing `.`.
     """
     if not APP_SLUG.match(value):
         return False
-    if any(bad in value for bad in _REF_FORBIDDEN):
+    if ".." in value:
         return False
     return not (value.endswith(".lock") or value.endswith("."))
 
@@ -89,10 +97,10 @@ def clean_app_slug(value: object) -> str:
         raise ConfigError("a target needs a slug")
     if not is_app_slug(text):
         raise ConfigError(
-            f"target slug must be lower-case letters, digits, '.', '-' or '_', "
-            f"starting with a letter or digit, got {text!r}. It is a segment of "
-            f"the delivery branch name (qa/<slug>/<STORY_ID>-<story-slug>), so "
-            f"it has to be something git can spell"
+            f"target slug must be letters, digits, '.', '-' or '_', starting "
+            f"with a letter or digit, got {text!r}. It is a segment of the "
+            f"delivery branch name (qa/<slug>/<STORY_ID>-<story-slug>), so it "
+            f"has to be something git can spell"
         )
     return text
 

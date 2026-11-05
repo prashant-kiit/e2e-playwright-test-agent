@@ -12,8 +12,10 @@ This table is the chosen option of four. `require_auth` reads it once per
 authenticated request and refuses a user id removed within the window. It is
 not the session or token table `app/auth.py` and `app/run_token.py` both
 declined: a revocation stops mattering once no cookie minted before it can
-still verify, so the table holds removals from the last fifteen minutes and
-`app/revocation.py` prunes as it writes.
+still verify, so the table holds a row per *removal* rather than per session,
+and `app/revocation.py` deletes the expired ones as it writes the next (within
+the acting tenant, since the prune is an ORM bulk delete under the tenant
+guard).
 
 `user_id` has **no foreign key to `users`**, for the reason
 `purge_log.purged_tenant_id` has none to `tenants`: the row it would reference
