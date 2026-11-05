@@ -134,6 +134,25 @@ export const api = {
   // your own.
   usage: () => req("GET", "/usage"),
 
+  // The write half (P5-13). Tenant-admin only, enforced server-side; the
+  // portal hides the control for a member but the 403 is what decides.
+  //
+  // `caps` carries **only the caps being changed**: the route distinguishes an
+  // omitted key (leave it alone) from an explicit `null` (unmetered), so this
+  // must not helpfully fill in the ones the admin did not touch. Returns the
+  // same shape as `usage()`, recomputed, so the panel renders what was stored.
+  setUsageCaps: (caps) => req("PUT", "/usage/caps", caps),
+
+  // users: a tenant administers its own (P5-14). Admin-only, enforced
+  // server-side. No tenant id anywhere -- there is none to name but your own.
+  //
+  // `inviteUser` returns the new account **and its one-time password**: there
+  // is no mail in this deployment, so the password exists exactly once, in
+  // this response. The caller has to show it, because nothing can get it back.
+  listUsers: () => req("GET", "/users"),
+  inviteUser: (email, role) => req("POST", "/users", { email, role }),
+  removeUser: (id) => req("DELETE", `/users/${id}`),
+
   // runs
   listRuns: (targetId) =>
     req("GET", targetId ? `/runs?target_id=${targetId}` : "/runs"),

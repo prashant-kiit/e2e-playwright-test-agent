@@ -10,7 +10,35 @@ seven tickets (#31–#37). **`SPEC-P5-multi-tenancy.md` is a zero-byte file** �
 suite, and so each ticket after the first inherits a list of what is *proven*, what rests on
 fakes, and what was deliberately deferred.
 
-> ## P5 is OPEN. This record is partial.
+> ## P5 is CLOSED, on 2026-11-05.
+>
+> **Twenty tickets, three UAT checkpoints, and the record below says per slice what is proven
+> and what is not.** The seven original tickets (#31–#37) plus #39 landed first; the two-axis
+> review of #30 on 2026-11-04 then found that the spec's unbuilt half had never been ticketed
+> at all — not deferred, simply absent — which produced #40–#50, and those ran in three waves,
+> each ending at a UAT checkpoint against the live stack (#52, #53, #54).
+>
+> **What the three UATs found that the suite could not**, which is the whole reason they exist
+> and now the sixth, seventh and eighth entries on this phase's list of the same:
+>
+> * **UAT 1** — the bypass allowlist had grown by one, and the honest reason (#44 widened the
+>   guard to cover `DELETE`, so an existing cross-tenant sweep had to declare itself) is
+>   recorded rather than ticked.
+> * **UAT 2** — nothing broken, and that is itself the finding: the pause, the attempt
+>   counter, the session restore and the liveness exemptions all behaved against a real
+>   container. It also corrected this record: the Docker-backed tests use the *real* store and
+>   run whenever the daemon is up, so `make ci-test` had been exercising the container path all
+>   along.
+> * **UAT 3** — **removing a user did not remove their access.** A deleted admin refreshed
+>   into a new session and created another admin. Thirty days, not fifteen minutes, because
+>   refresh never read the row either. Fixed; the residual 15-minute window is follow-up 55.
+>
+> **This record no longer says "partial".** Every ticket has a §Verified section, #36's
+> included — it was the one gap, and UAT 3's closeout criterion is what closed it.
+>
+> ### The old banner, kept because its caveats are still the honest ones
+>
+> ## (historical) P5 was OPEN while this record was partial.
 >
 > **All six implementable tickets are complete in the tree and closed on the tracker**, and
 > #30, the parent spec issue, is the only one of the seven still open. Tree state and tracker
@@ -666,13 +694,40 @@ test suite had its own copy of the service's borrow-don't-close shim.
   transports and `test_internal_api.py` drives the routes directly. What no in-process test
   can cover is what the Docker test is for — and two of the three bugs above were found
   there, which is the honest measure of that gap's size.
-- **A paused run's token stays valid.** `is_live` includes `PAUSED`, deliberately: it is the
+- **A paused run's token stays valid.** ~~`is_live` includes `PAUSED`, deliberately: it is the
   definition the whole repository already uses (`repo.live_run_holding` turns on it) and a
   second definition of "live" would be a second thing that can be wrong. Pause destroys the
   container at once and a resume mints a new token, so the token of a paused run belongs to a
   sandbox that no longer exists — but a copy taken before the pause works until the run ends
   or the signature expires. Closing that needs a token table, which is the cost `app/auth.py`
-  already declined to pay for sessions, for the same reason.
+  already declined to pay for sessions, for the same reason.~~
+  **Closed on 2026-11-04 by #48 (P5-16), and without a token table.** The trade-off was
+  stated as a choice between "one definition of live" and "a token that dies with its
+  sandbox", and it was a false one: the gate is not asking whether the run is over, it is
+  asking whether the sandbox the token was minted for is still the one doing the work.
+  `is_live` still answers the first question and still includes `PAUSED` everywhere — the
+  lock trio and the reaper are untouched — and a fourth field on the scope answers the
+  second. `runs.sandbox_attempt` is a generation counter; `repo.pause_run` moves it on; the token
+  names the attempt it was minted for; `authorized_run` compares the two. One integer on a
+  row that was already being read on every call.
+  Two things about the shape are worth keeping, because the first attempt at it was wrong.
+  **The increment belongs at the pause, not at the resume**: the window being closed *is*
+  the pause, and a run may stay paused for an hour or for ever. And **refusing a paused run
+  outright does not work**: a resumed sandbox calls `run_facts` before `begin_run` has moved
+  the row out of `PAUSED`, so that reading refuses the resume itself — which the suite said
+  immediately, in three files. The counter has no such ordering to get wrong.
+  One consequence, deliberate and documented where it happens:
+  `launcher._persist_session` no longer archives the session on the way out of a pause,
+  because the token it would write with has just been retired. The save at **every step
+  boundary** is what covers it, and that save exists for this exact reason — a pause gives
+  no warning — so what a pause now costs is still the exploration of the step it
+  interrupted and no more.
+  Two readings of "not running" now share one answer there, and the guard reads
+  `run_status` rather than `run_state` because only the former is exempt from the gate —
+  which is #50's find, and is why a normally-ending run no longer logs a warning with a
+  traceback about a session it deliberately did not save. This is a behaviour change on
+  the thread path that none of the three tickets asked for in those words; it is forced by
+  the token retirement, and it is bounded by the per-boundary save.
 - **The run-scoped token is not revocable.** Expiry is the backstop and liveness is the gate;
   between them there is no way to cut a specific token short while its run continues.
 - **No real agent run.** The container test uses `QA_RUNNER=fake`, so what is proven is the
@@ -1116,6 +1171,675 @@ same thing to this one.
 
 ---
 
+54. **The object store holds 532 objects no purge will ever name.** Found by UAT 2 while
+    listing the bucket by tenant prefix. `tests/test_docker_sandbox.py` takes a `real_store`
+    fixture — the actual SeaweedFS of the dev stack — and its `@pytest.mark.docker` tests run
+    whenever the daemon is usable rather than skipping, so **every** local `make ci-test` run
+    writes real objects into it. The fixtures then truncate the rows. What is left is objects
+    belonging to runs that no longer exist, under a tenant that still does, so
+    `accounts.purge` cannot reach them (it walks rows) and `artifacts.rekey` cannot either.
+    Harmless on a dev stack and a trap on any other reading: **a store listing is not an
+    inventory.** The honest options are a mark-and-sweep against `artifacts` + `file_index`
+    (which DESIGN.md §9 already describes and which nothing implements), or a test fixture
+    that cleans up after itself. Neither is ticketed.
+55. **A removed user keeps their access cookie for up to 15 minutes.** The residue of the UAT
+    3 finding, after the refresh path was fixed. Demonstrated on the fixed build: a user
+    removed seconds earlier, holding an unexpired access cookie, still got `POST /users` → 201
+    and created an admin account. Closing it needs `require_auth` to read the row on **every
+    request**, which is exactly the round trip `app/auth.py` declined, so this is a decision
+    rather than an oversight. Four options with their costs — read per request; shorten the
+    access cookie; a small revocation list bounded by `ACCESS_MAX_AGE`; or accept it and say
+    so where a reader will look — are written up in full in
+    **[issue #56](https://github.com/prashant-kiit/e2e-playwright-test-agent/issues/56)**,
+    which is where this is now tracked. (Note the coincidence: GitHub issue #56 is this
+    item, follow-up **55**; follow-up 56 below is the prompt-timestamp one.)
+
+    **Closed 2026-11-05 — option 3, the revocation list.** `revoked_users` is a
+    tenant-owned table of user ids removed within `ACCESS_MAX_AGE`; `accounts.remove_user`
+    writes a row in the same transaction as the `DELETE`, and `require_auth` reads it on
+    every authenticated request and answers the same bare 401 a missing cookie gets. So a
+    removal takes effect on the removed user's **next request**, not at their cookie's
+    expiry. The decision and the three rejected options are in
+    `docs/adr/0004-a-removal-revokes-the-session-it-leaves-behind.md` and restated where
+    `app/auth.py` makes the stateless argument, in the removal's own terms rather than as
+    "a role change takes effect at next login".
+
+    What it cost, and what it did not: one read per authenticated request, of a table that
+    holds one row per removal — not of `users`, so the access cookie is still
+    claim-carrying and `app/auth.py`'s argument survives with one named exception.
+    `revocation.revoke` deletes the expired rows as it writes the next; that prune is an ORM
+    bulk delete and so tenant-scoped like every other one, which means each tenant's
+    removals trim that tenant's list and a tenant that removes somebody once keeps that row
+    until it removes somebody again. Nothing reads an expired row either way — `is_revoked`
+    bounds the question by the window rather than trusting the prune, which is also what
+    stops an unpruned row from locking out an id. The first version of this paragraph
+    claimed the table held "the last fifteen minutes and nothing else", which the guard's
+    coverage of bulk writes makes false; `tests/test_revocation.py` asserts what it really
+    bounds.
+
+    Three residues, each by decision and each written down at the ADR: a **demotion** still
+    waits for the next refresh (a revocation means "no access", so using it for a downgrade
+    would log out somebody who still works here); a **purged tenant's** user keeps a
+    verifying cookie for up to fifteen minutes, because `revoked_users` is tenant-owned and
+    the purge deletes it too — with nothing left to read or write, every read filtered to a
+    tenant with no rows and every write failing its `tenant_id` FK; and a **stolen cookie**
+    is still worth the rest of its fifteen minutes, because this revokes a user rather than
+    a token.
+
+    **Covered by the suite, not by a live stack.** `tests/test_auth.py` and
+    `tests/test_api_users.py` assert the existing access cookie stops working — including
+    UAT 3's own sequence, the admin who removes themselves and then tries to create another
+    admin, over HTTP with two cookie jars — and `tests/test_revocation.py` covers the
+    window, the self-pruning and the tenant filter (user ids collide across tenants, so an
+    unfiltered list would log out an unrelated customer). What has **not** been observed is
+    the thing UAT 3 observed: this has not been re-run against the live stack with real
+    cookies. That is the same gap this record names everywhere else, and it is the honest
+    status of the fix.
+56. **A seeded prompt revision 1 renders as a date somebody saved.** Found by #36's
+    verification. A shipped default is not a row until something makes it one, and
+    `prompt_store._seed` materialises rev 1 at the moment the *first override* is saved — so
+    both revisions come back with the same `created_at`, to the microsecond, and rev 1's is
+    when it became this tenant's row rather than when those bytes shipped. `#39`'s
+    `savedLabel` renders "shipped default" only for a `null` `created_at`, which is the
+    not-yet-a-row case, so a seeded rev 1 shows a date. Not a correctness bug — the row really
+    was created then — but the Prompts panel will tell a customer somebody edited a prompt
+    when nobody did. The fix is a label, and which label is a product question.
+
+### The sweep (2026-11-05, UAT 3's closeout criterion)
+
+All 56 items, each either closed, ticketed, or surviving with its reason. Closed items keep
+their text above with a dated note rather than being deleted, because the reasoning is the
+part worth keeping.
+
+**Closed during the phase** — 2, 6, 9, 13, 15, 21, 27, 27b, 28, 29, 38, 48, 49, 50, 51, 52,
+53, and 4 (on the last day). Each carries a dated note at its own entry naming what closed it.
+
+**Surviving, and why each one is not being closed now:**
+
+| # | Survives because |
+|---|---|
+| 1, 55 | The stateless-session decision. 1 is the general statement; **55 is closed** (2026-11-05, issue #56 — the `revoked_users` revocation list; see its entry and `docs/adr/0004`). What survives of 1 is a *stolen* token, which nothing revokes |
+| 3 | Artifact URLs bypass the refresh dance. Real, and bounded: a 401 there is a reload, not data loss |
+| 5 | One pointless `POST /auth/refresh` on a cold login page. Costs a request |
+| 7, 8 | The portal cannot show or discover your tenant slug. A usability gap that multi-tenancy created and nothing has needed yet |
+| 10 | Review suggestions **declined** — decisions, recorded so they are not mistaken for oversights |
+| 11 | A test seam read off the module. Deliberate |
+| 12 | `SPEC-P5-multi-tenancy.md` is still a zero-byte file; the issue is the spec of record. Cosmetic, and fixing it means deciding which is canonical |
+| 14 | The README still says P4's closeout is pending. **Fixed in this closeout** (see below) |
+| 16, 17, 18 | The three documented holes in the tenant guard: the identity map, a lazy load off a bypassed row, and raw SQL. Each is a property of SQLAlchemy rather than of this code, each is stated where the guard is installed, and no call site relies on any of them |
+| 19 | One round trip per reaped run. A cost, measured and accepted |
+| 20 | The delivery CLI can only deliver tenant 1's targets — `--tenant` resolves a slug now, but `make deliver` has no tenant. **The largest remaining single-tenant assumption in the tree** |
+| 22, 23, 24, 25, 26 | The credential lifecycle: no re-wrap tooling, a revoked token reads `valid` until used, no audit row for a PAT save, nothing delivers before a PAT is saved, the authoring account is reported once. All real, all P6-shaped |
+| 30, 31 | A lowered cap does not bound a live run, and the quota month is UTC with nothing saying so |
+| 32, 33, 34 | `/internal` on the main listener, `record_cost`'s exemption, and no request budget on the internal API. Accepted trade-offs with their reasoning at the call sites |
+| 35, 36, 37, 39 | The audit log has no customer-facing read, no cursor, no pruning, and a column one rename from being too short |
+| 40 | A *token* still cannot be revoked — the same decision as 1. A **user** can be, since 55 closed: `revoked_users` ends every session a removed user holds, which is the case that mattered |
+| 41 | The CLI and console say `system`, because they bind no user. Honest, and #46 relies on it |
+| 42 | `audit.record` commits the session it is given. Stated at every call site |
+| 43, 44 | Logging below WARNING, and a `QA_ENV` typo being silent in the safe direction |
+| 45, 46, 47 | Prompt history reads every revision with no paging, has been seen only by jsdom, and has no rollback by decision |
+| 54 | 532 orphaned objects in the dev store, and the mark-and-sweep DESIGN.md §9 describes is unbuilt |
+| 56 | A seeded prompt rev 1 shows a date. The fix is a label |
+
+**Nothing on that list blocks P5.** Two items are sharp enough to name here rather than leave
+in a table: **55**, the security residue tracked as
+[issue #56](https://github.com/prashant-kiit/e2e-playwright-test-agent/issues/56) and
+**closed on 2026-11-05** by the revocation list (its entry above records the decision, its
+cost and its three residues), and
+**20**, which is the single-tenant assumption still sitting in the delivery CLI — a multi-tenant control plane whose `make deliver` can only ever reach one
+customer.
+
+
+## Verified on 2026-11-04 — P5-18 / #52 (UAT 1: fail-closed against live tenants)
+
+The first of P5's three UAT checkpoints, and the first evidence in this phase that
+**fail-closed holds against a running stack rather than against a fixture.** The ticket's
+own reason for existing is that the suite structurally cannot gather it: every test in it
+reads as one tenant at a time, and the thing being proved is what happens when **no** tenant
+is acting — a test that binds a scope to assert the unscoped path fails has already lost the
+condition it is testing.
+
+Against the live compose stack (`make up`, api rebuilt from this tree), on the **dev
+database, which holds real data** — a project, the `saucedemo` target, 9 runs, 4 revisions
+and 25 artifacts from P4's walkthrough.
+
+**Four migrations met that data for the first time.** The database was at `f1a62c90d4e7`
+(P5-04's default caps); the entrypoint's `alembic upgrade head` applied `a3f70c2e8b91`
+(prompts), `b7e04c91a2d5` (audit_log and its append-only trigger), `c4f91b280e36`
+(`runs.sandbox_attempt`) and `d5e82a013f47` (`purge_log`). Checked afterwards: every row
+still there (1 tenant, 1 user, 1 project, 1 target, 9 runs, 4 revisions, 25 artifacts), the
+trigger present, both new columns present. Additive migrations are the low-risk kind, but
+four unapplied ones meeting real rows is still worth observing rather than assuming.
+
+**Two tenants, created without raw SQL** — the thing follow-up 6 blocked until #46:
+
+```
+$ docker compose exec api python -m app.accounts create-tenant \
+      --name "Acme Ltd" --slug acme --admin boss@acme.test
+tenant: Acme Ltd (log in with slug 'acme')
+admin: boss@acme.test
+password: ...
+```
+
+…and the same for `Globex Inc` / `globex`. Both arrived **bounded** at 3 concurrent / 500
+monthly from the column's server default, which is the first evidence for #35's
+"a tenant arrives bounded" on a path that is neither the migration seed nor raw SQL — the
+two paths that argument was written about. Each wrote one `user.add` audit row against its
+own new tenant with `system` as the actor, as the CLI binds no user.
+
+Each tenant then logged in over HTTP and created a project and a target of its own
+(`acme-app`, `globex-app`, both at revision 1 in blob storage).
+
+**Every tenant is refused every other tenant's rows, in every direction.** Three cookie
+jars, `curl`, HTTP status only:
+
+| Request | as tenant 1 | as `acme` | as `globex` |
+|---|---|---|---|
+| `GET /projects` | `['P4 walkthrough']` | `['acme-project']` | `['globex-project']` |
+| `GET /targets` | `['saucedemo']` | `['acme-app']` | `['globex-app']` |
+| `GET /runs` | 9 rows | 0 | 0 |
+| `GET /targets/1/revisions` (tenant 1's) | 200 | **404** | **404** |
+| `GET /runs/1`, `GET /artifacts/1/content` | 200 | **404** | **404** |
+| `GET /targets/4/revisions` (`acme`'s) | **404** | 200 | **404** |
+| `GET /targets/5/revisions` (`globex`'s) | **404** | **404** | 200 |
+
+The reverse direction matters as much as the forward one, and is the half a single-tenant
+fixture cannot show: tenant 1 is the seeded operator and an admin, and it is refused both new
+tenants' rows just the same.
+
+**A route that forgot its authentication dependency fails closed.** `AuthDep` is on the
+whole router (`app/api.py`), so the way to forget it is to mount a route on a router that
+does not carry it — which is exactly what a new feature router looks like if nobody notices.
+A temporary `GET /uat-unguarded-projects` was added on a bare `APIRouter`, the api image
+rebuilt, and the route called **with no cookie**:
+
+```
+HTTP 500
+  File "/app/app/tenancy.py", line 368, in _filter_by_tenant
+    tenant_id = current_tenant_id()
+  File "/app/app/tenancy.py", line 113, in current_tenant_id
+    raise NoTenantScope(
+app.tenancy.NoTenantScope: no tenant scope is active, so there is no tenant to act as.
+A request resolves one from the authenticated user (auth.require_auth -- check the route
+has its auth dependency); ...
+```
+
+Not a leak and not a silent default: a 500 raised **inside the read guard**, with a message
+that names the probable cause and the dependency to check. Before #43 this route would have
+answered **200 with tenant 1's projects**, which is the whole of story 6's "a missing filter
+is a bug that fails closed rather than a leak". The probe was then reverted, the image
+rebuilt, and the path confirmed 404.
+
+**An ORM `UPDATE` and an ORM `DELETE` outside any tenant scope are refused** (#44's
+guarantee, observed rather than asserted). Run inside the api container with no
+`tenant_scope()` anywhere in the process, aimed at tenant 2's throwaway project rather than
+tenant 1's real data — the guard is supposed to raise before touching anything, so which row
+is named cannot matter, and if it did the row lost is one this UAT created minutes earlier:
+
+```
+RESOLVER: raised NoTenantScope
+UPDATE:   refused, NoTenantScope      # update(Project).where(id==3).values(name="stolen")
+DELETE:   refused, NoTenantScope      # delete(Project).where(id==3)
+AFTER:    [(3, 'acme-project')]       # read back inside tenant_scope(2)
+```
+
+**The reaper still sees every tenant across a real timer tick.** A crashed run cannot be
+produced through the API — a crash *is* a run whose process stopped renewing its lease — so
+one was seeded per tenant with SQL, recorded here verbatim in intent: a live run holding its
+target's lock with a lease that lapsed an hour ago, for tenant 2 and tenant 3, with tenant
+1's rows untouched. Then one real 30-second tick:
+
+```
+api-1  | reaped 2 run(s) with expired leases: [11, 12]
+```
+
+Run 11 is tenant 2's and run 12 is tenant 3's; both ended `failed` with
+`lease expired (reaped)` and `app_locks` went to 0. **Neither belongs to the default
+tenant**, which is what makes this an observation rather than a formality: a sweep that
+quietly resolved to tenant 1 — the failure `reaper._for_each_tenant` exists to prevent —
+would have reaped neither and reported a clean pass.
+
+**The bypass allowlist: the criterion as written does not pass, and here is why.** It asked
+that the list be "no larger than it was before the wave". It is larger by one. Before wave 1
+(`e24c9cf`) it held three entries; it now holds four:
+
+| Entry | Why it is allowed to cross the boundary |
+|---|---|
+| `repo: get_user_for_login` | Login resolves *which* tenant is acting, so it cannot already be scoped. Scoped by the slug the caller typed instead. |
+| `repo: get_run_across_tenants` | The cross-tenant primary-key read itself, used by the reaper entry below. |
+| `reaper: _tenant_of` | Resolves a reaped run's tenant in order to *open* its scope, so it cannot already be inside it. |
+| `bus: prune_run_logs` | **The new one.** |
+
+The new entry arrived in `b8fb7a5` — #44 itself, the commit that put ORM `UPDATE`/`DELETE`
+under the guard. It is not a new bypass: the log retention sweep was *already* a cross-tenant
+bulk delete, and it needed no opt-out only because the guard did not reach writes. Once it
+did, the sweep had to declare itself. So the honest reading is that **the set of things
+crossing the tenant boundary did not grow; the set of things that must say so grew by one,
+because the guard got wider** — and the alternative was to leave deletes unguarded, which is
+what #44 existed to fix. Wave 3 added nothing: #47's purge deliberately runs inside
+`tenant_scope` and takes no bypass at all, which is why the list is unchanged after five more
+tickets.
+
+`make ci-test` green: ruff clean, **1307 backend tests, 115 frontend tests.**
+
+**What this does not prove.** No run was *dispatched through the portal* during UAT 1 — the
+stack came up with `QA_RUNNER=fake` — so nothing here says anything about a real agent. That
+is UAT 2 (#53). The two new tenants and their rows were left in place for it, and for UAT 3
+(#54) to offboard.
+
+**A correction, and a thing worth knowing about the suite.** An earlier draft of this section
+said no run executed at all. That was wrong: `tests/test_docker_sandbox.py` takes a
+`real_store` fixture — the actual SeaweedFS of this stack, not `FakeStorage` — and its
+`@pytest.mark.docker` tests run whenever the daemon is usable rather than skipping. Docker was
+up for this whole session, so **every `make ci-test` run really started containers and really
+wrote objects into the dev store.** Sixteen such runs are visible in SeaweedFS as
+`tenant/1/runs/20261104-1[345]*-demo-<uuid>-*/` (5 objects each, 80 in all), which is one per
+full-suite run through the day.
+
+That is by design and not a defect, but two consequences follow. It means
+`make ci-test-docker`'s container coverage was *already* being exercised by `make ci-test` on
+this machine, which is the honest reading of #53's last criterion. And it means the suite
+leaves real objects behind in the dev store whose database rows the fixtures then truncate —
+orphans that no purge will ever name, because the tenant they belonged to still exists and
+the runs do not. Harmless here, and worth knowing before anyone reads a store listing as
+inventory.
+
+
+## Verified on 2026-11-04 — P5-19 / #53 (UAT 2: a real agent run over the HTTP seam)
+
+P5's missing counterpart to #16 (P3-09) and #28 (P4-10): **a real `QA_RUNNER=claude` run, in a
+real container, driven end to end over the HTTP control-plane seam, paused and resumed by
+hand.** P4-10 proved a real run in a real container; it could not prove this, because the HTTP
+seam did not exist then.
+
+Run 13, on tenant 2 (`acme`)'s own target rather than tenant 1's — so the phase's real
+P4-walkthrough evidence was not written into. `QA_RUNNER=claude`, `QA_SANDBOX=docker`,
+`QA_SPEND_BUDGET_USD=10`, api rebuilt from this tree.
+
+**It completed.** All five steps, **$4.01** and **428 sandbox-seconds**, no error. From a
+110-byte user story it produced an 11 KB test plan and three spec files (~17 tests) under
+`tests/login-valid-user/`, and the log is unmistakably a real agent at work:
+
+```
+[explore]  I ran all 17 scenarios from the plan by hand in the browser, starting from
+           `seed.spec.ts` in `chromium`...
+[explore]  Unexpected result: the locked-out login is rejected, yet a
+           `session-username=locked_out_user` cookie...
+[generate] I generated 17 tests in 3 files under `tests/login-valid-user/`...
+[heal]     After healing, all 17 tests pass on Chromium; the last two runs were both 17/17.
+```
+
+It committed **three revisions** over the HTTP seam — 3, 4 and 5 on target 4, parent-chained,
+each authored `run:20261104-170707-acme-app-3aa7ad` and `produced_by_run_id = 13`, growing the
+tree from 8 files to 11 — and collected **8 artifacts**, every one of them keyed
+`tenant/2/runs/<run_key>/...`. That last fact also closes #42's "not proven against
+SeaweedFS": the new key shape was written by a real run into the real store.
+
+**The sandbox holds no credentials, observed on the running container.** Not read off the
+compose file — `docker inspect` on the live container, environment variable *names* only:
+
+```
+ANTHROPIC_API_KEY  CLAUDE_CONFIG_DIR  HTTPS_PROXY  NO_PROXY  QA_APP
+QA_CONTROL_PLANE_URL  QA_RUN_ID  QA_RUN_TOKEN  QA_RUNNER  QA_RUNS_DIR  ...
+```
+
+and each forbidden name checked individually: `DATABASE_URL` absent, `S3_ENDPOINT` absent,
+`S3_ACCESS_KEY` absent, `S3_SECRET_KEY` absent, `S3_BUCKET` absent, `QA_SECRET_KEY` absent,
+`QA_ENVELOPE_KEY` absent, `QA_RUN_TOKEN_KEY` absent.
+
+**And the stores are off its network**, which is the half a variable list cannot show. The
+container is attached to `qa-sandbox` alone, and from *inside* it:
+
+```
+postgres    -> (no DNS answer)
+seaweedfs   -> (no DNS answer)
+api         -> 172.18.0.2
+```
+
+The API really is the only thing a run can resolve.
+
+**The pause, and #48's guarantee, against the live API.** Paused mid-`explore` through the
+portal route. The run went to `paused`, `sandbox_handle` was cleared, and the container was
+destroyed. The token copied from the container's environment *before* the pause then:
+
+```
+HTTP 403
+{"detail":"run 13 is no longer on attempt 1; its sandbox is gone and this token
+  no longer authorizes anything"}
+```
+
+Both tokens decoded through `run_token.read_unverified`, which is the only reader a sandbox
+has:
+
+| token | scope it carries | against the live API |
+|---|---|---|
+| copied before the pause | `RunScope(run_id=13, target_id=4, tenant_id=2, sandbox_attempt=1)` | **403** |
+| the resumed sandbox's | `RunScope(run_id=13, target_id=4, tenant_id=2, sandbox_attempt=2)` | **200** |
+
+Same run, same target, same tenant; one claim apart. Before #48 the first of those was a 200
+for the whole length of the pause, which is the window review item 51 described and this is
+the observation of it being shut. The resumed token on *another* run's path is 403 too.
+`runs.sandbox_attempt` on the row read 2.
+
+**The resume got its session back**, which is the thing P4 built the per-boundary archive for:
+
+```
+=== session: restored; the agent remembers what it explored ===
+=== hydrate: worktree built from revision 3 (8 files) ===
+=== run 20261104-170707-acme-app-3aa7ad started (begin at explore) ===
+```
+
+Re-hydrated from **revision 3** — the revision the interrupted attempt had already committed —
+and restarted at `explore`, the step the pause interrupted, not at the beginning.
+
+**The liveness exemptions, observed rather than reasoned about.** The last two lines in
+`run_log` are
+
+```
+187 | === run 20261104-170707-acme-app-3aa7ad completed ===
+188 | === teardown: worktree removed ===
+```
+
+Both are published **after** `complete_run()`, and `spend_usd` was written after it too. Had
+the gate covered `publish_log` and `record_cost`, those two lines would simply be missing and
+the cost would be null — which is the debugging session P5-05's record says this cost once.
+Once the run was terminal, **both** tokens answered 403.
+
+**Teardown left nothing**: no `qa-run-*` container, no `qa-proxy-*` container, and
+`sandbox_handle` cleared — P4's "every finished run leaking its egress proxy" staying fixed.
+
+**`make ci-test-docker` runs without skipping**, checked rather than assumed: the
+`@pytest.mark.docker` selection collects 6 tests and all 6 pass as dots, no `s`. Exit 0, with
+1307 backend and 115 frontend tests.
+
+**A thing about the suite that this uncovered**, and the reason UAT 1's own "no run executed"
+line is now corrected: `tests/test_docker_sandbox.py` takes a `real_store` fixture — the actual
+SeaweedFS of this stack — and its Docker-marked tests run whenever the daemon is usable rather
+than skipping. Docker was up all day, so **every `make ci-test` really started containers and
+really wrote into the dev store**: sixteen passes are visible as
+`tenant/1/runs/20261104-1[345]*-demo-<uuid>-*/`, five objects each. By design, and useful —
+it means the container path was being exercised far more than the record claimed — but it also
+means the suite leaves objects whose rows the fixtures then truncate, and a store listing is
+therefore not an inventory.
+
+**#50's flake.** The mechanism is recorded in follow-up 53 and in `bc73027`: the session
+archive's digest was a function of the clock, because `tarfile.open(path, "w:gz")` writes the
+current time into the gzip header, so "identical bytes are not a new version" held only for
+two saves inside one wall-clock second. It is a mechanism, not a disappearance — the fix is
+`mtime=0` and a test that saves an unchanged directory twice a real second apart. Three
+consecutive clean full-suite runs on the finished tree:
+
+```
+run 1: 1309 passed in 263.63s
+run 2: 1309 passed in 264.92s
+run 3: 1309 passed in 267.78s
+```
+
+1309 rather than 1307 because UAT 3's fix brought two tests with it. Worth recording how the
+first attempt at this went: three runs started while the UAT-3 auth tests were still being
+written failed 1, 2 and 2 — **my own edits mid-run, not a flake**, which is a reminder that
+"three consecutive green runs" only means something if nothing else is touching the tree.
+
+**What this does not prove.** The run used one target, one story and one site; nothing here
+says anything about the agent's behaviour on a different application. The pause was taken at
+one point in one step. And the egress allowlist was not probed during this run — `#28`'s
+breach tests remain the evidence for that.
+
+
+## Verified on 2026-11-05 — P5-06 / #36 (the prompts, verified at last)
+
+The section #36 never had. It was implemented in `8b5aec3` and this record said plainly that
+it did not vouch for it: "no §Verified section was written for it". UAT 3's closeout asks for
+one, so here it is — observed against the live stack rather than reconstructed from the
+commit.
+
+**The shipped defaults are rows a tenant can see.** `GET /prompts` as tenant 1:
+
+```
+  qa_system_prompt.md     rev=1 len=8348      steps/3-explore.md   rev=1 len=975
+  steps/1-read_story.md   rev=1 len=366       steps/4-generate.md  rev=1 len=1922
+  steps/2-plan.md         rev=1 len=972       steps/5-heal.md      rev=1 len=1463
+                                              steps/_context.md    rev=1 len=1975
+```
+
+**An override is a new revision, not an overwrite.** `PUT /prompts/steps/2-plan.md` with 90
+bytes of tenant-1-specific instruction answered `rev=2`, and the history carries both:
+
+```
+  rev=1  len=972   (the shipped default)
+  rev=2  len=90    (tenant 1's)
+```
+
+**And the override is that tenant's alone**, which is story 24's actual claim. A tenant
+created fresh for this check (`promptcheck`, made with the #46 command and purged afterwards)
+read the same prompt and got `rev=1 len=972` while tenant 1 continued to read `rev=2 len=90`.
+Two tenants, one prompt name, different bytes, observed over HTTP.
+
+**A run is pinned to the versions it used.** A fake run on tenant 1's target
+(`QA_RUNNER=fake`, so this cost nothing) completed and recorded:
+
+```
+runs.prompt_revs = {"steps/2-plan.md": 2, "qa_system_prompt.md": 1,
+                    "steps/1-read_story.md": 1, "steps/3-explore.md": 1,
+                    "steps/4-generate.md": 1, "steps/5-heal.md": 1,
+                    "steps/_context.md": 1}
+```
+
+It picked up the override made minutes earlier — `2` for the one prompt that had been edited
+and `1` for the rest — which is the end-to-end claim: an edit in the portal reaches the next
+run, and the run records what it was told rather than what the prompt says now.
+
+**One thing observed that is worth writing down, because the portal will show it.** Both
+revisions came back with the *same* `created_at`, to the microsecond. That is not a bug but it
+is misleading: a shipped default is not a row until something makes it one, and
+`prompt_store._seed` materialises rev 1 at the moment the first override is saved — so rev 1's
+timestamp is when it *became this tenant's row*, not when those bytes shipped. `#39`'s
+`savedLabel` renders "shipped default" only for a `null` `created_at`, which is the
+not-yet-a-row case; a *seeded* rev 1 has a real timestamp and will render as a date somebody
+appears to have saved. Two revisions sharing a timestamp to the microsecond is the tell.
+Recorded as follow-up 56 rather than changed here: the honest fix is a label, and which label
+is a product question.
+
+**What this still does not prove.** No browser — the Prompts panel and its diff have been
+rendered only by `Settings.test.jsx`, which is the gap P5-04's lesson is about and which #39's
+own row already admits. And the override reached a *fake* run; the real run in UAT 2 used
+tenant 2's prompts, which were the shipped defaults, so "a real agent behaved differently
+because of an override" is not something this record claims.
+
+
+## Verified on 2026-11-05 — P5-20 / #54 (UAT 3: onboarded, used, offboarded)
+
+The round trip, which is the test: a tenant created through the application, used for real
+work, then purged — with the bucket and the tables checked afterwards. It is the one exercise
+that proves onboarding and offboarding are inverses, and no suite will run it against a real
+object store.
+
+Three tenants were created and all three are gone. `acme` is the interesting one: it did the
+real agent run of UAT 2.
+
+**Created without SQL** — `python -m app.accounts create-tenant`, three times. Each got its
+tenant row, its first admin, a `user.add` audit row against its own tenant with `system` as
+the actor, and caps of 3/500 from the column's server default.
+
+**Deviation, recorded rather than ticked.** The criterion says "created through the portal".
+It was created through an **operator command**, and that is
+`docs/adr/0002-tenant-creation-is-an-operator-action.md`, not an omission: every authenticated
+surface here acts *as a tenant*, and the person creating one belongs to none, so `AdminDep`
+would mean "an admin of A may create B" and ungated would let anyone create tenants. The
+requirement the criterion is really about — "no SQL" — holds. The ADR's "revisit when" is a
+platform-operator role.
+
+**The second deviation, also recorded.** "No SQL is run at any point" is not true of `acme`'s
+full lifetime: UAT 1 seeded a crashed run into it with `INSERT`, because a crash cannot be
+produced through an API. Every *administrative* action on it — invite, remove, quota change,
+purge — went through the portal routes or the command, and no SQL mutated it otherwise.
+
+**User administration, through the portal.** As `boss@acme.test`:
+
+| Action | Result |
+|---|---|
+| `GET /users` | `[{"id":3,"email":"boss@acme.test","role":"admin"}]` |
+| `POST /users` `{dev@acme.test, member}` | 201 with a one-time password |
+| that password at `POST /auth/login` | 200 — the invite works end to end |
+| `DELETE /users/5` | 204; gone from the listing; **their login is now 401** |
+
+and as the invited *member*, every admin route refused with `{"detail":"tenant-admin role
+required"}`:
+
+```
+  GET /users -> 403    GET /audit -> 403      PUT /usage/caps -> 403
+  POST /users -> 403   DELETE /users/3 -> 403     (GET /targets -> 200, its own reads work)
+```
+
+**The quota route (#45), live.** Raising the concurrency cap to 7 left the monthly quota at
+500 — the omitted-versus-`null` distinction, against a real deployment — and
+`{"monthly_run_quota": null}` made it unmetered with `at_monthly_quota: false`. A third call
+repeating a stored value answered 200 and wrote **no** audit row, which is the review fix
+working where it matters. The operator path still exists: `repo.set_tenant_caps` is reachable
+from a console and is what the route calls.
+
+**The audit log's own account of it**, read through `GET /audit`:
+
+```
+quota.change  actor=boss@acme.test  before={concurrency 7, monthly 500} after={7, null}
+quota.change  actor=boss@acme.test  before={3, 500}                     after={7, 500}
+user.add      actor=boss@acme.test  target=user:5  after={dev@acme.test, member}
+user.add      actor=system          target=user:3  after={boss@acme.test, admin}
+```
+
+Two `quota.change` rows for three calls, and the two `user.add` rows differ in exactly the way
+the design intends: `system` for the CLI-created first admin, the acting admin for the portal
+invite.
+
+**The two defined answers #46 chose.** Removing the last admin — which here was also removing
+yourself — is **409** carrying the remedy: *"boss@acme.test is the last admin of this tenant
+and cannot be removed; make another admin first, then remove this one."* With a second admin
+present, removing yourself is **204** and allowed, and the remaining admin logs in and sees a
+one-user tenant. Both observed.
+
+### The finding this UAT exists for
+
+**Removing a user did not remove their access.** After `DELETE /users/3` removed
+`boss@acme.test`, that account's own cookies still worked: `POST /auth/refresh` minted a fresh
+access cookie (200, `role: admin`), and with it the deleted account read `/users`, **created
+another admin account** (`POST /users` → 201) and changed the tenant's quotas. The audit log
+recorded every move under the deleted account's name, which is how it was noticed — the trail
+was the only control that saw it.
+
+The mechanism: neither `require_auth` nor `/auth/refresh` re-read the `users` row. `app/auth.py`
+justifies that as "a role or tenant change takes effect at the user's next login", which is a
+fair bargain for a *downgrade* — the person still works here. P5-14 added a **removal**, and
+removal is the case it does not cover: an offboarded contractor, a compromised account. And
+because refresh is what re-issues the short cookie, the honest description of the old behaviour
+was not "fifteen minutes" but **"up to thirty days"**, the refresh cookie's cap.
+
+**Fixed here**: `POST /auth/refresh` now re-reads the row, tenant-scoped, and takes the new
+cookie's claims from it — so a removed user's refresh is the same bare 401 a missing cookie
+gets, and a role change takes effect at the next refresh rather than only at the next login.
+One database read per refresh, not per request, so `app/auth.py`'s argument survives intact.
+Verified on the rebuilt stack: the removed user's refresh is 401 where it was 200.
+
+**Not fixed, and recorded as follow-up 55**: a removed user keeps their *existing* access
+cookie until it expires, up to 15 minutes. Demonstrated on the fixed build — a user removed
+seconds earlier still got `POST /users` → 201. Closing it needs a read on every request, which
+is the round trip this design declined; the options and their costs are in the follow-up.
+
+### The purge
+
+**`#42`'s expand-then-contract, proven both ways on the real store.** One artifact was planted
+under the **pre-P5-10** key shape for `acme`'s real run
+(`20261104-170707-acme-app-3aa7ad/uat3-pre-migration.txt`, outside any tenant prefix) and it
+**downloaded through the portal route, 200, unmigrated** — which is the expand half, and the
+reason a deployment can take the re-key at leisure instead of during a deploy.
+
+**"What does this tenant have in the bucket?" answered from the bucket.** By prefix, with no
+database: `tenant/2/` held 22 objects — 14 blobs and 8 run artifacts — and the planted legacy
+object was visibly *outside* it.
+
+**The gate refuses a mismatched confirmation before anything is touched:**
+
+```
+$ python -m app.accounts purge-tenant --slug acme --confirm-slug acme-typo
+error: refusing to purge 'acme': the confirmation named 'acme-typo'. Both must be the
+same tenant, because this cannot be undone
+```
+
+…and `acme`'s two runs were still there afterwards. Named twice, it ran:
+
+```
+purged: tenant 2 (acme): 23 object(s), 276 row(s) [artifacts 9, audit_log 14,
+  file_index 43, projects 1, prompts 7, revisions 5, run_log 188, run_steps 5,
+  runs 2, targets 1, users 1]
+```
+
+**23, not 22** — the planted legacy object went too. That is the review fix earning its place:
+the purge reads its own run keys *before* deleting the rows and sweeps those prefixes as well,
+so an object left under the old shape does not outlive the tenant. Without it, that object
+would have sat in the bucket for ever with nothing left to name it.
+
+**Checked directly afterwards, not inferred from the success line:**
+
+```
+tenant-owned rows remaining : NONE   (all 12 tables, inside tenant_scope(2))
+objects under tenant/2/     : 0
+the planted legacy object   : GONE
+tenants row for acme        : GONE
+```
+
+**And tenant 1 untouched**, compared against a snapshot taken before: 25 artifacts, 34
+`file_index`, 1 project, 4 revisions, 30 `run_log`, 23 `run_steps`, 9 runs, 1 target, 1 user,
+**796 objects** — every count identical. Objects outside any tenant prefix went 533 → 532,
+which is exactly the one planted object and nothing else. Tenant 1 still logs in and serves
+`/projects`, `/targets`, `/runs`, `/targets/1/revisions` and `/artifacts/1/content`, all 200.
+
+**A purge interrupted halfway, re-run, completes.** How it was interrupted, precisely: the
+pass's own steps 1–3 were run in a process that then exited **without** reaching step 4 (the
+`tenants` row) or step 5 (`purge_log`) — which is the state a crash between 3 and 4 leaves, and
+the state the order was designed to make the recoverable one. `globex` was left with its rows
+and objects gone and its tenant row present:
+
+```
+tenant row still present: 1 | its users: 0 | its runs: 0 | purge_log rows: 0
+```
+
+The same command, unchanged, then finished it: `purged: tenant 3 (globex): 0 object(s), 0
+row(s)`, the tenant row gone and `tenant/3/` empty. **Worth knowing about the log**: that row
+records zeros, because it records what *this* pass removed rather than a cumulative total. A
+reader reconstructing an offboarding from `purge_log` alone would under-count an interrupted
+one.
+
+**The purge is the only path that deletes audit rows**, checked from the strongest place —
+`psql`, outside the application entirely, after a purge had disabled and re-enabled the
+trigger:
+
+```
+qa=# update audit_log set actor='forged' where tenant_id=1;
+CONTEXT:  PL/pgSQL function audit_log_refuse_mutation() ...
+qa=# delete from audit_log where tenant_id=1;
+CONTEXT:  PL/pgSQL function audit_log_refuse_mutation() ...
+tenant 1 audit rows intact: 1 | actor=admin@example.com
+```
+
+The trigger is back on, and `grep -rn "DISABLE TRIGGER" server/app` finds exactly one
+executable occurrence: `app/accounts/purge.py`. The other three hits are prose pointing at it.
+
+**It used no cross-tenant bypass**, which is the criterion's other half and a deviation from
+its wording. `grep -c across_tenants app/accounts/purge.py` → 0; the bypass allowlist is the
+same four entries it held before wave 3. #44 put ORM `DELETE` under the guard, so a delete
+issued inside `tenant_scope(tenant_id)` is *scoped by the guard* to exactly the rows being
+purged — strictly stronger than opting out, and what the allowlist's own comment asks for.
+
+**The record that survives all of it.** `purge_log` holds three rows naming three tenants that
+no longer exist, and the dev database is back to one tenant.
+
+**What this does not prove.** No browser: every portal action here went through `curl` against
+the real routes, which is the same HTTP the browser speaks but not the same rendering, and the
+Users panel and the caps editor have been seen only by `vitest`. The purge was run by an
+operator with shell access, which is the only way it can be run. And `rekey` was exercised on
+this store's 25 real legacy rows, but 532 row-less orphans remain there and no purge will ever
+name them, because the tenant they belong to still exists and the runs do not.
+
+
 ## Decisions recorded during this phase
 
 | Decision | Why |
@@ -1250,6 +1974,14 @@ end of the phase. They are what #30 is waiting on in code, as opposed to in evid
    demoting a tenant admin leaves them able to rotate that tenant's GitHub credential — the
    credential a delivery pushes with — for up to 30 days of refreshes. It is the sharpest
    consequence of the stateless-token decision so far, and it is the same fix as item 1.
+
+   **Closed on 2026-11-05 (UAT 3).** `/auth/refresh` re-reads the `users` row,
+   tenant-scoped, and takes the new cookie's claims from it, so a role change takes effect at
+   the next refresh — within 15 minutes — rather than at the next login. It was closed not for
+   this reason but because the same gap meant a **removed** user kept their access for 30 days
+   (§"Verified on 2026-11-05 — P5-20 / #54"), which is the sharper consequence this item did
+   not anticipate: it reasoned about demotion, and removal did not exist when it was written.
+   What remains of item 1 is follow-up 55.
 5. **A cold load of the login page fires one pointless `POST /auth/refresh`.** `api.me()`
    401s when nobody is logged in, which trips the refresh dance. Harmless, one round trip,
    but it puts a 401 and a failed refresh in the log of every first visit.
@@ -1264,6 +1996,13 @@ end of the phase. They are what #30 is waiting on in code, as opposed to in evid
     it is a real edge: **a future bulk write must filter itself**, and no test would catch one
     that did not. The honest fix, if one is wanted, is a second listener on
     `do_orm_execute` for `is_update`/`is_delete`.
+
+    **Closed on 2026-11-04 by #44 (P5-12)**, with exactly that fix, after the two-axis review
+    of #30 promoted it from an edge to item 50's write half: a second tenant was shown
+    renaming a project to "stolen" and deleting every log line of a run it did not own. The
+    guard is no longer a read guard, and the test module is no longer named as if it were.
+    `bus.prune_run_logs` joined the bypass allowlist as a result — the one entry that list
+    gained in the whole phase, and UAT 1 records why that is not a widening.
 16. **A row already in a session's identity map bypasses the filter.** `Session.get()`
     returns it without a SELECT, so a session that read across tenants once can hand that
     object back afterwards. No request does — the bypasses all open their own sessions —
@@ -1340,10 +2079,40 @@ end of the phase. They are what #30 is waiting on in code, as opposed to in evid
 
 ### Carried over or deferred
 
-6. **The tenant-admin surface does not exist.** No way to create a tenant, set its slug, or
+6. **The tenant-admin surface does not exist.** ~~No way to create a tenant, set its slug, or
    invite a user — `repo.create_user` was deliberately removed in `06a3acd` as out of scope.
    Until it lands, a second tenant can only be made with SQL, which is why "a second real
-   tenant" sits in §fakes. **This is the gating item for most of the rest of P5.**
+   tenant" sits in §fakes.~~ **This was the gating item for most of the rest of P5.**
+
+   **Closed on 2026-11-04 (#46 / P5-14).** `app/accounts/` is the one module that creates or
+   removes an account, and the surface is split at two altitudes:
+   - **A tenant's own users are a portal surface**: `GET/POST /users`, `DELETE /users/{id}`,
+     all behind `AdminDep`, with a Users panel on Settings shown to admins. Invite assigns a
+     role and returns a **one-time password** — there is no mail path here, so the password
+     exists in that one response and nowhere else; the panel says so, and the audit row
+     deliberately does not contain it.
+   - **Creating a tenant is not a route at all**: `python -m app.accounts create-tenant`.
+     Recorded as `docs/adr/0002-tenant-creation-is-an-operator-action.md`, because the
+     alternative is reasonable and will be proposed again. Every authenticated surface here
+     acts *as a tenant*, and the person creating one belongs to no tenant yet: gated by
+     `AdminDep` it would mean "an admin of A may create B", ungated it would let anyone
+     create tenants, and a platform-operator role is a bigger change than this ticket with
+     its own auth story. The authority is shell access, which on a single-operator
+     deployment is who should have it.
+   `USER_ADD`/`USER_REMOVE` join the audit vocabulary, so **#37's list of seven is
+   complete** — and `tests/test_audit.py`'s tripwire, which was written to fail the moment
+   this surface appeared, is now the inverse assertion. A role *change* is deliberately still
+   absent: nothing performs one, and an `Action` member nothing can write is what that
+   module's rule forbids. Changing a role means remove and re-invite.
+   Two answers the ticket asked for by name: **the last admin cannot be removed** (409, with
+   "make another admin first" in the body, because a tenant with no admin can never be
+   administered again from inside), and **removing yourself needs no special case** — leaving
+   is allowed while another admin remains, and the last-admin rule already refuses the one
+   departure that matters.
+   **What is still not proven**: none of this has been run against the live stack. UAT 1
+   (#52) is where two tenants get created with the command rather than with SQL, and where
+   the portal panel is used in a browser — the suite cannot do either, and this phase has
+   four recorded occasions of a real run finding what a green suite could not.
 7. **`/auth/me` does not return the tenant's slug or name**, so the portal cannot show which
    tenant you are signed into — and with per-tenant emails, the same address in two tenants
    now looks identical in the UI. `Login.jsx` hardcodes `DEFAULT_TENANT = "default"`,
@@ -1616,6 +2385,15 @@ end of the phase. They are what #30 is waiting on in code, as opposed to in evid
     is noted in `app/audit.py` and in the revision, and it is deliberately an explicit,
     reviewable line rather than a quiet capability — but it does mean the purge is the one
     write that can erase part of the trail, and whoever builds it is choosing how much.
+
+    **Resolved on 2026-11-04 by #47**, and the choice it made was "all of that tenant's and
+    nothing else": `app/accounts/purge.py` disables the trigger for exactly its own `DELETE`
+    and re-enables it in the same transaction, and it holds the only executable
+    `DISABLE TRIGGER` in the tree. UAT 3 checked from `psql` — outside the application
+    entirely, after a purge had run — that an `UPDATE` and a `DELETE` on another tenant's
+    audit rows are both still refused. One thing this item did not anticipate:
+    `ALTER TABLE ... DISABLE TRIGGER` needs table-owner rights, which the suite's role has and
+    a reduced-privilege production role may not.
 39. **`action` is `VARCHAR(20)` and `delivery.approve` is 16 characters.**
     `models._enum_col` is shared by every domain enum here, so the width is not this table's
     to pick freely. `test_every_action_fits_the_enum_column` turns a would-be runtime refusal
@@ -1694,6 +2472,130 @@ documentation, and none of them is fixed.
     `server/app/`; `app/audit.py` and `app/models.py` each defer it in a comment naming this
     story, and no ticket of the seven covered it. Offboarding today is raw SQL plus an
     un-swept object-store prefix. **This is the largest missing piece of #30.**
+
+    **Closed on 2026-11-04. Read the two paragraphs below in order**: the storage
+    precondition (#40, #42) first, then the purge itself (#47). The first says "the
+    purge is still unbuilt" because it was at that commit — a reader skimming should
+    not stop there.
+
+    **The storage precondition landed first (#40 and #42).** The two things the purge
+    could not have been written against are done:
+    `Storage` can delete a key and list a prefix with paging (#40, nothing calls either
+    yet), and **artifacts have moved under the tenant prefix** (#42), so "that tenant's
+    entire storage prefix" is now a true description rather than half of one.
+    Artifacts were keyed `<run_key>/<path>` and a run key carries no tenant, so they sat
+    outside the prefix blobs were already inside. That was never a leak — artifact rows
+    carry `tenant_id` and the read guard filters them, and the content route resolves the
+    row before touching the store — but it meant the purge had no single prefix to delete
+    and an operator could not answer "what does this tenant have in the bucket?" from the
+    bucket. `app/domain/store_keys.py` now owns the whole layout:
+    `tenant/<id>/blobs/<sha>` and `tenant/<id>/runs/<run_key>/<path>`, with the separator on
+    the prefix because `tenant/1` is a prefix of `tenant/11` and S3's `Prefix` is a byte
+    comparison.
+    Expand then contract, so a deploy breaks nothing: an artifact downloads by the `s3_key`
+    on its own row, so legacy objects resolve unchanged, and `python -m app.artifacts rekey`
+    moves them — per row, in the order copy → row → delete, which makes it both re-runnable
+    and safe to interrupt at either point. **Not an Alembic revision**, and the reason is
+    worth keeping: a revision can rewrite `artifacts.s3_key` but cannot move bytes, so it
+    would point every existing row at nothing and turn a cosmetic inconsistency into an
+    outage for every artifact in the system.
+    Two things found on the way, both now pinned by tests. The discriminator between a blob
+    key and an artifact key used to be "does it start with the run key?", which only worked
+    while the two shapes had nothing in common; it is now `blobs/` versus `runs/`, which is
+    a property of the layout rather than of the caller. And `rekey_all` first took
+    `session_factory=SessionLocal` as a **default argument** — bound at import, so the
+    test's monkeypatch did nothing and the pass connected to the *developer's* database and
+    read 25 artifact rows from a real October run. It wrote nothing only because the fake
+    store held none of those objects. `_no_dev_database`'s docstring claims every such
+    caller takes an injectable factory; it resolves `db.SessionLocal` at call time now, and
+    a test asserts the guard actually bites this module.
+    **Still not proven**: nothing has run `rekey` against a real object store. The paging in
+    #40 is driven through a botocore-shaped stub and the move through `FakeStorage`, so what
+    is unproven is SeaweedFS's behaviour, not the logic. UAT 3 (#54) is where offboarding
+    gets observed end to end.
+
+    **Story 32 itself closed on 2026-11-04 (#47 / P5-15).** `python -m app.accounts
+    purge-tenant --slug acme --confirm-slug acme`. The order is the design, because the
+    requirement is that a half-finished purge is safe to run again: the store first, then
+    the tenant's rows table by table, then the audit rows with the trigger off, then the
+    `tenants` row, then the `purge_log` row. **The tenant row goes last** so the slug still
+    resolves after any interruption and the same command finishes the job; deleting it first
+    would leave an operator holding a slug that resolves to nothing and a bucket prefix
+    nobody can name.
+    **No tenant bypass, which is a deviation from what the ticket expected.** #47 says the
+    purge "must use the documented bypass rather than quietly escaping the guard" — it needs
+    neither, because #44 put ORM DELETE under the guard, so a delete issued inside
+    `tenant_scope(tenant_id)` is *scoped by the guard* to exactly the rows being purged.
+    That is strictly stronger than opting out, and it is what the allowlist's own comment
+    asks for ("ask first whether the read can be done inside a tenant scope instead"). The
+    bypass allowlist did not grow.
+    The table list is derived from the mapped classes, so a table added later is purged
+    without anybody remembering this module — the argument `install_tenant_guard` makes for
+    the read filter, applied to the delete — and a test asserts the **fixture** populates
+    every one of the twelve, because a purge test over two tables would pass while covering
+    none of the rest.
+    The audit trigger is disabled for one statement and re-enabled in the same transaction;
+    a test asserts it is back on by trying to delete another tenant's row afterwards. That
+    module holds the only `DISABLE TRIGGER` in the tree, and `app/audit.py` now says so.
+    The gate is **naming the tenant twice** (`--slug` and `--confirm-slug`) rather than a
+    `--yes`: a flag can be pasted into any invocation, a second spelling cannot be confirmed
+    for the wrong tenant by accident, and unlike a prompt it stays scriptable.
+    `purge_log` is the record that survives, and is deliberately not tenant-owned — a record
+    belonging to the purged tenant would be deleted by the thing it records. **Two structural
+    tripwires fired while building it, and both were right.** It first carried a `tenant_id`
+    column, which `test_tenant_isolation_repo.py` fails for any mapped class not inheriting
+    the mixin; the honest fix was renaming it `purged_tenant_id`, since it names a tenant
+    that no longer exists rather than an owner, and exempting the tripwire would have spent
+    the guarantee to save a word. Then `test_tenancy.py` fails any table without the column
+    at all; that one needed a real exemption, so the test now carries a named set with a
+    reason per entry — two so far, and of different kinds: `tenants` *is* the tenant, and
+    `purge_log` is ours rather than any customer's.
+    `_no_dev_database` caught the CLI's `create-tenant` ignoring its injected session factory
+    on the way through, which is the third time that guard has earned its place in this phase.
+    **Still not proven**: no purge has run against SeaweedFS or against a real tenant. The
+    sweep is driven through `FakeStorage`, and `ALTER TABLE ... DISABLE TRIGGER` needs
+    table-owner rights — which the suite's role has and a reduced-privilege production role
+    may not. Both belong to UAT 3 (#54).
+
+    **The two-axis review of the wave, applied the same day.** It found one defect that
+    would have shipped and several documents claiming more than the code did.
+
+    The defect: `app/accounts/__main__.py` had its `if __name__ == "__main__"` block
+    *above* `_purge_tenant`, so `python -m app.accounts purge-tenant` raised `NameError` —
+    the only documented path to story 32, broken, with a green suite, because every test
+    calls `main()` after the import has finished. Worth recording how it is caught now,
+    because the obvious test does not work: `--help`, on the parser or on a subcommand,
+    exits inside argparse before any handler is referenced, so the module runs and exits 0
+    with the defect in place. `tests/test_cli_entrypoints.py` asserts the invariant itself
+    through the AST — the entry block is the last top-level statement — and was checked by
+    reintroducing the bug.
+
+    Two places where the purge claimed more than it did, both now true rather than
+    reworded. It swept only `tenant/<id>/`, so an object still under the **pre-P5-10 key
+    shape** — a deployment that never ran `rekey`, or one interrupted between updating a row
+    and deleting the old object — would have stayed in the bucket for ever, with nothing
+    left to derive its key from afterwards. The purge now reads its own run keys *before*
+    deleting the rows and sweeps those prefixes too, which is also why `rekey`'s docstring
+    no longer promises a `--prune-orphans` pass that did not exist. And the object count it
+    recorded was the number **listed**, not the number deleted — and `Storage.delete`
+    swallows failures by design, so `purge_log` could have claimed objects that were still
+    in the bucket, in the one operation with no undo. Each key is re-checked now, survivors
+    are logged by name, and the count is what actually went.
+
+    One authorization gap: `authorize_artifact_key` accepted the legacy shape on **writes**
+    as well as reads, so a run could still have created an object outside the tenant
+    prefix. It takes `allow_legacy`, passed only by `blob_exists` and `read_blob`. The
+    two-transport gateway test failed on that change, because it had been spelling a legacy
+    key by hand and passing — which is the test doing its job a release late.
+
+    Smaller, and each a case of one rule in two places: an empty `PUT /usage/caps` wrote a
+    `QUOTA_CHANGE` row whose `before` equalled its `after` (no-ops are no longer audited,
+    fixed in `set_tenant_caps` so the console path gets it too); the user-removal route
+    picked 404 versus 409 by matching the exception's *message*, which is simultaneously
+    user-facing prose, so rewording it for a human would have flipped a status code (there
+    is a `NoSuchUser` type now); and the role probe was copied into two pages, with the
+    first page's comment still saying it was the only one that wanted it (one `useIsAdmin`
+    hook).
 49. **Stories 1, 2 and 5 — no tenant or user administration.** `app/domain/audit.py` states
     there is no user-administration surface at all, which is why `Action` has no
     `USER_ADD`/`USER_REMOVE` and why #37 could not record two of the mutations its own spec
@@ -1701,6 +2603,31 @@ documentation, and none of them is fixed.
     Separately, `repo.set_tenant_caps` has **no route and no role check**, so story 5's "only
     authorized users can … change quotas" is unenforced — `AdminDep` reaches `deliver`,
     `reset`, the `pat` writes and `/audit`, and nothing else.
+
+    **The quota half closed on 2026-11-04 (#45).** `PUT /usage/caps`, behind `AdminDep`:
+    under `/usage` on purpose, so it inherits the read's entry in both proxy allowlists
+    rather than needing a new first segment in each (a path missing from them answers 200
+    with the SPA shell, which is how P5-04's own panel shipped invisible). No tenant in the
+    path — `set_tenant_caps` writes to `current_tenant_id()`, so "change another tenant's
+    caps" is a request the surface cannot express rather than one it checks for, and a test
+    smuggles an id into the body to say so.
+    An omitted cap and an explicit `null` stay different requests, through
+    `model_fields_set` into the existing `UNSET` sentinel: collapsing them is how raising
+    one cap silently deletes the other, which already happened once at the function. The
+    portal gets the editor inline with the gauges, shown to an admin only — presentation,
+    with the 403 as the enforcement, and the panel renders the caps the **server** returned
+    rather than the ones that were typed.
+    Role gating is driven through *real* auth and real roles in `tests/test_auth.py` rather
+    than an overridden dependency, and the audit row is proven to name the acting admin
+    rather than `system` for the same reason. The commit is proven across two sessions.
+    **A conflict resolved rather than ignored**: `set_tenant_caps`'s docstring argued
+    against ever having this route — "a tenant that could raise its own caps would not have
+    caps". That is an argument about a *platform ceiling*, which these columns are not;
+    story 5 makes the quota an intra-tenant authorization question. The docstring now says
+    so, and says a real ceiling would be a second limit above this one that nothing in P5
+    asks for yet. **Worth deciding before there are paying customers.**
+    Story 5's remaining half is user administration (#46): there is still no way to make
+    the admin who would press this, other than SQL.
 50. **Story 6 fails open, not closed.** "a missing filter is a bug that fails closed rather
     than a leak". `tenancy.current_tenant_id()` returns `DEFAULT_TENANT_ID = 1` outside any
     scope, so an unscoped path — a route that forgets `require_auth`, or future background
@@ -1713,12 +2640,51 @@ documentation, and none of them is fixed.
     treats `paused` as live, so a token copied before a pause stays valid though the sandbox
     it was minted for has been destroyed. Recorded as a trade-off in item 33; it is also a
     deviation from "rejected after the run ends" and belongs in the same list as that story.
+
+    **Closed on 2026-11-04 (#48).** `runs.sandbox_attempt`, carried by the token and moved on by
+    `repo.pause_run`; see the struck-through trade-off in §P5-05 for the shape and for the
+    two things the first attempt got wrong. Proven at the service
+    (`tests/test_control_service.py`: refused during the pause, still refused after the
+    resume, and the resumed attempt's own token works) and over HTTP
+    (`tests/test_internal_api.py`: 403 on the pre-pause token, 200 on the freshly minted
+    one, which is the transport a container actually uses). The four gate exemptions are
+    unchanged and are asserted to be: a sandbox torn down at a pause still flushes its last
+    log lines and still records what it spent.
+    **What is not proven here**: a resume end to end *in a container*. Both dispatch paths
+    mint through the one function (`control.factory.mint_for_run`, which reads the row), and
+    the HTTP transport is covered above, but the Docker-backed resume is still a
+    `QA_REQUIRE_DOCKER=1` check rather than something the default suite runs. UAT 2 (#53) is
+    where that is meant to be observed.
 52. **The HTTP control-plane seam is never exercised by the real pipeline.** #30 says "The
     run-scoped API is consumed by both the thread and docker paths so the suite exercises
     it." `control.factory.local_for_run` hands the thread path `LocalGateway`, which calls
     the service in process, so `app/internal_api.py` and `app/control/http.py` are covered
     by their own tests and by the container checks in §P5-05 — but no suite run drives the
     HTTP seam through `drive_run`.
+
+    **Closed on 2026-11-04 (#49).** `server/tests/test_pipeline_over_http.py` drives
+    `launcher.drive_run` with an `HttpGateway` over the real router through `TestClient`,
+    and with the `GatewayLogBus` a sandbox actually writes through — so hydrate's blob
+    reads, the step boundary's blob writes and revision commit, the artifact sweep's upload
+    and index, and the log all cross the HTTP seam in one composed run. The assertions are
+    deliberately the ones `tests/test_docker_sandbox.py` makes about a real container: the
+    run row, the step rows, the revisions, the artifacts and the log. No Docker, so it runs
+    in the default suite.
+    Two things it pins that an operation-by-operation test cannot: the last line a run
+    emits (`=== run <key> completed ===`) arrives *after* the final status transition and
+    is asserted to be in the log, which is the `publish_log` exemption observed rather than
+    reasoned about; and the bus's `close` is part of the path, which is where losing the
+    final batch was a real bug.
+    **Still not covered, and named rather than implied**: the container, the image and the
+    network. `TestClient` is every layer of this except the wire, and the Docker-backed
+    tests remain the only thing that proves the rest — which is the honest measure of what
+    is left, since P5-05's record says four real bugs here were found by running a
+    container and none by the suite.
+
+    The test asserts both halves of each upload — the `artifacts` row **and** the bytes
+    under its key in the store — because the two fail separately: an index with no object
+    is what a store adapter bound to the wrong one of its two interfaces produces, which is
+    one of the four bugs P5-05 found by running a container.
 53. **`test_a_resume_that_changes_nothing_does_not_manufacture_a_version` is flaky, and it
     fails in the liveness gate.** Observed on 2026-11-04: one full-suite run failed it with
     `RunNotLive: run 1 is completed; its token no longer authorizes anything` from
@@ -1738,6 +2704,58 @@ documentation, and none of them is fixed.
     status, and that this flake was found by a full-suite run rather than by the targeted
     run — the test passes in isolation every time.
 
+    **Answered and closed on 2026-11-04 (#50).** The diagnosis above is wrong in its
+    conclusion and right about the symptom: the pause is honoured, every time. Routing all
+    five of the file's resumes through a helper that asserts `PAUSED` first — the one-line
+    piece of work this item asked for — the assertion has never fired, in the targeted run
+    or the full suite.
+
+    **The repeated-run evidence the criterion asked for**, since the original item was
+    reported off run counts and a closure that did not give any would be weaker than the
+    report. On the finished tree: **three consecutive clean full-suite runs**
+    (`QA_REQUIRE_DB=1 uv run pytest`, 1177 → 1183 → 1183 passed as the later tickets added
+    tests), plus three consecutive runs of `tests/test_sandbox_session.py` alone while the
+    fix was being made. The targeted file had been failing on *every* run before the fix,
+    not intermittently — this machine is slow enough that the run's last two archives
+    straddled a second boundary every time, which is why "passes in isolation every time"
+    had stopped being true and why the cause was reproducible at all.
+    One honest caveat about method: two full-suite runs taken in the middle of this work
+    failed with 15 and 7 failures and dozens of errors, and that was **test-database
+    contention** — a review sub-agent was running its own `pytest` against the same
+    `qa_test` database at the same time, and the fixtures `TRUNCATE` between tests. Worth
+    writing down because it is a convincing-looking way to misread a green tree as broken,
+    and the suite gives no hint that a second runner is present.
+
+    The real cause is that **the session archive was not versioned on its content**.
+    `agent_session.save` built the archive with `tarfile.open(path, "w:gz")`, and that
+    writes the *current time* into the gzip header's MTIME field. The digest it then hands
+    `index_artifact` is therefore a function of the clock at one-second granularity: two
+    saves inside the same second produce identical bytes and two either side of a tick do
+    not. So `assert artifacts[0].version == before` fails exactly when the run's last two
+    archives straddle a second boundary — reproducible here on the targeted run, which is
+    why "passes in isolation every time" stopped being true as soon as the machine was a
+    little slower. The fix writes the gzip header with `mtime=0` and an empty filename, the
+    only two fields in it that are not content; the tar members keep their own mtimes, so a
+    restored session's files still carry the times the agent left them with.
+
+    `RunNotLive` was a red herring, and chasing it found a second real defect.
+    `launcher._persist_session` skips a run that is no longer live, and its docstring says
+    it checks "rather than attempted-and-swallowed so that a run ending normally does not
+    log a failure every time". It did both: the check went through `control.run_state()`,
+    which is *behind* the liveness gate, so the guard raised `RunNotLive` for precisely the
+    runs it exists to skip and was caught by the `except` it was written to avoid. Every
+    successful run logged a WARNING with that traceback — which is what appears in this
+    item's captured output, and what the report read as the failure. It now asks
+    `control.run_status()`, the first of the four operations the service exempts from the
+    gate, for the reason the service gives: a read of one field, made after the run ended.
+
+    Lesson, and it is item 53's own: **a digest is only a version if it is a digest of the
+    content.** The test said "identical bytes are not a new version" and the bytes were
+    never identical; nothing in the suite asserted the premise, so the rule was tested
+    against an archive format that quietly disagreed with it. There is now a test that
+    saves an unchanged session directory twice a real second apart and asserts the bytes
+    match, and its mirror asserting that a session written into *does* bump the version.
+
 ---
 
 ## Closing
@@ -1753,7 +2771,7 @@ P5-02 also produced the phase's first real evidence that is not a green suite: a
 tenant that exists, logged in over HTTP against the live stack, refused every one of the
 other tenant's rows in both directions, and allowed to register an app slug the first tenant
 already holds. The largest remaining holes are the ones next to the code rather than in it:
-no admin surface to create tenants without SQL (item 6), a 30-day credential travelling
+no admin surface to create tenants without SQL (item 6 — closed since, by #46), a 30-day credential travelling
 without `Secure` (item 2), and artifact URLs the refresh dance cannot reach (item 3).
 
 Two lessons worth carrying. The first, from `105e9b7`, in P4's spirit: the `EventSource`

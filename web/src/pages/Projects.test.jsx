@@ -23,6 +23,10 @@ vi.mock("../api.js", () => ({
     listRevisions: vi.fn(),
     revisionFiles: vi.fn(),
     usage: vi.fn(),
+    // The page asks who is signed in, to decide whether to offer the quota
+    // editor (P5-13). These tests are about projects, so it answers "member"
+    // and the editor stays away; UsageMeter.test.jsx owns it.
+    me: vi.fn(),
     startRun: vi.fn(),
   },
 }));
@@ -50,6 +54,7 @@ function renderPage() {
 describe("Projects", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    api.me.mockResolvedValue({ email: "dev@example.com", role: "member" });
     api.listProjects.mockResolvedValue([{ id: 7, name: "demo" }]);
     api.listTargets.mockResolvedValue([TARGET]);
     api.listStories.mockResolvedValue([]);

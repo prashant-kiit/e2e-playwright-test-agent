@@ -13,7 +13,8 @@ pause destroys the container at once (app/api.py) and a killed sandbox archives
 nothing: the boundary is the last moment the session is known good, so a pause
 costs the exploration of the step it interrupted and no more.
 
-    <run_key>/agent-session.tar.gz        kind "session", versioned per run
+    tenant/<id>/runs/<run_key>/agent-session.tar.gz
+                                          kind "session", versioned per run
 
 A run artifact rather than a new store: the artifacts table already keys blobs
 by run, already streams them back through the API, and is already garbage
@@ -41,6 +42,7 @@ failing a run that can still finish.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import logging
 import os
@@ -49,6 +51,7 @@ import tempfile
 from pathlib import Path
 
 from ..control.gateway import RunGateway
+from ..domain import store_keys
 from ..orchestrator.runner import Emit
 from ..storage import Storage
 
@@ -68,8 +71,15 @@ def config_dir() -> Path | None:
     return Path(raw) if raw else None
 
 
-def archive_key(run_key: str) -> str:
-    return f"{run_key}/{ARCHIVE_NAME}"
+def archive_key(tenant_id: int, run_key: str) -> str:
+    """Under the tenant prefix, like every other artifact (P5-10 / #42).
+
+    Takes the tenant because the session archive *is* a run artifact -- its own
+    reserved name, but the same key space and the same authorization -- so it
+    had to move with the rest or it would be the one object left outside the
+    prefix story 32's purge enumerates.
+    """
+    return store_keys.artifact_key(tenant_id, run_key, ARCHIVE_NAME)
 
 
 def save(
@@ -85,7 +95,7 @@ def save(
     if source is None or not source.is_dir() or not any(source.iterdir()):
         return False
 
-    key = archive_key(run_key)
+    key = archive_key(control.scope.tenant_id, run_key)
     try:
         with tempfile.TemporaryDirectory(prefix="qa-session-") as tmp:
             # Built outside the run directory on purpose: anything in there is
@@ -93,8 +103,7 @@ def save(
             # archive is one artifact written deliberately rather than twice by
             # accident.
             path = Path(tmp) / ARCHIVE_NAME
-            with tarfile.open(path, "w:gz") as tar:
-                tar.add(source, arcname=".")
+            _write_archive(source, path)
             digest = _sha256(path)
             store.put_file(key, path, "application/gzip")
         control.index_artifact(
@@ -121,7 +130,7 @@ def restore(
     dest = config_dir()
     if dest is None:
         return False
-    key = archive_key(run_key)
+    key = archive_key(control.scope.tenant_id, run_key)
     if not any(row.key == key for row in control.artifacts()):
         return False
 
@@ -148,6 +157,29 @@ def restore(
         return False
     emit("=== session: restored; the agent remembers what it explored ===")
     return True
+
+
+def _write_archive(source: Path, path: Path) -> None:
+    """Tar `source` into `path` as gzip, with a **fixed** gzip header.
+
+    `tarfile.open(path, "w:gz")` writes the current time into the gzip
+    header's MTIME field, which made the archive's digest a function of the
+    clock rather than of the session. `index_artifact` versions on that
+    digest, so an untouched session directory bumped its version once per
+    wall-clock second -- the whole of #50, and the reason
+    `test_a_resume_that_changes_nothing_does_not_manufacture_a_version`
+    passed inside one second and failed across a tick.
+
+    `mtime=0` and an empty `filename` are the two header fields that are not
+    content. The tar members keep their own mtimes: a restored session's
+    files should carry the times the agent left them with, and nothing in the
+    archive path rewrites a file it did not change, so they are stable across
+    a resume.
+    """
+    with path.open("wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+            with tarfile.open(fileobj=gz, mode="w") as tar:
+                tar.add(source, arcname=".")
 
 
 def _sha256(path: Path) -> str:

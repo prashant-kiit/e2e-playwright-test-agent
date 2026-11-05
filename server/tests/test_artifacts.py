@@ -12,10 +12,12 @@ import pytest
 from app import config, repo
 from app.artifacts import ArtifactCollector, NullCollector, classify
 from app.control.gateway import GatewayStorage
+from app.domain import store_keys
 from app.domain.steps import STEP_ORDER, Step
 from app.models import Artifact
 from app.orchestrator.driver import run_pipeline
 from app.orchestrator.fake import FakeRunner
+from app.tenancy import DEFAULT_TENANT_ID
 from tests.control_helpers import control_for
 from tests.storage_helpers import FakeStorage
 from tests.target_helpers import create_target
@@ -64,8 +66,16 @@ def test_collector_uploads_and_indexes_new_files(run_env, session_factory, contr
 
     assert len(keys) == 3
     # Keys are run_key/relpath and the bytes made it into storage.
-    assert f"{run_key}/shot.png" in storage.objects
-    assert f"{run_key}/playwright-report/index.html" in storage.objects
+    # Asked of the key builder rather than spelled out: P5-10 moved artifacts
+    # under the tenant prefix, and a test holding its own copy of the layout
+    # is a second place the layout lives.
+    assert store_keys.artifact_key(DEFAULT_TENANT_ID, run_key, "shot.png") in storage.objects
+    assert (
+        store_keys.artifact_key(
+            DEFAULT_TENANT_ID, run_key, "playwright-report/index.html"
+        )
+        in storage.objects
+    )
     with session_factory() as s:
         rows = list(s.scalars(repo.select(Artifact).where(Artifact.run_id == run_id)))
     assert len(rows) == 3

@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { Spinner } from "../components.jsx";
 import { lineDiff } from "../diff.js";
+import Users from "./Users.jsx";
+import { useIsAdmin } from "../useIsAdmin.js";
 
 /** How to label when a revision was saved -- a time, or the words "shipped
  * default", which is why this is a label and not a date. `null` for a
@@ -131,6 +133,9 @@ export default function Settings() {
   // only one prompt is open at a time, and `openPrompt` closes the history
   // with it.
   const [showHistory, setShowHistory] = useState(false);
+  // Whether to render the user-administration panel. Presentation only, and
+  // the panel renders a refusal anyway -- see `useIsAdmin`.
+  const isAdmin = useIsAdmin();
 
   function openPrompt(p) {
     if (open === p.name) {
@@ -209,6 +214,20 @@ export default function Settings() {
           the head revision before a run and deleted after it.
         </p>
       </section>
+
+      {isAdmin && (
+        <section className="card">
+          <h2>Users</h2>
+          <p className="muted">
+            Everyone who can sign in to your tenant. Inviting someone creates their
+            account and shows a password <em>once</em> — there is no mail from this
+            portal, so copy it and pass it on; nothing here can recover it afterwards.
+            Admins can approve deliveries, rotate credentials, change quotas and
+            administer users; members cannot. A tenant cannot be left without an admin.
+          </p>
+          <Users />
+        </section>
+      )}
 
       <section className="card">
         <h2>Prompts</h2>

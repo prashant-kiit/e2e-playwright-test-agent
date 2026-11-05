@@ -218,3 +218,49 @@ def test_the_shape_check_runs_before_resolution(session):
         create_target(session, project.id, base_url="not-a-url", resolve=refuse)
 
     assert "absolute http(s) URL" in str(exc.value)
+
+
+# --- the slug is a branch-name segment (#51) -----------------------------
+
+@pytest.mark.parametrize(
+    "slug",
+    ("two words", "weird!", "-leading-dash", "has..dots", "ends.lock", "ends."),
+)
+def test_a_slug_a_branch_name_cannot_hold_is_refused_at_the_write(session, slug):
+    """#51 put the target's slug **in the delivery branch name**, so a slug git
+    cannot spell is a target that can be created and never delivered.
+
+    Refused here, where the operator who typed it is still around to be told --
+    the same argument that moved the target-repo and base-URL checks onto the
+    write path in P3. `delivery.render` asks the same question again for rows
+    saved before this existed.
+    """
+    project = _project(session)
+
+    with pytest.raises(target_config.ConfigError) as exc:
+        create_target(session, project.id, app=slug)
+
+    assert "slug" in str(exc.value)
+
+
+def test_an_upper_case_slug_is_still_a_branch_name_a_git_can_hold(session):
+    """The write path lower-cases, and the branch-name predicate does not care.
+
+    The asymmetry is deliberate. `app` is not editable
+    (`repo.update_target_config`), so a target saved before #51 added this
+    check cannot be repaired in place -- and `qa/SauceDemo/SCRUM-1-x` is a ref
+    git is perfectly happy with. Refusing upper case at the *read* path would
+    have made such a row permanently undeliverable for no reason git gives.
+    """
+    assert target_config.is_app_slug("SauceDemo") is True
+
+
+def test_a_slug_is_stripped_and_lower_cased(session):
+    """Typed by hand, and it keys a branch name and an object prefix, so
+    `Saucedemo` and `saucedemo` must not be two targets. The same normalisation
+    a tenant's slug gets."""
+    project = _project(session)
+
+    target = create_target(session, project.id, app="  SauceDemo  ")
+
+    assert target.app == "saucedemo"

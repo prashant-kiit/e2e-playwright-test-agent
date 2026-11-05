@@ -14,6 +14,7 @@ and the working directory, are plain functions and are.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from sqlalchemy import func, select
 
 from app import apphub, package_data, prompt_store, repo
 from app.control import service
+from app.delivery.errors import DeliveryError
 from app.domain.steps import STEP_ORDER, Step
 from app.models import Prompt, Tenant
 from app.orchestrator import claude
@@ -174,6 +176,30 @@ def test_the_worktree_relative_paths_resolve_inside_the_hydrated_tree(ctx):
     assert (ctx.worktree / story.story_rel).is_file()
     assert (ctx.worktree / story.tests_rel).is_dir()
     assert (ctx.worktree / "seed.spec.ts").is_file()
+
+
+def test_the_prompt_names_the_target_scoped_branch(ctx):
+    """#51: the agent is told the branch delivery will actually push to.
+
+    `{BRANCH}` is rendered from the same `resolve_story` the delivery uses, so
+    the two cannot name different branches -- which they would have if this
+    caller had kept relying on the old `app=""` default.
+    """
+    assert "qa/demo/SCRUM-1-checkout" in claude.build_message(ctx)
+
+
+def test_a_slug_no_branch_can_hold_fails_the_run_rather_than_the_delivery(ctx):
+    """The read-path refusal reaches a run, not only a delivery.
+
+    A target whose slug cannot be part of a ref is one whose suite could be
+    generated and never delivered, so it fails at the run's first step rather
+    than after the tokens are spent. Asserted because it is a failure mode #51
+    did not contemplate, and the honest place to find out is here.
+    """
+    bad = dataclasses.replace(ctx, app="two words")
+
+    with pytest.raises(DeliveryError, match="cannot be part of a branch name"):
+        claude.resolve_run_story(bad)
 
 
 def test_the_browser_project_matches_the_generated_single_target_config(ctx):
@@ -367,7 +393,12 @@ def test_the_run_facts_carry_the_pinned_prompt_bodies(session):
 
     run = repo.start_run(session, target_id=target.id, story_id="SCRUM-1", mode="full")
     repo.begin_run(session, run.id)
-    scope = RunScope(run_id=run.id, target_id=target.id, tenant_id=run.tenant_id)
+    scope = RunScope(
+        run_id=run.id,
+        target_id=target.id,
+        tenant_id=run.tenant_id,
+        sandbox_attempt=run.sandbox_attempt,
+    )
 
     facts = service.run_facts(session, scope)
 

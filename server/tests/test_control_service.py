@@ -69,7 +69,10 @@ def world(session, tmp_path):
                 "run_id": run.id,
                 "run_key": run.run_key,
                 "scope": RunScope(
-                    run_id=run.id, target_id=target.id, tenant_id=tenant_id
+                    run_id=run.id,
+                    target_id=target.id,
+                    tenant_id=tenant_id,
+                    sandbox_attempt=run.sandbox_attempt,
                 ),
             }
     return built, store
@@ -108,6 +111,7 @@ def test_a_scope_whose_run_belongs_to_another_target_is_refused(session, world):
         run_id=demo["run_id"],
         target_id=sibling.id,
         tenant_id=demo["tenant_id"],
+        sandbox_attempt=demo["scope"].sandbox_attempt,
     )
     with service.acting_as(inconsistent), pytest.raises(service.NotAuthorized):
         service.run_facts(session, inconsistent)
@@ -121,6 +125,7 @@ def test_a_token_for_one_tenant_cannot_act_on_another_tenants_run(session, world
         run_id=other["run_id"],
         target_id=other["target_id"],
         tenant_id=demo["tenant_id"],
+        sandbox_attempt=other["scope"].sandbox_attempt,
     )
     with service.acting_as(stolen), pytest.raises(service.NotAuthorized):
         service.run_facts(session, stolen)
@@ -146,6 +151,91 @@ def test_a_token_is_refused_once_its_run_is_no_longer_live(session, world, finis
 
     with service.acting_as(demo["scope"]), pytest.raises(service.RunNotLive):
         service.run_facts(session, demo["scope"])
+
+
+# --- a pause ends the token's authority, because it ends the sandbox -----
+#
+# Story 22 is "rejected after the run ends", and a pause ends the *sandbox*:
+# the route that pauses a run destroys its container at once (DESIGN.md §5).
+# A paused run used to be live here, so a token copied before the pause kept
+# authorizing that run's config, blobs, revisions and uploads for as long as
+# the pause lasted -- which is unbounded. Recorded as a trade-off during
+# P5-05 and closed by #48.
+#
+# Two halves, and both are needed. Liveness closes the pause itself; the
+# attempt counter closes what liveness cannot, because a resumed run is
+# RUNNING again and a token that only knew the run id would come back to life
+# with it.
+
+def _pause(session, demo):
+    with tenant_scope(demo["tenant_id"]):
+        repo.begin_run(session, demo["run_id"])
+        repo.request_pause(session, demo["run_id"])
+        repo.pause_run(session, demo["run_id"])
+
+
+def test_a_token_copied_before_a_pause_is_refused_during_it(session, world):
+    """The sandbox it was minted for no longer exists."""
+    built, _ = world
+    demo = built["demo"]
+    _pause(session, demo)
+
+    with service.acting_as(demo["scope"]), pytest.raises(service.RunNotLive):
+        service.run_facts(session, demo["scope"])
+
+
+def test_a_token_copied_before_a_pause_is_still_refused_after_the_resume(
+    session, world
+):
+    """The half a liveness gate cannot do. A resumed run is RUNNING again, so
+    anything that asked only "is this run live?" would hand the old sandbox's
+    token its authority back. The run's attempt is what the token names, and a
+    resume moves it on."""
+    built, _ = world
+    demo = built["demo"]
+    _pause(session, demo)
+    with tenant_scope(demo["tenant_id"]):
+        repo.resume_run(session, demo["run_id"])
+        repo.begin_run(session, demo["run_id"])
+
+    with service.acting_as(demo["scope"]), pytest.raises(service.RunNotLive):
+        service.run_facts(session, demo["scope"])
+
+
+def test_the_resumed_attempt_gets_a_token_that_works(session, world):
+    """The other side of it: a resume that could not be driven would be a
+    worse bug than the one being fixed."""
+    built, _ = world
+    demo = built["demo"]
+    _pause(session, demo)
+    with tenant_scope(demo["tenant_id"]):
+        run = repo.resume_run(session, demo["run_id"])
+        repo.begin_run(session, demo["run_id"])
+        fresh = RunScope(
+            run_id=run.id,
+            target_id=run.target_id,
+            tenant_id=run.tenant_id,
+            sandbox_attempt=run.sandbox_attempt,
+        )
+
+    with service.acting_as(fresh):
+        assert service.run_facts(session, fresh).run_key == demo["run_key"]
+
+
+def test_the_log_and_the_cost_of_a_paused_attempt_still_land(session, world):
+    """The four exemptions are unchanged, and they have to be: a sandbox being
+    torn down at a pause still reports what it spent and still flushes its last
+    lines, and those are reads and appends about the run the token names."""
+    built, _ = world
+    demo = built["demo"]
+    _pause(session, demo)
+
+    with service.acting_as(demo["scope"]):
+        service.publish_log(session, demo["scope"], ["=== run paused ==="])
+        service.record_cost(
+            session, demo["scope"], spend_usd=1.5, sandbox_seconds=30
+        )
+        assert service.run_status(session, demo["scope"]) == "paused"
 
 
 # --- blobs: a run may name its own tenant's, and its own run's -----------
@@ -263,3 +353,70 @@ def test_a_run_cannot_overwrite_a_sibling_targets_blob(
 
     # ...and the sibling's blob is untouched.
     assert store.objects[sibling["blob_key"]][0] != poison.read_bytes()
+
+
+# --- the legacy artifact key shape: readable, not writable (P5-10 / #42) --
+
+def test_a_legacy_artifact_key_is_still_readable(session, world, tmp_path):
+    """Expand then contract. An object written before P5-10 keeps resolving
+    until `python -m app.artifacts rekey` has moved it, which is what lets a
+    deployment take that pass at leisure instead of during a deploy."""
+    from app.domain import store_keys
+
+    built, store = world
+    demo = built["demo"]
+    legacy = store_keys.legacy_artifact_key(demo["run_key"], "trace.zip")
+    blob = tmp_path / "o"
+    blob.write_bytes(b"old evidence")
+    store.put_file(legacy, blob)
+
+    with service.acting_as(demo["scope"]):
+        assert service.blob_exists(session, demo["scope"], store, legacy) is True
+        chunks, _ct = service.read_blob(session, demo["scope"], store, legacy)
+
+    assert b"".join(chunks) == b"old evidence"
+
+
+def test_a_legacy_artifact_key_cannot_be_written_any_more(session, world, tmp_path):
+    """The contract half, at the boundary rather than only in the source.
+
+    A structural test already asserts no application module *builds* the old
+    shape, but a sandbox sends keys over the wire: if the service accepted one
+    on a write, a compromised or stale run could still create an object
+    outside the tenant prefix -- invisible to an operator listing the tenant,
+    which is half of what #42 is for.
+    """
+    from app.domain import store_keys
+
+    built, store = world
+    demo = built["demo"]
+    legacy = store_keys.legacy_artifact_key(demo["run_key"], "new.zip")
+    blob = tmp_path / "o"
+    blob.write_bytes(b"new")
+
+    with service.acting_as(demo["scope"]), pytest.raises(service.NotAuthorized):
+        service.write_blob(session, demo["scope"], store, legacy, blob)
+
+    with service.acting_as(demo["scope"]), pytest.raises(service.NotAuthorized):
+        service.index_artifact(
+            session, demo["scope"], key=legacy, sha256="abc", kind="other", step=None
+        )
+
+    assert legacy not in store.objects
+
+
+def test_another_runs_legacy_key_is_refused_even_on_a_read(session, world, tmp_path):
+    """Accepting the old shape is scoped to *this* run. The run key is what
+    both shapes are authorized against, so the legacy branch is no wider than
+    the current one."""
+    from app.domain import store_keys
+
+    built, store = world
+    demo, other = built["demo"], built["other"]
+    theirs = store_keys.legacy_artifact_key(other["run_key"], "trace.zip")
+    blob = tmp_path / "o"
+    blob.write_bytes(b"theirs")
+    store.put_file(theirs, blob)
+
+    with service.acting_as(demo["scope"]), pytest.raises(service.NotAuthorized):
+        service.read_blob(session, demo["scope"], store, theirs)

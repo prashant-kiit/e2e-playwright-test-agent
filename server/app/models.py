@@ -45,7 +45,7 @@ from .domain.quotas import DEFAULT_MAX_CONCURRENT_RUNS, DEFAULT_MONTHLY_RUN_QUOT
 from .domain.roles import UserRole
 from .domain.status import RunStatus
 from .domain.steps import Step
-from .tenancy import install_read_guard
+from .tenancy import install_tenant_guard
 
 
 def _enum_col(enum_cls: type[_Enum]) -> SAEnum:
@@ -65,7 +65,7 @@ class TenantOwned:
 
     It was a `_tenant_col()` helper returning the column. It is a mixin now
     because P5-02 needs a **single type naming every tenant-owned entity**:
-    `tenancy.install_read_guard` filters all of this class's mapped subclasses
+    `tenancy.install_tenant_guard` filters all of this class's mapped subclasses
     in one `with_loader_criteria`, so one listener covers the whole schema and
     a table added later is covered by inheriting from here. The column itself
     is unchanged -- same type, nullability, index and FK -- which
@@ -305,6 +305,19 @@ class Run(TenantOwned, Base):
     last_completed_step: Mapped[Step | None] = mapped_column(_enum_col(Step), nullable=True)
     pause_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     stop_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Which sandbox of this run is the current one -- a generation counter,
+    # moved on by `repo.pause_run`. A run-scoped token names the attempt it was
+    # minted for (app/run_token.py), so the token of the sandbox a pause
+    # destroyed authorizes nothing afterwards, rather than staying valid for
+    # the length of the pause (#48, story 22).
+    #
+    # `sandbox_attempt` rather than `attempt`, because this table already has
+    # two other claims on that word: GLOSSARY.md defines a **Run** as "one
+    # attempt at one user story", and `RunStep.attempt` below is how many times
+    # one step has been tried. This is neither -- it counts sandboxes.
+    sandbox_attempt: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -569,7 +582,9 @@ class AuditLog(TenantOwned, Base):
     function, but that alone would make immutability a property of one module's
     API surface, and the trail's whole value is that it cannot be quietly
     altered afterwards (#30, story 28). The one exception the spec allows,
-    tenant purge, must disable the trigger explicitly; see `app/audit.py`.
+    tenant purge, disables the trigger explicitly for exactly its own DELETE
+    and re-enables it in the same transaction: `app/accounts/purge.py`, which
+    holds the only `DISABLE TRIGGER` in the tree.
 
     Row-level triggers do not fire on TRUNCATE, so the test fixture's
     `TRUNCATE` still works -- deliberate, and not a hole worth closing with a
@@ -613,6 +628,123 @@ class AuditLog(TenantOwned, Base):
 
 
 
+class RevokedUser(TenantOwned, Base):
+    """A user id whose sessions are dead, for as long as a session can live.
+
+    #56, the residue of UAT 3 (#54). `/auth/refresh` re-reads the `users` row,
+    so a removed user cannot mint a *new* access cookie -- but the one they
+    already hold is a signed, claim-carrying token that `require_auth` was
+    content to take at face value, so a removed user kept whatever role they
+    had for the remainder of it: up to `auth.ACCESS_MAX_AGE`, fifteen minutes.
+    UAT 3 watched a removed admin use those minutes to create another admin.
+
+    This table is what closes that window, and it is the option #56 chose out
+    of four: `require_auth` reads one small table per request instead of reading
+    `users` per request. The cost is a round trip either way; the difference is
+    what the round trip buys. A row lands here when a user is removed, and it
+    stops mattering `ACCESS_MAX_AGE` later, because no cookie minted before the
+    removal can still verify by then -- so `app/revocation.py` deletes the
+    expired ones as it writes the next, and nothing ever reads one. That is why
+    this is a revocation list rather than the session table `app/auth.py` and
+    `app/run_token.py` both declined: those would have held a row per live
+    session for as long as sessions live, where this holds a row per
+    **removal**. The prune is an ORM bulk delete and therefore tenant-scoped
+    like every other one, so each tenant's removals trim that tenant's rows;
+    `app/revocation.py` says exactly what that bounds.
+
+    **`user_id` is a plain integer with no foreign key**, for the reason
+    `PurgeLog.purged_tenant_id` and `AuditLog.actor` are: the row it would
+    reference is the row the operation deletes. `CASCADE` would delete the
+    revocation together with the user -- erasing the fact that is the whole
+    point of the row -- and `RESTRICT` would refuse the removal outright.
+
+    **It is `TenantOwned`**, so the per-request check is filtered to the
+    acting tenant like every other read, and a tenant purge removes these rows
+    with the rest. That second thing has a consequence worth stating: a purge
+    deletes the tenant, its users *and* this table's rows, so a purged
+    tenant's user keeps a working access cookie for up to fifteen minutes.
+    What they can reach with it is nothing -- every read is filtered to a
+    tenant with no rows and every write fails its `tenant_id` foreign key --
+    and a revocation that survived the purge would have to live outside the
+    tenant, which is `purge_log`'s argument for a table nobody reads per
+    request. Said here rather than left for a reader to work out.
+
+    There is deliberately **no unique constraint** on `(tenant_id, user_id)`.
+    A removal deletes the `users` row, so the same id cannot be removed twice,
+    and a duplicate row would mean the same thing as one row anyway. A
+    constraint would add an `IntegrityError` path to the removal that nothing
+    can reach.
+    """
+
+    __tablename__ = "revoked_users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Indexed because this is read on **every authenticated request**, by
+    # exactly this column plus `tenant_id` (which the mixin indexes) and
+    # `revoked_at`.
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    # When access was withdrawn. Read as "within `ACCESS_MAX_AGE` of now?", so
+    # it is the column the prune deletes by as well. A server default rather
+    # than a Python timestamp: the comparison is against the database's clock
+    # in both directions, so there is one clock in the question.
+    revoked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+
+class PurgeLog(Base):
+    """What a tenant purge destroyed. **Deliberately not `TenantOwned`.**
+
+    P5-15 / #47, story 32. The purge removes every row belonging to
+    one tenant, its audit trail included -- so a record of the purge that
+    belonged to that tenant would be removed by the thing it is recording. This
+    table therefore has no `tenant_id` column and is not under the tenant
+    guard: it is a *platform* log, not a customer's, and it is the one place
+    that can answer "what happened to Acme?" after Acme is gone.
+
+    **`purged_tenant_id`, not `tenant_id`**, and the name is load-bearing
+    twice. It is not an ownership column -- it names a tenant that no longer
+    exists, which is the opposite of the thing `TenantOwned.tenant_id` means --
+    and `tests/test_tenant_isolation_repo.py` fails any mapped class carrying
+    a `tenant_id` without inheriting the mixin. That tripwire caught this table
+    on the first run, correctly: a reader who saw `tenant_id` here would
+    reasonably assume the guard applied. Renaming it was the honest fix; adding
+    an exemption to the tripwire would have spent the guarantee to save a word.
+
+    It is a plain integer rather than a foreign key, for the reason
+    `AuditLog.actor` is a string: the row it would reference is the row this
+    operation deletes. An FK would either block the purge (`RESTRICT`) or
+    forget which tenant it was (`SET NULL`), and a purge log that cannot name
+    the tenant is not one.
+
+    The slug and name are copied in because they are what a human remembers a
+    customer by, and after the purge there is nothing left to join to.
+
+    Append-only by the same argument as the audit log, but **not** by trigger:
+    the audit log's immutability is a promise to a customer about their own
+    trail, while this is our own operational record. Nothing in the
+    application updates or deletes it, and that is enough for what it is.
+    """
+
+    __tablename__ = "purge_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    purged_tenant_id: Mapped[int] = mapped_column(
+        Integer, nullable=False, index=True
+    )
+    slug: Mapped[str] = mapped_column(String(80), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    actor: Mapped[str] = mapped_column(String(255), nullable=False)
+    # What was removed, per table and for the store, as a JSON object. A shape
+    # rather than columns because the set of tenant-owned tables changes with
+    # the schema, and a column per table would need a migration every time one
+    # is added -- exactly when somebody is least likely to remember.
+    removed: Mapped[dict] = mapped_column(JSON, nullable=False)
+    at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+
 # Every tenant-owned entity above inherits `TenantOwned`, so one call covers
 # the whole schema: from here on, every ORM SELECT of one of them is filtered
 # by `tenancy.current_tenant_id()` unless it explicitly opts out through
@@ -621,4 +753,4 @@ class AuditLog(TenantOwned, Base):
 # and the test suite alike -- anything that can query has already imported the
 # models. There is deliberately no way to turn it off: a flag would let the
 # suite prove isolation in a configuration production does not run in.
-install_read_guard(TenantOwned)
+install_tenant_guard(TenantOwned)

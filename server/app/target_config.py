@@ -41,6 +41,69 @@ OWNER_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*
 
 HTTP_SCHEMES = frozenset({"http", "https"})
 
+# A target's slug as a **segment of a git branch name**, which is what #51 made
+# it: delivery pushes `qa/<app>/<STORY_ID>-<slug>`, so a slug git cannot spell
+# is a target that cannot deliver. Letters (either case), digits, dots, dashes
+# and underscores, starting with a letter or digit -- a subset of what
+# `git check-ref-format` accepts, chosen to be obviously safe rather than
+# maximally permissive.
+#
+# **Upper case is accepted here and refused at the write path**, and the
+# asymmetry is deliberate rather than sloppy. `clean_app_slug` lower-cases what
+# an operator types, so no *new* target has an upper-case slug; a target saved
+# before that existed may, and git is perfectly happy with `qa/SauceDemo/...`.
+# Rejecting it would have made such a row permanently undeliverable, because
+# `app` is not editable (`repo.update_target_config`) -- a target with no
+# remedy but deletion. So this asks only what git asks.
+APP_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def is_app_slug(value: str) -> bool:
+    """Is this a slug a branch name can hold?
+
+    The predicate rather than the refusal, because two layers refuse in their
+    own terms: the write path raises `ConfigError` (a 422 while the operator is
+    still around to be told), and `delivery.render` raises `DeliveryError` for
+    a row saved before this check existed. One rule, two errors -- a second
+    copy of the rule is how they would come to disagree.
+
+    The pattern leaves three things for this function, each of which
+    `git check-ref-format` refuses: `..` anywhere, a trailing `.lock`, and a
+    trailing `.`.
+    """
+    if not APP_SLUG.match(value):
+        return False
+    if ".." in value:
+        return False
+    return not (value.endswith(".lock") or value.endswith("."))
+
+
+def clean_app_slug(value: object) -> str:
+    """A target's slug, as the write path accepts it.
+
+    Stripped and lower-cased before validating, the way a tenant's slug is
+    (`accounts._normalised_email` and `create_tenant` make the same argument):
+    it is typed by hand, it is what a branch name and an object prefix are
+    keyed on, and `Saucedemo` and `saucedemo` must not be two targets.
+
+    **Not in `CLEANERS`**, which is the map the create *and* the edit path both
+    run: `app` is not editable (see `repo.update_target_config`), because the
+    slug is what a target's history, its blobs and -- since #51 -- its
+    delivered branch names are keyed on. So it is cleaned where it is set, and
+    nowhere else can set it.
+    """
+    text = str(value or "").strip().lower()
+    if not text:
+        raise ConfigError("a target needs a slug")
+    if not is_app_slug(text):
+        raise ConfigError(
+            f"target slug must be letters, digits, '.', '-' or '_', starting "
+            f"with a letter or digit, got {text!r}. It is a segment of the "
+            f"delivery branch name (qa/<slug>/<STORY_ID>-<story-slug>), so it "
+            f"has to be something git can spell"
+        )
+    return text
+
 
 class ConfigError(ValueError):
     """A configuration value a target may not be saved with."""

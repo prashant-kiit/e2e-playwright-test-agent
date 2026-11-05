@@ -18,6 +18,33 @@ _Avoid_: Organization, account, workspace, customer (in code)
 A person who drives the harness through the portal. Belongs to exactly one
 tenant and holds one role there.
 _Avoid_: User (in prose), admin, tester, QA engineer
+_But_: the table is `users`, the model is `User`, and the portal's own panel
+and route are `/users` — the spelling an operator expects to click and the one
+the schema already uses. Those are legacy-and-interface spellings of this
+concept, not a second concept, exactly as `targets.app` is for **Target**
+(ADR 0001). Prose says operator; columns, routes and UI labels say user.
+
+**Revocation**:
+Withdrawing an operator's access before their session would have expired.
+Of a *person*, never of a cookie: removing an operator ends every session they
+hold, while a copy of a cookie taken from one of them cannot be withdrawn at
+all (ADR 0004).
+_Avoid_: Logout, invalidation, blacklist, session kill
+
+**Onboarding**:
+Creating a tenant together with its first admin. One operation, because a
+tenant with no admin can never be administered: it is refused on the way out
+(the last admin cannot be removed) and so is never created on the way in. It
+is an operator-run command rather than a portal action — see ADR 0002.
+_Avoid_: Signup, registration, provisioning, tenant creation (alone)
+
+**Purge**:
+Offboarding a tenant: every row it owns and every object under its storage
+prefix, removed. The one operation that may delete from the audit log, and the
+only one with no undo — so it is a command that makes you name the tenant
+twice, and it records what it did in a platform log that is not the tenant's
+and therefore survives it.
+_Avoid_: Delete tenant, offboard (as a verb for this), wipe, GDPR delete
 
 **Project**:
 A tenant's grouping of targets, used to organize work. Carries no
@@ -121,6 +148,14 @@ with it. Holds no store credential, no GitHub credential, and no route out
 except an allowlist built from its target.
 _Avoid_: Container, runner, executor, VM
 
+**Sandbox attempt**:
+Which sandbox of a run is the current one. A run may go through several -- a
+pause destroys one and a resume creates the next -- so the run-scoped token
+names the attempt it was minted for, and a destroyed sandbox's token
+authorizes nothing. Not a **Run**, which this glossary already calls "one
+attempt at one user story", and not a step's retry count.
+_Avoid_: Attempt (bare), generation, epoch, incarnation
+
 **Target lock**:
 The guarantee that one target has at most one live run. Held as a lease, so a
 run whose sandbox died loses it by expiry rather than holding it forever. A
@@ -177,6 +212,15 @@ _Avoid_: Remote, upstream, customer repo, test repo
 The human-initiated step that pushes a reviewed revision to the target repo as
 a branch and a pull request. Never part of a run, and never done by the agent.
 _Avoid_: Push, deploy, publish, release
+
+**Delivery branch**:
+The branch in the target repo that a story's deliveries are appended to, named
+for **both the target and the story** (`qa/<app>/<story id>-<story slug>`,
+where `<app>` is the target's slug — the legacy spelling ADR 0001 keeps for the
+`targets.app` column and the CLI argument). Named for both because two targets of one tenant may point at the same
+target repo on purpose, and a branch named for the story alone belonged to
+whichever of them delivered last (ADR 0003).
+_Avoid_: Story branch, QA branch, feature branch
 
 **Bootstrap**:
 The first delivery to a target repo, which puts the test infrastructure there

@@ -38,7 +38,10 @@ from tests.delivery_helpers import (
 )
 from tests.target_helpers import CONFIG
 
-BRANCH = "qa/SCRUM-1-checkout"
+# `qa/<app>/<STORY_ID>-<story-slug>` since #51: the target's slug is in the
+# branch name, so two targets sharing a repo cannot share a branch. The fixture
+# target is `demo`.
+BRANCH = "qa/demo/SCRUM-1-checkout"
 
 
 @pytest.fixture()

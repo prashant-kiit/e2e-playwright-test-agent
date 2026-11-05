@@ -82,7 +82,7 @@ def test_dry_run_reports_the_branches_it_would_delete_and_changes_nothing(popula
     )
 
     assert result.reset_branch is False
-    assert "qa/SCRUM-1-checkout" in result.deleted_branches
+    assert "qa/demo/SCRUM-1-checkout" in result.deleted_branches
     assert "master" not in result.deleted_branches
     assert remote_branches(remote) == before
 
@@ -108,7 +108,7 @@ def test_reset_empties_the_target_branch_and_deletes_the_others(populated):
     )
 
     assert result.reset_branch is True
-    assert "qa/SCRUM-1-checkout" in result.deleted_branches
+    assert "qa/demo/SCRUM-1-checkout" in result.deleted_branches
     assert remote_branches(remote) == {"master"}
     assert remote_files(remote) == set()  # files gone
     assert remote_log(remote) == [

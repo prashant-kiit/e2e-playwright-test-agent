@@ -249,7 +249,8 @@ queued → hydrating → running → paused(live) → reaped → resuming → ru
   > What a paused run must not lose is the **agent session**, and that is now explicit
   > rather than incidental: `--resume` worked only because the CLI's session store
   > happened to sit on the host that started the run. The session directory is archived
-  > as a run artifact under a reserved name (`<run_key>/agent-session.tar.gz`) **at every
+  > as a run artifact under a reserved name (`tenant/<id>/runs/<run_key>/agent-session.tar.gz`,
+  > re-keyed by P5-10 so a tenant's whole storage is one prefix) **at every
   > step boundary** and at the end of every run, and restored into the next container
   > before the CLI is invoked. At the boundary and not only on the way out, because a
   > sandbox killed outright archives nothing: the boundary is the last moment the session
@@ -399,11 +400,17 @@ operator approves in portal
   → control plane decrypts the tenant PAT (never in a sandbox)
   → ensure_bootstrapped(): if targetBranch lacks infra, push the bootstrap commit first
   → squash the agent's many sandbox commits into ONE delivery commit
-  → append it to branch qa/<STORY_ID>-<slug>  (no force-push)
+  → append it to branch qa/<app>/<STORY_ID>-<slug>  (no force-push)
   → open or update the PR into targetBranch
   → record delivered_sha on the revision row + write audit_log
 ```
 
+- **The branch names the target as well as the story** (#51, `docs/adr/0003`). Two targets
+  of one tenant may point at the same target repo on purpose, and story ids are resolved
+  per-target, so a branch identified by the story alone was shared by both: the second
+  delivery appended the second target's whole tree onto the first's and one PR carried
+  both suites, with nothing erroring. The cost of the fix is that an already-delivered
+  story's next delivery opens a second PR under the new name.
 - **Squash means collapsing the agent's internal commits into one commit per approved
   delivery** — *not* rewriting the customer's branch. Re-delivery appends another commit.
   Force-pushing into someone else's repo destroys PR review threads and is a support
@@ -698,7 +705,7 @@ one hook by the caller. Recorded here because the natural way to write P2 is to 
 | 7 | Container-per-run; **no GitHub credentials in a sandbox**; control plane pushes |
 | 8 | Default-deny egress with a per-run allowlist; block private/link-local ranges |
 | 9 | Crash commits nothing; resume at step boundary; 7-day reaped-snapshot retention |
-| 10 | Squash = one delivery commit appended to the story branch; never force-push |
+| 10 | Squash = one delivery commit appended to the **delivery branch**; never force-push. (Named for the story alone until #51 — see decision 38) |
 | 11 | KMS envelope encryption, scope validation at save, expiry warnings, fail-loud on 401 |
 | 12 | Config rendered from Postgres at hydrate; `app.json` is never delivered |
 | 13 | Content blobs per revision; full bundle at run end and each reap |
@@ -726,6 +733,8 @@ one hook by the caller. Recorded here because the natural way to write P2 is to 
 | 35 | **An enqueue quota breach is a rejection, not a run.** Checked in `repo.start_run` *above* the `AppLock` trio and before any row is written, so a refusal leaves no run and no lock: a `failed` row would report work that never happened and would spend the monthly quota it was just refused for. 429, distinct from the 409 a busy app gets, because the remedies differ (P5-04) |
 | 36 | **A rejection names one cap; the usage panel asks about each.** `quotas.breach` returns the single kind to refuse with, monthly first, because a tenant that is both out of quota and at its concurrency cap must hear the one that is true for longer — telling them to wait cannot help. Both caps can be full at once, so the portal reads two independent predicates rather than deriving its gauges from the rejection (P5-04) |
 | 37 | **A tenant arrives bounded, and unmetered is something a plan asks for.** The caps carry a server default that is deliberately *not* dropped, because no `create_tenant` exists — a tenant comes from a seed or from raw SQL, and only a server default covers both. `NULL` still means no cap; it just has to be written on purpose now. A cap of `0` is lockout, which is how a tenant is suspended (P5-04) |
+| 38 | **A delivery branch is named for the target *and* the story** — `qa/<app>/<STORY_ID>-<slug>`. Two targets of one tenant may point at the same target repo on purpose (one repo, several apps' suites), and story ids are resolved inside each target's own tree, so a branch named for the story alone belonged to whichever delivered last: the second delivery appended its whole tree onto the first's (decision 10 appends by design), one PR carried both suites and both targets reported `delivered`, with nothing erroring. The alternative — unique `(tenant_id, target_repo, target_branch)` — was rejected for forbidding a layout on no evidence. It costs an already-delivered story a new branch name and a second PR, which is cheapest while the delivered set is small. The slug is therefore a git ref segment: refused at the write path, refused again at the read path for older rows, and never sanitised (two slugs collapsing to one name is the bug itself). Also recorded as `docs/adr/0003` (#51) |
+| 39 | **A removal revokes the sessions it leaves behind; a role change still waits for the next refresh.** `revoked_users` holds user ids removed within `ACCESS_MAX_AGE`, written in the removal's own transaction and read by `require_auth` on every authenticated request, so an offboarding takes effect on the removed user's next request rather than at their cookie's expiry — the window UAT 3 watched a removed admin use to create another admin. One read per request, of that table and never of `users`, so the access cookie stays claim-carrying and the stateless design keeps one named exception rather than disappearing. Not the session table decision 1-era auth and `run_token` both declined: a row per *removal*, pruned as the next one is written. A demotion is left to `/auth/refresh`'s row read, because revocation means "no access" and there is no role-change route to begin with. Also recorded as `docs/adr/0004` (#56) |
 
 ---
 
@@ -744,7 +753,10 @@ does not have to reconstruct which were considered.
 | ~~**KMS envelope encryption of PATs**~~ | ~~P5~~ | **Done (P5-03).** See §8 |
 | ~~**Prompts in Postgres with tenant overrides**~~ | ~~P5~~ | **Done (P5-06).** A `prompts` table seeded from the code-shipped defaults, overridable per tenant and versioned, with a run recording the revisions it used; the read surface followed in #39 (§12) |
 | **A GitHub App replacing PATs** | not scheduled | §8 names it the better long-term answer; PATs were chosen for launch and remain the credential after P5-03. The envelope, the scope check and the fail-loud path are all independent of which kind of credential it is |
-| ~~**`audit_log`**~~ | ~~P5~~ | **Done (P5-07).** Append-only, enforced by a trigger, recording delivery approval, PAT save/rotate, infra re-sync, target reset, prompt save and quota change, with a tenant-scoped `GET /audit`. Delivery approvals are the thing it exists to record, and the approving actor is a per-tenant user (§10). **User add/remove is not recorded because no user-administration code path exists** — see #30 stories 2 and 27 |
+| ~~**`audit_log`**~~ | ~~P5~~ | **Done (P5-07).** Append-only, enforced by a trigger, recording delivery approval, PAT save/rotate, infra re-sync, target reset, prompt save and quota change, with a tenant-scoped `GET /audit`. Delivery approvals are the thing it exists to record, and the approving actor is a per-tenant user (§10). ~~**User add/remove is not recorded because no user-administration code path exists**~~ — **recorded since P5-14 (#46)**, which built that surface: `USER_ADD`/`USER_REMOVE` complete #37's list of seven, and the first admin of a new tenant is recorded against its own tenant with `system` as the actor |
+| ~~**A tenant and user administration surface**~~ | ~~P5~~ | **Done (P5-13, P5-14).** A tenant's own users are a portal surface (`GET/POST /users`, `DELETE /users/{id}`, admin-gated, with a Users panel on Settings); the quota caps got a role-gated route (`PUT /usage/caps`). **Creating a tenant is deliberately an operator command**, not a route — `python -m app.accounts create-tenant` — because every authenticated surface acts *as a tenant* and the person creating one belongs to none. Recorded as `docs/adr/0002-tenant-creation-is-an-operator-action.md`, to revisit if a platform-operator role ever exists (§10) |
+| ~~**Tenant purge**~~ | ~~P5~~ | **Done (P5-15).** `python -m app.accounts purge-tenant`, naming the tenant twice because it has no undo: the store first, then every tenant-owned table, then the audit rows with the append-only trigger disabled for that one statement, then the `tenants` row **last** so an interrupted pass is re-runnable, then a `purge_log` row that is not tenant-owned and therefore outlives what it records. It takes no cross-tenant bypass — #44 put ORM `DELETE` under the guard, so running inside `tenant_scope` is what scopes it (§9) |
+| ~~**Artifacts under the tenant prefix**~~ | ~~P5~~ | **Done (P5-10, P5-08).** `tenant/<id>/runs/<run_key>/<path>` alongside `tenant/<id>/blobs/<sha>`, so "this tenant's storage" is one prefix a purge can enumerate; `Storage` gained `delete` and a paging `list_keys` for it. Expand then contract: an artifact downloads by the key on its own row, so pre-migration objects keep resolving, and `python -m app.artifacts rekey` moves them — not an Alembic revision, because a revision can rewrite the key column but cannot move bytes (§9) |
 
 ### What P5 inherits
 

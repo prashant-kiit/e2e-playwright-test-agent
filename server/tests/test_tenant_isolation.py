@@ -15,7 +15,7 @@ The seam is deliberately two-level (agreed before the work started):
   with no route over it still has to be scoped, and enumerating the read
   functions there is what keeps the coverage exhaustive as new ones arrive.
 
-What makes these pass is `tenancy.install_read_guard`: one `do_orm_execute`
+What makes these pass is `tenancy.install_tenant_guard`: one `do_orm_execute`
 listener that adds the `tenant_id` filter to every ORM SELECT. The tests say
 nothing about that mechanism, which is the point -- they are the specification a
 replacement would have to satisfy too.

@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import internal_api, repo, revisions, run_token
+from app.control import factory as control_factory
 from app.db import get_session
 from app.domain.steps import Step
 from app.main import app as fastapi_app
@@ -59,7 +60,10 @@ def world(session_factory, tmp_path, monkeypatch):
                     s, target_id=target.id, story_id="SCRUM-1", mode="full"
                 )
                 scope = RunScope(
-                    run_id=run.id, target_id=target.id, tenant_id=tenant_id
+                    run_id=run.id,
+                    target_id=target.id,
+                    tenant_id=tenant_id,
+                    sandbox_attempt=run.sandbox_attempt,
                 )
                 built[name] = {
                     "scope": scope,
@@ -182,6 +186,7 @@ def test_a_token_cannot_reach_another_tenants_run_on_its_own_path(client, world)
             run_id=world["other"]["run_id"],
             target_id=world["other"]["scope"].target_id,
             tenant_id=world["demo"]["scope"].tenant_id,
+            sandbox_attempt=world["other"]["scope"].sandbox_attempt,
         )
     )
 
@@ -274,7 +279,12 @@ def test_a_target_with_no_revision_answers_a_null_rather_than_a_404(
         target = create_target(s, project.id, app="fresh", name="Fresh")
         run = repo.start_run(s, target_id=target.id, story_id="S-1", mode="full")
         token = run_token.mint(
-            RunScope(run_id=run.id, target_id=target.id, tenant_id=1)
+            RunScope(
+                run_id=run.id,
+                target_id=target.id,
+                tenant_id=1,
+                sandbox_attempt=run.sandbox_attempt,
+            )
         )
         run_id = run.id
         assert revisions.head_revision(s, target.id) is None, (
@@ -355,3 +365,62 @@ def test_a_step_transition_that_is_not_one_of_the_three_is_a_422(client, world):
     )
 
     assert response.status_code == 422
+
+
+def test_a_token_from_before_a_pause_is_a_403_over_http(client, world):
+    """#48 over the transport a container actually uses.
+
+    The pause route destroys the container and moves the run to `paused`, so
+    the token that container was handed names a sandbox that no longer exists.
+    403, the same answer every other unauthorized scope gets.
+
+    The body names the attempt the *token* carries and deliberately not the one
+    the run is now on: a sandbox holding a superseded token has stopped being
+    entitled to facts about the run as it currently is, and its own attempt is
+    something it already knows.
+    """
+    demo = world["demo"]
+    with tenant_scope(demo["scope"].tenant_id):
+        with world["session_factory"]() as s:
+            repo.begin_run(s, demo["run_id"])
+            repo.request_pause(s, demo["run_id"])
+            repo.pause_run(s, demo["run_id"])
+
+    response = client.get(
+        f"/internal/runs/{demo['run_id']}/facts",
+        headers={"Authorization": f"Bearer {demo['token']}"},
+    )
+
+    assert response.status_code == 403
+    detail = response.json()["detail"]
+    assert f"no longer on attempt {demo['scope'].sandbox_attempt}" in detail
+    with tenant_scope(demo["scope"].tenant_id), world["session_factory"]() as s:
+        current = repo.get_run(s, demo["run_id"]).sandbox_attempt
+    assert str(current) not in detail, (
+        "the run's current attempt is not handed to a superseded token"
+    )
+
+
+def test_the_resumed_attempts_token_works_over_http(client, world):
+    """The other side of it, over the same transport: a resume that could not
+    be driven would be worse than the window it closed. Minted the way both
+    dispatch paths mint -- `factory.mint_for_run`, reading the row after
+    `resume_run` has committed."""
+    demo = world["demo"]
+    with tenant_scope(demo["scope"].tenant_id):
+        with world["session_factory"]() as s:
+            repo.begin_run(s, demo["run_id"])
+            repo.request_pause(s, demo["run_id"])
+            repo.pause_run(s, demo["run_id"])
+            repo.resume_run(s, demo["run_id"])
+        fresh = control_factory.mint_for_run(
+            demo["run_id"], session_factory=world["session_factory"]
+        )
+
+    response = client.get(
+        f"/internal/runs/{demo['run_id']}/facts",
+        headers={"Authorization": f"Bearer {fresh}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["run_key"] == demo["run_key"]

@@ -27,15 +27,39 @@ What it checks, and why each one is load-bearing:
   is the backstop; this is the gate. A token for a finished run is worthless the
   moment the run finishes, however long its signature has left.
 
-A **paused** run is still live here, and that is deliberate: `is_live` is the
-definition the whole repository already uses (app/domain/status.py, and
-`repo.live_run_holding` turns on it), and a second definition of "live" would be
-a second thing that can be wrong. The practical consequence is small and worth
-naming: pause destroys the container at once, so the token of a paused run
-belongs to a sandbox that no longer exists, and a resume mints a new one. A copy
-taken before the pause stays valid until the run ends or the signature expires.
-Closing that would need a token table, which is the cost app/auth.py already
-declined to pay for sessions, for the same reason.
+A **paused** run is still live here, and `is_live` is still the whole of the
+status gate: it is the definition the whole repository uses
+(app/domain/status.py, and `repo.live_run_holding` turns on it), and a second
+definition of "live" would be a second thing that can be wrong. That was once
+the end of the paragraph, and it left a hole (#48, story 22): a token copied
+before a pause kept authorizing that run's config, blobs, revisions and
+uploads for as long as the pause lasted, which is unbounded, while the sandbox
+it was minted for had been destroyed at the instant of the pause.
+
+What closes it is the **sandbox attempt**, a fourth field on the scope and a
+counter on the run. The gate is not asking "is this run over?" -- `is_live` answers that
+-- but "is the sandbox this token was minted for still the one doing the
+work?". `repo.pause_run` moves the counter on, so:
+
+    during the pause     the old token names attempt N, the run is on N+1
+    after the resume     still N+1, so the old token does not come back to
+                         life along with the run -- which is the half a status
+                         check cannot do, because a resumed run is RUNNING
+                         again and looks exactly like the one that was paused
+
+It is deliberately **not** done by refusing a paused run, though that was the
+first thing tried: a resumed sandbox calls `run_facts` *before* `begin_run`
+has moved the row out of PAUSED, so refusing a paused run refuses the resume
+itself. The counter has no such ordering to get wrong.
+
+A token table would have closed this too, and is still the cost app/auth.py
+declines to pay for sessions. This is one integer on a row that is already
+read on every call.
+
+The three exempt operations below are unaffected, and that is load-bearing
+rather than incidental: a sandbox being torn down at a pause still flushes its
+last log lines and still records what it spent, and the exemptions are what let
+it. See `scoped_run`.
 
 **Nothing here trusts a key it is handed**, and the three blob operations are
 authorized *differently* because they leak differently. A blob key is a content
@@ -76,6 +100,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import prompt_store, repo, revisions
+from ..domain import store_keys
 from ..domain.status import is_live
 from ..domain.steps import Step
 from ..models import Artifact, Run
@@ -142,7 +167,8 @@ def scoped_run(session: Session, scope: RunScope) -> Run:
     What is missing is the liveness gate, which is why this is not the thing
     operations call -- `authorized_run` is.
 
-    **Four operations use this deliberately, and they are the whole list:**
+    **Three operations use this deliberately, and they are the whole list**
+    (`authorized_run` below is the fourth caller, and it is the gate itself):
 
     - `run_status`, because the sandbox entrypoint reads it *after* the run ends
       to choose its exit code;
@@ -154,9 +180,10 @@ def scoped_run(session: Session, scope: RunScope) -> Run:
       reads first. Gating them cost a container-path debugging session: every
       line appeared except the ones that said how the run ended.
 
-    None of the four is a weakening of the gate, because none of them can change
-    a run's work: two are reads of one field, one writes two accounting columns,
-    and one appends to an append-only log belonging to the run the token names.
+    None of the three is a weakening of the gate, because none of them can
+    change a run's work: one is a read of one field, one writes two accounting
+    columns, and one appends to an append-only log belonging to the run the
+    token names.
     What the gate exists to stop is a finished run's token being used to commit a
     revision, drive a status or upload an artifact -- and all of those still go
     through `authorized_run`.
@@ -199,7 +226,7 @@ def authorized_run(session: Session, scope: RunScope) -> Run:
     `scoped_run` plus the liveness gate, and deliberately nothing else: writing
     the three checks out again here would be the thing this module's docstring
     argues against two paragraphs up ("five operations each doing their own
-    three checks is how one of them ends up doing two"), with the four exempt
+    three checks is how one of them ends up doing two"), with the three exempt
     operations as the fifth caller.
     """
     run = scoped_run(session, scope)
@@ -207,6 +234,18 @@ def authorized_run(session: Session, scope: RunScope) -> Run:
         raise RunNotLive(
             f"run {scope.run_id} is {run.status.value}; its token no longer "
             f"authorizes anything"
+        )
+    if run.sandbox_attempt != scope.sandbox_attempt:
+        # The run's *current* attempt is deliberately not in the message. This
+        # class's own docstring says a sandbox probing must not be able to tell
+        # one refusal from another, and the current attempt is a fact about the
+        # run as it is now -- which is exactly what the holder of a superseded
+        # token has stopped being entitled to. Its own attempt is something it
+        # already knows.
+        raise RunNotLive(
+            f"run {scope.run_id} is no longer on attempt "
+            f"{scope.sandbox_attempt}; its sandbox is gone and this token no "
+            f"longer authorizes anything"
         )
     return run
 
@@ -308,36 +347,73 @@ def authorize_blob_key(scope: RunScope, key: str) -> None:
     from the same function that builds the keys so the two cannot disagree about
     the layout.
     """
-    prefix = revisions.blob_key(scope.tenant_id, "")
+    prefix = store_keys.blobs_prefix(scope.tenant_id)
     if not key.startswith(prefix) or "/" in key[len(prefix) :]:
         raise NotAuthorized(f"blob key {key!r} is not this tenant's to name")
 
 
-def authorize_artifact_key(scope: RunScope, run_key: str, key: str) -> None:
-    """Refuse an artifact key outside this run's own prefix.
+def authorize_artifact_key(
+    scope: RunScope, run_key: str, key: str, *, allow_legacy: bool = False
+) -> None:
+    """Refuse an artifact key that is not this run's.
 
-    Artifact keys are `<run_key>/<path>` (app/artifacts.py), so one run's
-    evidence is one prefix, and a run may read and write only its own. `..` is
-    refused rather than normalized: the key is about to be handed to an object
-    store that has no notion of a parent directory, so a key containing one is a
-    caller doing something it has not explained.
+    Artifact keys are `tenant/<id>/runs/<run_key>/<path>` since P5-10
+    (app/domain/store_keys.py), so one run's evidence is one prefix and a run
+    may read and write only its own.
+
+    **The legacy `<run_key>/<path>` shape is accepted only with
+    `allow_legacy`**, which the read-side operations pass and the write-side
+    ones do not. That is the expand-then-contract half of #42: a deployment's
+    existing objects must keep *resolving* until `python -m app.artifacts
+    rekey` has moved them, but nothing may *create* another one -- an object
+    written under the old shape would land outside the tenant prefix, which is
+    the prefix "this tenant's storage" now means and the one a purge sweeps.
+    (The purge also sweeps each run's legacy prefix, so such an object would
+    not actually survive offboarding; it would still be invisible to an
+    operator listing the tenant, which is half of what #42 is for.)
+
+    Accepting it on the read side is safe because the run key is what both
+    shapes are authorized against: the old shape carries no tenant, but
+    `run_key` here comes from the run row the token already authorized, so a
+    key naming another run is refused either way.
+
+    `..` is refused rather than normalized: the key is about to be handed to an
+    object store that has no notion of a parent directory, so a key containing
+    one is a caller doing something it has not explained. Checked **first**,
+    because `tenant/1/runs/<key>/../../2/...` would otherwise pass the prefix
+    test on its way to another tenant.
     """
-    if key != run_key and not key.startswith(f"{run_key}/"):
-        raise NotAuthorized(f"artifact key {key!r} is not this run's to name")
     if ".." in key.split("/"):
         raise NotAuthorized(f"artifact key {key!r} walks out of its own prefix")
+    current = store_keys.run_artifacts_prefix(scope.tenant_id, run_key)
+    if key.startswith(current):
+        return
+    # The legacy shape, and only for this run, and only where the caller is
+    # reading. `== run_key` is the run's own prefix, which this function has
+    # always accepted.
+    if allow_legacy and (key == run_key or key.startswith(f"{run_key}/")):
+        return
+    raise NotAuthorized(f"artifact key {key!r} is not this run's to name")
 
 
 def _is_artifact_key(run_key: str, key: str) -> bool:
-    """Whether `key` is in this run's artifact prefix rather than a blob key.
+    """Whether `key` is an artifact key rather than a blob key.
 
     One bucket holds both and a run reaches for both through the same `Storage`
-    protocol, so every operation has to decide which rule applies. Decided by
-    the run's own prefix rather than by the blob prefix, because `run_key` is
-    exact: a key under it is this run's artifact and a key that is not is a blob
-    key to be judged as one.
+    protocol, so every operation has to decide which rule applies. Since P5-10
+    the two share the tenant prefix, so the discriminator is the segment after
+    it -- `blobs/` versus `runs/` -- which `store_keys.is_blob_key` owns.
+
+    It used to be "does this start with the run key?", which worked only while
+    the two shapes had nothing in common. The new question is better anyway: it
+    is a property of the layout rather than of the caller's identity, so a key
+    belonging to *another* run is now classified as an artifact key and refused
+    by `authorize_artifact_key` -- where before it fell through to the blob rule
+    and was refused for the wrong reason.
     """
-    return key == run_key or key.startswith(f"{run_key}/")
+    if store_keys.is_blob_key(key):
+        return False
+    return store_keys.artifact_run_key(key) is not None
 
 
 def blob_exists(session: Session, scope: RunScope, store: Storage, key: str) -> bool:
@@ -348,7 +424,9 @@ def blob_exists(session: Session, scope: RunScope, store: Storage, key: str) -> 
     """
     run = authorized_run(session, scope)
     if _is_artifact_key(run.run_key, key):
-        authorize_artifact_key(scope, run.run_key, key)
+        authorize_artifact_key(
+            scope, run.run_key, key, allow_legacy=True
+        )
     else:
         authorize_blob_key(scope, key)
     return store.exists(key)
@@ -365,7 +443,9 @@ def read_blob(
     """
     run = authorized_run(session, scope)
     if _is_artifact_key(run.run_key, key):
-        authorize_artifact_key(scope, run.run_key, key)
+        authorize_artifact_key(
+            scope, run.run_key, key, allow_legacy=True
+        )
     else:
         authorize_blob_key(scope, key)
         if not revisions.blob_is_referenced_by_target(session, scope.target_id, key):

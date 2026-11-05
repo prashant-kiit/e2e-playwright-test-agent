@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .domain.audit import Action
 from .domain.credentials import CredentialState
+from .domain.roles import UserRole
 from .domain.status import RunStatus
 from .domain.steps import Step
 
@@ -339,6 +340,70 @@ class DeliveryOut(BaseModel):
     pr_url: str = ""
     pr_number: int | None = None
     detail: dict = {}
+
+
+class UserOut(BaseModel):
+    """One account, as the portal lists them (P5-14 / #46).
+
+    **No credential field, and that is the point**: the hash is not something
+    a browser needs, and an API that sends one invites it being stored
+    somewhere it should not be. `accounts.Account` is already a projection
+    without it, so there are two independent reasons the hash cannot leak
+    here rather than one.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    email: str
+    role: UserRole
+
+
+class InviteBody(BaseModel):
+    """Invite one user into the acting tenant.
+
+    No tenant field: `accounts.add_user` writes to `current_tenant_id()`, so
+    inviting into somebody else's tenant is not a request this surface can
+    express. No password field either -- see `InvitedUserOut`.
+    """
+
+    email: str = Field(min_length=3, max_length=255)
+    role: UserRole
+
+
+class InvitedUserOut(UserOut):
+    """A new account **and its one-time password**.
+
+    The only response in the API that carries a credential in the clear, and
+    it carries it exactly once: there is no mail in this deployment, so an
+    invitation cannot be a link, and the alternative -- an admin choosing a
+    password on someone else's behalf -- is a password that admin knows for
+    ever. The portal shows it to be copied and then cannot get it again,
+    because nothing stores it.
+    """
+
+    password: str
+
+
+class CapsBody(BaseModel):
+    """A quota change: the caps you name, and only those (P5-13 / #45).
+
+    **An omitted cap and an explicit `null` are different requests**, which is
+    the same distinction `repo.set_tenant_caps` takes an `UNSET` sentinel for:
+    `null` means *unmetered*, a real value an admin may choose on purpose,
+    while a cap left out of the body is left exactly as it was. Collapsing them
+    is how raising a concurrency cap silently deletes the monthly quota -- a
+    bug that was already found once at the function (its docstring says so),
+    and this is the surface that would have reintroduced it.
+
+    Pydantic keeps the two apart in `model_fields_set`, so the route reads
+    which keys arrived rather than comparing against a default. That is why
+    both fields are plainly optional here and the validation of the *values*
+    stays in `repo.set_tenant_caps`: one rule, one place, and a route that
+    duplicated "not negative" would be a second thing to get out of step.
+    """
+
+    max_concurrent_runs: int | None = None
+    monthly_run_quota: int | None = None
 
 
 class UsageOut(BaseModel):

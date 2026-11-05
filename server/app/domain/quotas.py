@@ -28,9 +28,16 @@ from enum import Enum
 # What a tenant gets when nobody has said otherwise. These are the values the
 # *database* defaults to (see the `tenants` columns and revision `f1a62c90d4e7`),
 # repeated here so application code can name them -- not the source of the
-# default, which has to be server-side: there is no `create_tenant` in this
-# application at all, so a tenant arrives from the migration's seed or from raw
-# SQL, and only a server default is on both paths.
+# default, which has to be server-side.
+#
+# It had to be server-side because there was no `create_tenant` in the
+# application at all: a tenant arrived from the migration's seed or from raw
+# SQL, and only a server default was on both paths. P5-14 (#46) added
+# `accounts.create_tenant` and P5-15 (#47) added the purge that removes one, so
+# there are now three paths in rather than two -- and
+# the server default stays exactly where it is, because it is still the only
+# thing all of them go through, and because a tenant created by a future fourth
+# path must arrive bounded rather than unmetered.
 #
 # Deliberately generous rather than tight. The job of a default cap is to make
 # "unbounded" something a plan has to ask for, not to be the right number for

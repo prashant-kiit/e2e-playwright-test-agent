@@ -24,15 +24,32 @@ from app.tenancy import (
 )
 from tests.target_helpers import create_target
 
+# The tables that deliberately carry no `tenant_id`, each with the reason.
+# A set with reasons rather than a bare list, because the whole value of the
+# test below is that adding to this is a decision somebody has to write down.
+NOT_TENANT_OWNED = {
+    # Its own id *is* the tenant.
+    "tenants": "the tenant itself",
+    # A **platform** record, not a customer's: it records that a tenant was
+    # purged, and a row belonging to that tenant would be deleted by the very
+    # operation it exists to record (P5-15 / #47). It names the tenant in
+    # `purged_tenant_id` -- deliberately not `tenant_id`, so that the sibling
+    # test in test_tenant_isolation_repo.py does not read it as an ownership
+    # column the guard forgot.
+    "purge_log": "the record that survives a tenant purge",
+}
+
 
 def test_every_table_has_a_non_null_tenant_id():
     """Every table carries the column, so P5 only has to backfill its values.
 
-    `tenants` itself is exempt: its own id *is* the tenant.
+    The exemptions are in `NOT_TENANT_OWNED`, with a reason each. Two so far,
+    and they are different kinds: `tenants` is the tenant, and `purge_log` is
+    ours rather than any customer's.
     """
     offenders = {}
     for table in Base.metadata.sorted_tables:
-        if table.name == "tenants":
+        if table.name in NOT_TENANT_OWNED:
             continue
         col = table.columns.get("tenant_id")
         if col is None:

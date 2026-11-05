@@ -29,7 +29,7 @@ def _signing_key(monkeypatch):
 
 def test_a_minted_token_carries_back_the_run_the_target_and_the_tenant():
     """The three facts every authorization decision downstream is made on."""
-    scope = RunScope(run_id=7, target_id=3, tenant_id=42)
+    scope = RunScope(run_id=7, target_id=3, tenant_id=42, sandbox_attempt=1)
 
     assert run_token.verify(run_token.mint(scope)) == scope
 
@@ -37,7 +37,7 @@ def test_a_minted_token_carries_back_the_run_the_target_and_the_tenant():
 def test_a_token_signed_with_another_key_is_refused(monkeypatch):
     """The forgery case. A sandbox never holds the key, so a token it made up
     itself has to be worthless."""
-    token = run_token.mint(RunScope(run_id=7, target_id=3, tenant_id=42))
+    token = run_token.mint(RunScope(run_id=7, target_id=3, tenant_id=42, sandbox_attempt=1))
     monkeypatch.setenv("QA_SECRET_KEY", "a-different-key")
 
     with pytest.raises(run_token.RunTokenError):
@@ -47,7 +47,7 @@ def test_a_token_signed_with_another_key_is_refused(monkeypatch):
 def test_an_edited_token_is_refused():
     """The escalation case: the interesting edit is the tenant id, so the
     payload has to be signed rather than merely encoded."""
-    token = run_token.mint(RunScope(run_id=7, target_id=3, tenant_id=42))
+    token = run_token.mint(RunScope(run_id=7, target_id=3, tenant_id=42, sandbox_attempt=1))
 
     with pytest.raises(run_token.RunTokenError):
         run_token.verify(token[:-4] + "AAAA")
@@ -77,7 +77,7 @@ def test_a_run_token_does_not_verify_as_a_portal_session(monkeypatch):
     presentable to the portal as a logged-in operator."""
     from app import auth
 
-    token = run_token.mint(RunScope(run_id=7, target_id=3, tenant_id=42))
+    token = run_token.mint(RunScope(run_id=7, target_id=3, tenant_id=42, sandbox_attempt=1))
 
     assert auth.read_access(token) is None
 
@@ -85,7 +85,7 @@ def test_a_run_token_does_not_verify_as_a_portal_session(monkeypatch):
 def test_a_token_older_than_its_lifetime_is_refused():
     """Expiry is the backstop under the liveness gate, so it has to work with
     no database in the picture at all."""
-    token = run_token.mint(RunScope(run_id=7, target_id=3, tenant_id=42))
+    token = run_token.mint(RunScope(run_id=7, target_id=3, tenant_id=42, sandbox_attempt=1))
 
     with pytest.raises(run_token.RunTokenError):
         run_token.verify(token, max_age_s=-1)
@@ -111,13 +111,13 @@ def test_the_lifetime_outlasts_the_longest_a_run_may_take(monkeypatch):
 def test_a_sandbox_can_read_its_own_token_without_the_signing_key(monkeypatch):
     """The addressing use: the run id goes in every URL the sandbox calls, and
     the tenant id is how ingest builds its blob keys."""
-    token = run_token.mint(RunScope(run_id=7, target_id=3, tenant_id=42))
+    token = run_token.mint(RunScope(run_id=7, target_id=3, tenant_id=42, sandbox_attempt=1))
     # Exactly a sandbox's environment: the key is not in it, by design.
     monkeypatch.delenv("QA_SECRET_KEY", raising=False)
     monkeypatch.delenv("QA_RUN_TOKEN_KEY", raising=False)
 
     assert run_token.read_unverified(token) == RunScope(
-        run_id=7, target_id=3, tenant_id=42
+        run_id=7, target_id=3, tenant_id=42, sandbox_attempt=1
     )
 
 
@@ -130,7 +130,7 @@ def test_verifying_a_token_without_the_key_fails_which_is_why_a_sandbox_reads(
     nothing, so it holds nothing to verify against. The control plane verifies;
     the sandbox reads.
     """
-    token = run_token.mint(RunScope(run_id=7, target_id=3, tenant_id=42))
+    token = run_token.mint(RunScope(run_id=7, target_id=3, tenant_id=42, sandbox_attempt=1))
     monkeypatch.delenv("QA_SECRET_KEY", raising=False)
     monkeypatch.delenv("QA_RUN_TOKEN_KEY", raising=False)
 

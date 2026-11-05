@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api.js";
 import { Spinner, UsageMeter } from "../components.jsx";
+import { useIsAdmin } from "../useIsAdmin.js";
 import Revisions from "./Revisions.jsx";
 import Stories from "./Stories.jsx";
 import TargetConfig from "./TargetConfig.jsx";
@@ -20,6 +21,8 @@ export default function Projects() {
   const [newProject, setNewProject] = useState("");
   const [error, setError] = useState("");
   const [usage, setUsage] = useState(null);
+  // Whether to offer the quota editor. Presentation only -- see `useIsAdmin`.
+  const isAdmin = useIsAdmin();
 
   async function load() {
     const [p, t] = await Promise.all([api.listProjects(), api.listTargets()]);
@@ -71,7 +74,11 @@ export default function Projects() {
           </button>
         </form>
       </div>
-      <UsageMeter usage={usage} />
+      <UsageMeter
+        usage={usage}
+        canEdit={isAdmin}
+        onSave={api.setUsageCaps}
+      />
       {error && <div className="error">{error}</div>}
       {projects.length === 0 && <p className="muted">No projects yet. Create one above.</p>}
       {projects.map((p) => (

@@ -222,6 +222,74 @@ def test_the_reaper_prunes_log_lines_past_the_retention_window(session_factory, 
     assert pg_bus.read_from(run_id, 0)[0] == ["today's news"], "inside the window, kept"
 
 
+@pytest.mark.unscoped_tenant
+def test_the_retention_prune_spans_every_tenant(session_factory):
+    """The one bulk delete that *should* cross tenants, and must say so (P5-12).
+
+    P5-12 put ORM `UPDATE`/`DELETE` under the tenant guard, which is right for
+    every bulk write but this one: the retention sweep runs on a timer with no
+    request and no run behind it, and its job is to prune the whole table. Once
+    the guard covered deletes, the sweep silently became "prune the acting
+    tenant" -- and since the reaper binds no scope before it, in production it
+    stopped being a sweep at all and became `NoTenantScope` once every thirty
+    seconds behind a "pruning the run log failed; continuing" warning.
+
+    The suite could not have caught that on its own: the harness binds tenant 1
+    for every test (P5-09), so a prune filtered to the acting tenant looks
+    identical to one that spans tenants whenever the fixture data is one
+    tenant's. Hence this test, which owns two tenants' rows, and the
+    `unscoped_tenant` marker, which is the production shape.
+    """
+    from datetime import timedelta
+
+    from sqlalchemy import update
+
+    from app.domain import lease
+    from app.models import RunLog, Tenant
+    from app.orchestrator.bus import prune_run_logs
+    from app.tenancy import DEFAULT_TENANT_ID, across_tenants, tenant_scope
+
+    pg_bus = PostgresLogBus(session_factory=session_factory)
+    run_ids = {}
+    with session_factory() as s:
+        s.add(Tenant(id=2, slug="second", name="Second"))
+        s.commit()
+    for tenant_id, app_slug in ((DEFAULT_TENANT_ID, "alpha"), (2, "beta")):
+        with tenant_scope(tenant_id), session_factory() as s:
+            project = repo.create_project(s, name=f"p-{app_slug}")
+            target = create_target(s, project.id, app=app_slug, name=app_slug)
+            run = repo.start_run(
+                s, target_id=target.id, story_id="SCRUM-1", mode="full"
+            )
+            run_ids[tenant_id] = run.id
+        with tenant_scope(tenant_id):
+            pg_bus.publish(run_ids[tenant_id], "old news")
+
+    # Age every line past the window, both tenants'.
+    with session_factory() as s:
+        # Through the helper, not by writing `qa_across_tenants=True` by hand:
+        # that raw spelling is exactly what the allowlist scanner in
+        # test_tenant_isolation_repo.py exists to catch, and a test is not
+        # entitled to a spelling the application is not.
+        s.execute(
+            across_tenants(
+                update(RunLog)
+                .where(RunLog.seq == 1)
+                .values(at=lease.utcnow() - timedelta(days=30))
+            )
+        )
+        s.commit()
+
+    # Exactly as the reaper calls it: no scope bound.
+    with session_factory() as s:
+        pruned = prune_run_logs(s, days=7)
+
+    assert pruned == 2, (
+        f"the retention sweep pruned {pruned} row(s) of 2; it is scoped to one "
+        f"tenant rather than spanning them"
+    )
+
+
 def test_the_reaper_loop_prunes_as_well_as_reaps(session_factory, run_id, monkeypatch):
     """The prune rides the loop that already runs every 30 seconds."""
     import asyncio

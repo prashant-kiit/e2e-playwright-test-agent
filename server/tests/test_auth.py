@@ -15,13 +15,13 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app import auth
+from app import accounts, auth, revocation
 from app.auth import hash_password, verify_password
 from app.db import get_session
 from app.domain.roles import UserRole
 from app.main import app
 from app.models import Project, Tenant, User
-from app.tenancy import across_tenants
+from app.tenancy import across_tenants, tenant_scope
 
 # The migration seeds this operator; see the P5 users migration.
 SEED_ADMIN_EMAIL = "admin@example.com"
@@ -256,6 +256,52 @@ def test_an_admin_passes_the_gate(client):
     )
     r = client.post("/targets/999/deliver", json={"story_id": "SCRUM-1"})
     assert r.status_code == 404
+
+
+# --- the quota route is one of those actions (P5-13 / #45) ---------------
+#
+# Story 5 is "only authorized users can approve deliveries, rotate credentials
+# or change quotas". The first two were gated; the third had no route at all,
+# so the requirement was unenforced rather than enforced. These drive the gate
+# through **real** auth and real roles rather than an overridden dependency,
+# because what is being asserted is which role gets through.
+
+def test_a_member_is_refused_a_quota_change(client):
+    _add_user(client_session(client), email="member@example.com", password="pw")
+    client.post(
+        "/auth/login",
+        json={"tenant": SEED_TENANT_SLUG, "email": "member@example.com", "password": "pw"},
+    )
+
+    r = client.put("/usage/caps", json={"max_concurrent_runs": 99})
+
+    assert r.status_code == 403
+    assert "admin" in r.json()["detail"]
+
+
+def test_an_admin_changes_their_tenants_caps(client):
+    client.post(
+        "/auth/login",
+        json={
+            "tenant": SEED_TENANT_SLUG,
+            "email": SEED_ADMIN_EMAIL,
+            "password": SEED_ADMIN_PASSWORD,
+        },
+    )
+
+    r = client.put("/usage/caps", json={"max_concurrent_runs": 7, "monthly_run_quota": 50})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["max_concurrent_runs"] == 7
+    assert r.json()["monthly_run_quota"] == 50
+    # The read surface the panel already uses agrees, which is the only thing
+    # an operator will actually look at.
+    usage = client.get("/usage").json()
+    assert (usage["max_concurrent_runs"], usage["monthly_run_quota"]) == (7, 50)
+
+
+def test_an_unauthenticated_caller_is_refused_a_quota_change(client):
+    assert client.put("/usage/caps", json={"max_concurrent_runs": 1}).status_code == 401
 
 
 # --- the tenant slug is what disambiguates the email ---------------------
@@ -516,3 +562,119 @@ def test_development_over_plain_http_still_works(client, monkeypatch):
 
     assert all("Secure" not in h for h in headers if h.startswith("qa_"))
     assert client.get("/auth/me").status_code == 200
+
+
+# --- a removed user loses access (found by UAT 3) -------------------------
+
+def test_a_removed_user_cannot_refresh_into_a_new_session(client):
+    """Removing a user must actually remove their access.
+
+    Found by UAT 3 (#54) against the live stack, and it is worth stating
+    exactly what was observed, because the suite had nothing that would have
+    caught it: an admin removed **themselves** through `DELETE /users/{id}`,
+    then used the refresh cookie from before the removal to mint a fresh
+    access cookie, and with it read `/users`, **created a new admin account**
+    and changed the tenant's quotas. The audit log recorded all of it under
+    the deleted account's name, which is how it was noticed.
+
+    `app/auth.py` documents the stateless trade-off as "a role or tenant
+    change takes effect at the user's next login", and for a *role change*
+    that is a reasonable bargain. P5-14 added a **removal** path, and a
+    removal is the case where the bargain does not hold: a downgrade leaves
+    someone who still works here, while a removal is usually an offboarded
+    contractor or a compromised account, and "they keep admin for up to 30
+    days" is not the answer anybody wants. 30 days, not 15 minutes, because
+    `/auth/refresh` is what re-issues the short cookie and it did not read the
+    row either.
+
+    So the row is read at refresh. The access cookie stays claim-carrying and
+    unchecked -- that is the speed bump the module argues for, and it is one
+    database read per 15 minutes per user rather than one per request -- which
+    bounds a removed user's access to the remainder of their access cookie.
+    That residual window is recorded as a follow-up rather than closed here.
+    """
+    session = client_session(client)
+    user = _add_user(session, email="leaver@example.com", password="pw")
+    r = _login(client, email="leaver@example.com", password="pw")
+    assert r.status_code == 200
+    # They can refresh while they exist.
+    assert client.post("/auth/refresh").status_code == 200
+
+    session.delete(user)
+    session.commit()
+
+    assert client.post("/auth/refresh").status_code == 401
+
+
+def test_a_removed_users_existing_access_cookie_stops_working(client):
+    """#56: the window the refresh fix left, closed.
+
+    The refresh fix above stops a removed user minting a **new** access cookie.
+    It does nothing about the one they already hold, which verifies on its
+    signature alone -- so a user removed seconds earlier still got `POST
+    /users` -> 201 on the fixed build, which is what #56 was filed for and
+    what UAT 3 (#54) watched a removed admin do.
+
+    So `require_auth` asks `revoked_users` whether this id was removed within
+    `ACCESS_MAX_AGE`. The cookie here is untouched between the two requests --
+    no logout, no refresh, no new login -- which is what makes this the
+    existing cookie rather than a new session.
+
+    Removed through `accounts.remove_user` rather than by deleting the row, as
+    the route does: the revocation is written in the removal's transaction, so
+    a test that deleted the row by hand would be testing a path no caller
+    takes.
+    """
+    session = client_session(client)
+    user = _add_user(session, email="leaver@example.com", password="pw")
+    _login(client, email="leaver@example.com", password="pw")
+    assert client.get("/auth/me").status_code == 200
+
+    accounts.remove_user(session, user.id)
+
+    assert client.get("/auth/me").status_code == 401
+    # The same bare 401 a missing cookie gets: "removed" must not be
+    # distinguishable from "expired" by somebody probing with the cookie.
+    assert client.get("/auth/me").json()["detail"] == "authentication required"
+
+
+def test_a_revoked_id_does_not_lock_out_another_tenants_user(client):
+    """The check is tenant-filtered, and user ids collide across tenants.
+
+    Tenant 2's user 7 and tenant 1's user 7 are different people. A revocation
+    list read without the tenant would answer "7 is revoked" and log out a
+    customer who removed nobody.
+    """
+    session = client_session(client)
+    other = Tenant(slug="other", name="Other")
+    session.add(other)
+    session.commit()
+    stays = _add_user(session, email="stays@example.com", password="pw")
+    with tenant_scope(other.id):
+        revocation.revoke(session, stays.id, within=auth.ACCESS_MAX_AGE)
+        session.commit()
+
+    _login(client, email="stays@example.com", password="pw")
+
+    assert client.get("/auth/me").status_code == 200
+
+
+def test_a_refresh_takes_the_role_from_the_row_not_from_the_cookie(client):
+    """The same read, used for the thing the docstring promised and could not
+    deliver: a role change now takes effect at the next *refresh* rather than
+    only at the next login.
+
+    Asserted as a consequence rather than as the feature, because the reason
+    the read exists is the removal above. It is listed in `app/auth.py` as
+    what that read buys.
+    """
+    session = client_session(client)
+    user = _add_user(session, email="promoted@example.com", password="pw")
+    assert _login(client, email="promoted@example.com", password="pw").json()["role"] == (
+        "member"
+    )
+
+    user.role = UserRole.ADMIN
+    session.commit()
+
+    assert client.post("/auth/refresh").json()["role"] == "admin"

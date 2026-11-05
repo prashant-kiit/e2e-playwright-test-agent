@@ -234,7 +234,11 @@ def create_target(
     target = Target(
         tenant_id=current_tenant_id(),
         project_id=project_id,
-        app=app,
+        # Cleaned here rather than through `clean_fields`, because `app` is the
+        # one configuration value that is **not** editable afterwards -- and
+        # since #51 it is a segment of the delivery branch name, so a slug git
+        # cannot spell is a target that could be created and never delivered.
+        app=target_config.clean_app_slug(app),
         **cleaned,
     )
     session.add(target)
@@ -379,11 +383,19 @@ def set_tenant_caps(
     which the only caller this docstring names -- a console operator -- would
     have no reason to expect (found in review).
 
-    The write half of P5-04, and for now the *only* way a cap gets set: there
-    is still no tenant-admin surface (`VERIFICATION-P5.md` follow-up 6), so
-    this is reached from the tests and from a console rather than from a route.
-    Deliberately not exposed as an API endpoint by this ticket -- a tenant that
-    could raise its own caps would not have caps.
+    The write half of P5-04. **P5-13 gave it a route** (`PUT /usage/caps`,
+    tenant-admin only), so the callers are now that route, a console and the
+    tests; the audit row is written here rather than at the route precisely so
+    all three are covered by one place.
+
+    This docstring used to say the opposite -- "deliberately not exposed as an
+    API endpoint ... a tenant that could raise its own caps would not have
+    caps" -- and that argument is about a **platform ceiling**, which these
+    columns are not. #30's story 5 makes a quota change an intra-tenant
+    authorization question ("only authorized users can ... change quotas"), and
+    that is what the route enforces: admin yes, member no. A ceiling a tenant
+    could not raise would be a second limit above this one, and nothing in P5
+    asks for one yet. Worth knowing before adding paying customers.
     """
     tenant = session.get(Tenant, current_tenant_id())
     if tenant is None:  # pragma: no cover - a session always has its tenant
@@ -410,6 +422,15 @@ def set_tenant_caps(
         setattr(tenant, name, value)
     session.commit()
     session.refresh(tenant)
+    after = caps_of(tenant)
+    if after == before:
+        # **A no-op writes no audit row.** The spec asks that "each change" be
+        # recorded, and nothing changed: a caller that passed no caps, or
+        # passed the values already stored, has not made a mutation. Rows for
+        # those would pollute the one column a compliance reader filters on,
+        # with entries whose `before` and `after` are identical -- and the
+        # trail's value is that every row in it is something that happened.
+        return tenant
     # Audited here rather than at a route because there is no route (P5-07):
     # this function is reached from a console today and from whatever
     # tenant-admin surface arrives later, and auditing the function covers
@@ -419,7 +440,7 @@ def set_tenant_caps(
         action=audit.Action.QUOTA_CHANGE,
         target=audit.tenant_ref(tenant.id),
         before=before,
-        after=caps_of(tenant),
+        after=after,
     )
     return tenant
 
@@ -428,7 +449,7 @@ def tenant_usage(session: Session, *, now: datetime | None = None) -> quotas.Usa
     """What the current tenant has spent: live runs, and runs started this month.
 
     Both counts are the tenant's across every one of its apps, and both are
-    ordinary ORM selects, so `tenancy.install_read_guard` adds the `tenant_id`
+    ordinary ORM selects, so `tenancy.install_tenant_guard` adds the `tenant_id`
     filter -- the same mechanism as every other read. A quota that counted
     another tenant's runs would be worse than no quota at all, so
     `test_quotas.py` proves the scoping rather than trusting it.
@@ -888,10 +909,26 @@ def request_stop(session: Session, run_id: int) -> Run:
 def pause_run(session: Session, run_id: int) -> Run:
     """Driver-side: transition RUNNING -> PAUSED at a boundary. The app lock is
     kept (the run still owns the app) but the lease is cleared, and the reaper
-    skips PAUSED runs, so a deliberate pause is never mistaken for a crash."""
+    skips PAUSED runs, so a deliberate pause is never mistaken for a crash.
+
+    **The attempt moves on here**, which is what kills the token of the sandbox
+    this pause destroys (#48, story 22). This is the one transition both paths
+    go through -- the pause route calls it for a container it has just killed,
+    the driver calls it at a boundary on the thread path -- so it is the one
+    place that knows a sandbox's life has ended while its run's has not. The
+    run-scoped token names the attempt it was minted for
+    (app/control/service.py), so from here on the old sandbox's copy
+    authorizes nothing, for the length of the pause and after the resume
+    alike; the resumed attempt is minted into the new number.
+
+    Which is also why the increment is here rather than in `resume_run`: the
+    window the ticket is about is the *pause*, and a run may stay paused for
+    an hour or for ever.
+    """
     run = get_run(session, run_id)
     assert_transition(run.status, RunStatus.PAUSED)
     run.status = RunStatus.PAUSED
+    run.sandbox_attempt += 1
     run.pause_requested = False
     run.lease_expires_at = None
     run.current_step = None
@@ -911,7 +948,15 @@ def stop_run(session: Session, run_id: int) -> Run:
 
 def resume_run(session: Session, run_id: int) -> Run:
     """Clear a paused run's flags so a fresh orchestrator can re-begin it.
-    The actual PAUSED -> RUNNING transition happens in begin_run."""
+    The actual PAUSED -> RUNNING transition happens in begin_run.
+
+    **The attempt is not touched here**, and that is the subtle half of #48: it
+    was already moved on by `pause_run`, so by the time anything resumes, the
+    destroyed sandbox's token is dead and the fresh one is minted into the
+    attempt that is now current. Bumping it here instead would leave the old
+    token authorizing the whole length of the pause -- which is the window the
+    ticket is about -- and a resume can be an hour later or never.
+    """
     run = get_run(session, run_id)
     if run.status is not RunStatus.PAUSED:
         raise RepoError(f"run {run_id} is {run.status.value}, not paused; cannot resume")

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..package_data import templates_dir
-from ..target_config import TargetConfig
+from ..target_config import TargetConfig, is_app_slug
 from .errors import DeliveryError
 
 # A story heading: "# User Story: SCRUM-202 - Account Sign-up Form"
@@ -369,7 +369,7 @@ def story_filename(paths: Iterable[str], story_id: str) -> str:
 
 
 def resolve_story(
-    root: Path, story_id: str, *, paths: Iterable[str], app: str = ""
+    root: Path, story_id: str, *, paths: Iterable[str], app: str
 ) -> StoryRef:
     """Derive every path and name from the story's filename.
 
@@ -378,7 +378,34 @@ def resolve_story(
     explicitly, because which tree they resolved against -- a run's worktree or
     delivery's materialized head -- is the thing P3 changed and should be
     visible at the call site.
+
+    **`app` is required, and it is in the branch name** (#51). It used to
+    default to `""` and was carried on `StoryRef` for the prompt's benefit only,
+    so a delivery branch was `qa/<STORY_ID>-<slug>` -- identified by the story
+    alone. Two targets of one tenant may point at the same `owner/repo` and the
+    same base branch (nothing constrains `targets.target_repo`), and story ids
+    are resolved per-target so both may hold `SCRUM-101`. Delivering each in
+    turn therefore wrote two targets' materialized trees onto one branch, which
+    `push.py` appends to rather than force-pushing by design, leaving one PR
+    carrying a mixture of two targets' suites and both targets reporting
+    `delivered`. Nothing errored.
+
+    So the target is a segment of the branch: `qa/<app>/<STORY_ID>-<slug>`. That
+    permits one repo holding several apps' suites -- a layout a customer may
+    well want, and the alternative fix (a unique `(tenant_id, target_repo,
+    target_branch)`) would have forbidden it on no evidence. The cost is paid
+    once and is paid now, while the delivered set is small: an already-delivered
+    story's next delivery goes to a new branch name and opens a second PR
+    instead of updating the first.
+
+    The default is gone rather than kept for convenience. A caller that did not
+    pass a target would silently get the colliding shape back, which is exactly
+    the bug -- so the one caller that relied on the default (`orchestrator.
+    claude.resolve_run_story`, which renders `{BRANCH}` into the agent's prompt)
+    passes the run's target, and the prompt and the delivery now agree on the
+    name.
     """
+    _assert_branch_safe(app)
     story_path = story_filename(paths, story_id)
     base = Path(story_path).stem
     slug = base[len(story_id) + 1 :] if base.startswith(f"{story_id}-") else base
@@ -388,12 +415,45 @@ def resolve_story(
         story_id=story_id,
         slug=slug,
         title=title,
-        branch=f"qa/{story_id}-{slug}",
+        branch=f"qa/{app}/{story_id}-{slug}",
         pr_title=f"{story_id}: {title} E2E test suite",
         story_rel=f"{STORIES_DIR}/{base}.md",
         plan_rel=f"{PLANS_DIR}/{story_id}-{slug}-test-plan.md",
         tests_rel=f"{TESTS_DIR}/{slug}",
     )
+
+
+def _assert_branch_safe(app: str) -> None:
+    """Refuse a target slug a branch name cannot hold.
+
+    `target_config.clean_app_slug` refuses an unusable slug at the write path,
+    where the operator is still around to be told. This is the same rule asked
+    again at the read path, because a row saved before that check existed has
+    never been through it -- and a slug with a space or a `..` in it would
+    produce a ref git refuses, surfacing as a push failure well after the
+    delivery was approved. Refused here instead, with the reason, in delivery's
+    own error type.
+
+    Not a sanitiser: two slugs that differed only in a character this replaced
+    would collapse to one branch name, which is the collision #51 is about,
+    reintroduced by its own fix.
+
+    **It refuses a run as well as a delivery**, because
+    `orchestrator.claude.resolve_run_story` resolves the same names to render
+    `{BRANCH}` into the agent's prompt. That is the right direction: a target
+    whose slug cannot be a ref is one whose suite could be generated and never
+    delivered, and the run fails at its first step rather than after the tokens
+    are spent. Such a row has no in-place remedy -- `app` is deliberately not
+    editable -- so the remedy is a new target; upper case, the one legacy
+    spelling likely to exist, is accepted precisely so it needs none (see
+    `target_config.APP_SLUG`).
+    """
+    if not is_app_slug(app):
+        raise DeliveryError(
+            f"target slug {app!r} cannot be part of a branch name; a delivery "
+            f"branch is qa/<slug>/<STORY_ID>-<story-slug>, so the slug must be "
+            f"letters, digits, '.', '-' or '_' starting with a letter or digit"
+        )
 
 
 def story_title(content: str) -> str | None:

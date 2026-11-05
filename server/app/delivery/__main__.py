@@ -180,11 +180,15 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ERROR
 
     with tenant_scope(tenant_id):
-        return _run(args)
+        return _dispatch(args)
 
 
-def _run(args) -> int:
+def _dispatch(args: argparse.Namespace) -> int:
     """One command, inside the tenant scope `main` bound.
+
+    Named `_dispatch` rather than `_run`: GLOSSARY.md reserves **Run** for "one
+    attempt at one user story for one target", and a CLI helper wearing that
+    name reads as the domain concept it has nothing to do with.
 
     Split out so the scope is one `with` around the whole body rather than an
     extra level of indentation on two hundred lines of command dispatch.

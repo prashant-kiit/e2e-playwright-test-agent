@@ -209,6 +209,57 @@ def test_download_missing_artifact_404(client):
     assert client.get("/artifacts/999/content").status_code == 404
 
 
+def test_both_artifact_key_shapes_download_through_the_route(client, session):
+    """P5-10 / #42, at the surface a browser actually uses.
+
+    An artifact is fetched by the `s3_key` on its own row rather than by a key
+    rebuilt from parts, which is what makes the re-keying pass something a
+    deployment can take at leisure instead of during a deploy. Asserted here
+    rather than left to the store-level test, because "the download still
+    works" is a claim about this route.
+
+    Both shapes in one test, because the property is that the route does not
+    care -- a test of the old shape alone would pass just as well if the route
+    had stopped understanding the new one.
+    """
+    from app.domain import store_keys
+    from app.models import Artifact
+
+    store = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: store
+    _, tid = _make_target(client)
+    run = client.post(
+        f"/targets/{tid}/runs", json={"story_id": "SCRUM-9", "mode": "full"}
+    ).json()
+    tenant_id = current_tenant_id()
+    shapes = {
+        "legacy": store_keys.legacy_artifact_key(run["run_key"], "old.html"),
+        "current": store_keys.artifact_key(tenant_id, run["run_key"], "new.html"),
+    }
+    for name, key in shapes.items():
+        store.objects[key] = (f"<html>{name}</html>".encode(), "text/html")
+        session.add(
+            Artifact(
+                tenant_id=tenant_id,
+                run_id=run["id"],
+                step="heal",
+                kind="report",
+                s3_key=key,
+                sha256="y" * 64,
+                version=1,
+            )
+        )
+    session.commit()
+
+    listed = {a["s3_key"]: a["id"] for a in client.get(f"/runs/{run['id']}/artifacts").json()}
+    assert set(listed) == set(shapes.values()), listed
+
+    for name, key in shapes.items():
+        got = client.get(f"/artifacts/{listed[key]}/content")
+        assert got.status_code == 200, (name, got.text)
+        assert got.content == f"<html>{name}</html>".encode()
+
+
 def test_there_is_no_filesystem_backed_app_list(client):
     """Apps and targets collapsed into one concept. A route reading an app list
     off a disk is a route describing a disk that does not exist."""

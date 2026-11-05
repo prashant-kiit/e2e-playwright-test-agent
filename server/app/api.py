@@ -25,6 +25,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import (
+    accounts,
     apphub,
     audit,
     authoring,
@@ -41,6 +42,7 @@ from .db import SessionLocal, get_session
 from .delivery import credentials as pats
 from .domain import quotas
 from .domain.credentials import CredentialState
+from .domain.roles import UserRole
 from .domain.status import RunStatus, is_live, is_terminal
 from .models import Artifact
 from .orchestrator.bus import LogBus, bus_from_env
@@ -48,11 +50,14 @@ from .sandbox import dispatch, egress
 from .schemas import (
     ArtifactOut,
     AuditEntryOut,
+    CapsBody,
     CredentialOut,
     DeliverBody,
     DeliveryOut,
     DeliveryStateOut,
     FileIndexOut,
+    InviteBody,
+    InvitedUserOut,
     PatBody,
     ProjectCreate,
     ProjectOut,
@@ -72,6 +77,7 @@ from .schemas import (
     TargetCreatedOut,
     TargetOut,
     UsageOut,
+    UserOut,
     WriteOut,
 )
 from .storage import Storage
@@ -321,7 +327,7 @@ def list_audit_entries(
     the customer's repo, who rotated which credential. That is an admin's view
     of their own organisation rather than something every member reads.
 
-    Scoped to the caller's tenant by `tenancy.install_read_guard`, like every
+    Scoped to the caller's tenant by `tenancy.install_tenant_guard`, like every
     other read -- there is no `.where(tenant_id == ...)` here because a filter
     a route remembers is a filter a route can forget (P5-02, #32).
 
@@ -970,6 +976,79 @@ def start_run(
     return run
 
 
+# --- users: a tenant administers its own (P5-14 / #46) -------------------
+#
+# `/users` is a **new first path segment**, which means it had to be added to
+# both proxy allowlists -- nginx's `location ~ ^/(...)` and `apiPaths` in
+# web/vite.config.js. A path missing from those does not 404: it falls through
+# to the SPA shell and answers 200 with HTML, which `api.js` raises on and a
+# forgiving caller swallows, so the panel renders nothing with no error
+# anywhere. tests/test_api_proxy_paths.py is what makes forgetting a failure.
+#
+# Admin-gated as a whole, listing included: who else has an account in your
+# tenant is an administrative question, and the portal shows this panel only
+# to the people who can act on it.
+
+@router.get("/users", response_model=list[UserOut], dependencies=[AdminDep])
+def list_users(session: Session = Depends(get_session)):
+    """This tenant's accounts. No tenant in the path: there is none to name but
+    your own, and the read guard is what scopes it."""
+    return accounts.list_users(session)
+
+
+@router.post(
+    "/users",
+    response_model=InvitedUserOut,
+    status_code=201,
+    dependencies=[AdminDep],
+)
+def invite_user(body: InviteBody, session: Session = Depends(get_session)):
+    """Create an account in this tenant and return its one-time password.
+
+    201 with the password in the body -- the only response in this API that
+    carries a credential in the clear, and the reason is in `InvitedUserOut`.
+    A duplicate address is 409 rather than 422: the request is well formed and
+    the state is what refuses it, which is the same distinction a busy app's
+    409 draws.
+    """
+    try:
+        added = accounts.add_user(session, email=body.email, role=body.role)
+    except accounts.AccountError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return InvitedUserOut(
+        id=added.user.id,
+        email=added.user.email,
+        role=UserRole(added.user.role),
+        password=added.password,
+    )
+
+
+@router.delete("/users/{user_id}", status_code=204, dependencies=[AdminDep])
+def remove_user(user_id: int, session: Session = Depends(get_session)):
+    """Remove an account from this tenant.
+
+    Two refusals, kept apart because the remedies are different and only one
+    of them is the operator's to fix:
+
+    * **404** -- `accounts.NoSuchUser`, meaning no such user *in this tenant*.
+      Deliberately the same answer for an id that does not exist and one that
+      belongs to somebody else: the ids are small integers, and a 403 on
+      another tenant's id would confirm the account exists, which is exactly
+      what someone trying ids wants. Chosen by the exception's **type** rather
+      than by matching its message, which is what this did first -- a status
+      code that depended on prose a human also reads would have flipped the
+      next time somebody improved the sentence.
+    * **409** -- the last admin. The body carries the sentence, because "make
+      another admin first" is the remedy and a status code cannot say it.
+    """
+    try:
+        accounts.remove_user(session, user_id)
+    except accounts.NoSuchUser as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except accounts.AccountError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/usage", response_model=UsageOut)
 def get_usage(session: Session = Depends(get_session)):
     """This tenant's usage against its plan caps (P5-04).
@@ -990,6 +1069,65 @@ def get_usage(session: Session = Depends(get_session)):
         # predicates `quotas.breach` is built on. Both can be full at once --
         # `breach` picks one to refuse with, which is the right answer for a
         # rejection message and the wrong one for a pair of gauges.
+        at_concurrency_cap=quotas.at_concurrency_cap(caps, usage),
+        at_monthly_quota=quotas.at_monthly_quota(caps, usage),
+    )
+
+
+@router.put("/usage/caps", response_model=UsageOut, dependencies=[AdminDep])
+def set_usage_caps(body: CapsBody, session: Session = Depends(get_session)):
+    """Change this tenant's plan caps. Tenant-admin only (P5-13, story 5).
+
+    **Under `/usage` on purpose**: this is the write half of a surface that
+    already reads, so it shares the read's prefix, its response shape and --
+    free, and the reason it matters -- its entry in both proxy allowlists
+    (`docker/nginx.conf` and `web/vite.config.js`). A new first segment would
+    have needed adding to both, and a path missing from them does not 404: it
+    answers 200 with the SPA shell, which is how P5-04's quota panel shipped
+    invisible.
+
+    **No tenant in the path**, like the read above: there is no tenant to name
+    but your own. `repo.set_tenant_caps` writes to `current_tenant_id()`, which
+    `require_auth` bound from the session, so "change another tenant's caps" is
+    not a request this surface can express rather than one it checks for.
+
+    Returns the same `UsageOut` the read returns, recomputed, so the panel can
+    render the result of the change without a second round trip -- and so the
+    caps an admin sees afterwards are the stored ones rather than the ones they
+    typed.
+
+    The audit row is written by `repo.set_tenant_caps` rather than here, which
+    is where it already was: that function is also reached from a console, and
+    auditing the function covers both callers. The actor comes from the request
+    scope (`tenancy.current_actor()`), so this route names the admin who
+    pressed it without passing anything.
+
+    One thing worth stating, because the function's own docstring argues the
+    other way. It says a route was declined because "a tenant that could raise
+    its own caps would not have caps", and that is true of a *platform* ceiling
+    -- which this is not. Story 5 makes quota change an intra-tenant
+    authorization question (admin yes, member no), and that is what this
+    implements. A ceiling the tenant cannot raise would be a second, separate
+    limit above this one, and nothing in P5 asks for one yet.
+    """
+    try:
+        provided = body.model_fields_set
+        caps = repo.set_tenant_caps(
+            session,
+            **{
+                name: getattr(body, name)
+                for name in ("max_concurrent_runs", "monthly_run_quota")
+                if name in provided
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    usage = repo.tenant_usage(session)
+    return UsageOut(
+        live_runs=usage.live_runs,
+        runs_this_month=usage.runs_this_month,
+        max_concurrent_runs=caps.max_concurrent_runs,
+        monthly_run_quota=caps.monthly_run_quota,
         at_concurrency_cap=quotas.at_concurrency_cap(caps, usage),
         at_monthly_quota=quotas.at_monthly_quota(caps, usage),
     )

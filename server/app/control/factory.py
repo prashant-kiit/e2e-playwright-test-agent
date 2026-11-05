@@ -63,7 +63,17 @@ def mint_for_run(run_id: int, *, session_factory: SessionFactory = SessionLocal)
         run = repo.get_run(session, run_id)
         return run_token.mint(
             RunScope(
-                run_id=run.id, target_id=run.target_id, tenant_id=run.tenant_id
+                run_id=run.id,
+                target_id=run.target_id,
+                tenant_id=run.tenant_id,
+                # Read now rather than remembered: `repo.pause_run` moved the
+                # counter on when it destroyed the previous sandbox, so reading
+                # the row here mints the new sandbox into the attempt it will
+                # be checked against, while the old one's token is already dead
+                # (#48). Minting is the only thing that has to get this right,
+                # because it is the only thing that writes an attempt into a
+                # token.
+                sandbox_attempt=run.sandbox_attempt,
             )
         )
 

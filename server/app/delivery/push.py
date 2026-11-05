@@ -1,7 +1,7 @@
 """Deliver a story's suite to its target repo as a PR, from the head revision.
 
 The approved push materializes the target's **head revision** into a temporary
-tree, writes it onto branch `qa/<STORY_ID>-<slug>`, squashes it into one commit,
+tree, writes it onto branch `qa/<app>/<STORY_ID>-<slug>`, squashes it into one commit,
 opens or updates a PR into the target branch, and records `delivered_sha` on the
 revision it delivered. "What exactly did we push, and from what?" is a row.
 

@@ -19,6 +19,9 @@ const apiPaths = [
   // gracefully renders nothing at all. `test_api_proxy_paths.py` asserts this
   // list and nginx's against api.js so the next one fails a test instead.
   "/usage",
+  // P5-14's user administration (#46). A new first segment, so it needs an
+  // entry here and in nginx.conf -- see the note above.
+  "/users",
   "/health",
 ];
 // API paths sit at the root and collide with SPA client routes (/settings,

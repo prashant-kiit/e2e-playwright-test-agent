@@ -1,7 +1,8 @@
 """Collect a run's on-disk outputs into blob storage + the artifacts index.
 
 After each step the driver asks the collector to sweep the run dir: every file
-not already stored for this run is uploaded (key = run_key/relpath) and indexed
+not already stored for this run is uploaded (key =
+tenant/<id>/runs/<run_key>/<relpath>, see app/domain/store_keys.py) and indexed
 with a kind (screenshot/video/trace/report/log/other) and a version. Version is
 per (run, key): re-storing the same path in a later attempt bumps it, so history
 is kept without a bespoke version graph.
@@ -26,9 +27,10 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from .control.gateway import RunGateway
-from .domain.steps import Step
-from .storage import Storage, content_type_for
+from ..control.gateway import RunGateway
+from ..domain import store_keys
+from ..domain.steps import Step
+from ..storage import Storage, content_type_for
 
 # Files that are never useful as artifacts.
 _SKIP = {".DS_Store"}
@@ -85,7 +87,14 @@ class ArtifactCollector:
             if not path.is_file() or path.name in _SKIP:
                 continue
             rel = path.relative_to(run_dir).as_posix()
-            key = f"{run_key}/{rel}"
+            # Under the tenant prefix since P5-10, so that "this tenant's
+            # storage" is one prefix an operator can list and story 32's purge
+            # can delete. The tenant comes from the run's own scope rather than
+            # from an argument: the collector is built per run and a tenant it
+            # could be told would be a tenant it could be told wrongly.
+            key = store_keys.artifact_key(
+                self.control.scope.tenant_id, run_key, rel
+            )
             digest = _sha256(path)
 
             if existing.get(key) == digest:

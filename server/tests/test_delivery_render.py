@@ -87,11 +87,11 @@ def _paths(root: Path) -> list[str]:
 def test_resolve_story_derives_every_delivered_path(tmp_path):
     root = _worktree(tmp_path, "SCRUM-101-checkout.md")
 
-    story = render.resolve_story(root, "SCRUM-101", paths=_paths(root))
+    story = render.resolve_story(root, "SCRUM-101", paths=_paths(root), app="saucedemo")
 
     assert story.slug == "checkout"
     assert story.title == "E-commerce Checkout Process"
-    assert story.branch == "qa/SCRUM-101-checkout"
+    assert story.branch == "qa/saucedemo/SCRUM-101-checkout"
     assert story.pr_title == "SCRUM-101: E-commerce Checkout Process E2E test suite"
     assert story.story_rel == "user-stories/SCRUM-101-checkout.md"
     assert story.plan_rel == "specs/SCRUM-101-checkout-test-plan.md"
@@ -102,7 +102,7 @@ def test_resolve_story_derives_every_delivered_path(tmp_path):
 def test_resolve_story_rejects_a_missing_story(tmp_path):
     root = _worktree(tmp_path, "SCRUM-101-checkout.md")
     with pytest.raises(errors.DeliveryError, match="exactly one"):
-        render.resolve_story(root, "SCRUM-999", paths=_paths(root))
+        render.resolve_story(root, "SCRUM-999", paths=_paths(root), app="saucedemo")
 
 
 def test_two_files_for_one_story_is_a_hard_error(tmp_path):
@@ -110,13 +110,13 @@ def test_two_files_for_one_story_is_a_hard_error(tmp_path):
     delivered."""
     root = _worktree(tmp_path, "SCRUM-101-checkout.md", "SCRUM-101-checkout-v2.md")
     with pytest.raises(errors.DeliveryError, match="exactly one"):
-        render.resolve_story(root, "SCRUM-101", paths=_paths(root))
+        render.resolve_story(root, "SCRUM-101", paths=_paths(root), app="saucedemo")
 
 
 def test_resolve_story_requires_a_story_id(tmp_path):
     root = _worktree(tmp_path, "SCRUM-101-checkout.md")
     with pytest.raises(errors.DeliveryError):
-        render.resolve_story(root, "", paths=_paths(root))
+        render.resolve_story(root, "", paths=_paths(root), app="saucedemo")
 
 
 def test_the_path_set_is_what_decides_not_the_filesystem(tmp_path):
@@ -126,9 +126,65 @@ def test_the_path_set_is_what_decides_not_the_filesystem(tmp_path):
     (root / "user-stories" / "SCRUM-101-stray.md").write_text("# stray\n")
 
     story = render.resolve_story(
-        root, "SCRUM-101", paths=["user-stories/SCRUM-101-checkout.md"]
+        root, "SCRUM-101", paths=["user-stories/SCRUM-101-checkout.md"],
+        app="saucedemo",
     )
     assert story.slug == "checkout"
+
+
+# --- the branch names its target (#51) -----------------------------------
+
+def test_two_targets_sharing_a_repo_get_different_branches(tmp_path):
+    """#51: a delivery branch is identified by **target and story**, not story.
+
+    The failure this prevents needs no exotic configuration. Nothing constrains
+    `targets.target_repo`, so two targets of one tenant may point at the same
+    `owner/repo` and the same base branch, and story ids are resolved inside
+    each target's own tree, so both may hold `SCRUM-101`. With the story alone
+    in the branch name, delivering each in turn appended the second target's
+    whole materialized tree on top of the first's -- `push.py` appends by
+    design -- and left one PR carrying both suites with both targets reporting
+    `delivered`. Nothing errored, and `check` answers from Postgres, so neither
+    target's status showed it.
+    """
+    root = _worktree(tmp_path, "SCRUM-101-checkout.md")
+
+    live = render.resolve_story(root, "SCRUM-101", paths=_paths(root), app="saucedemo")
+    staging = render.resolve_story(
+        root, "SCRUM-101", paths=_paths(root), app="saucedemo-staging"
+    )
+
+    assert live.branch == "qa/saucedemo/SCRUM-101-checkout"
+    assert staging.branch == "qa/saucedemo-staging/SCRUM-101-checkout"
+    assert live.branch != staging.branch
+
+
+def test_a_legacy_upper_case_slug_still_delivers(tmp_path):
+    """A row saved before the write-path check existed, and still deliverable.
+
+    `app` is not editable, so refusing upper case here would leave such a
+    target with no remedy but deletion -- and git has no objection to
+    `qa/SauceDemo/...`. The write path lower-cases what an operator types, so
+    no new target looks like this.
+    """
+    root = _worktree(tmp_path, "SCRUM-101-checkout.md")
+
+    story = render.resolve_story(root, "SCRUM-101", paths=_paths(root), app="SauceDemo")
+
+    assert story.branch == "qa/SauceDemo/SCRUM-101-checkout"
+
+
+def test_a_slug_git_cannot_spell_is_refused_rather_than_sanitised(tmp_path):
+    """A row saved before the write-path check existed, refused at the read.
+
+    Sanitising instead -- replacing the offending characters -- would map two
+    distinct slugs onto one branch name, which is the collision this ticket is
+    about, reintroduced by the fix.
+    """
+    root = _worktree(tmp_path, "SCRUM-101-checkout.md")
+
+    with pytest.raises(errors.DeliveryError, match="cannot be part of a branch name"):
+        render.resolve_story(root, "SCRUM-101", paths=_paths(root), app="two words")
 
 
 def test_story_title_falls_back_to_the_slug(tmp_path):
@@ -137,14 +193,14 @@ def test_story_title_falls_back_to_the_slug(tmp_path):
     (root / "user-stories").mkdir(parents=True)
     (root / "user-stories" / "SCRUM-1-plain.md").write_text("# Heading\n")
 
-    story = render.resolve_story(root, "SCRUM-1", paths=_paths(root))
+    story = render.resolve_story(root, "SCRUM-1", paths=_paths(root), app="saucedemo")
     assert story.title == "Heading"
     assert story.slug == "plain"
 
 
 def test_commit_and_pr_body_carry_the_run_id(tmp_path):
     root = _worktree(tmp_path, "SCRUM-101-checkout.md")
-    story = render.resolve_story(root, "SCRUM-101", paths=_paths(root))
+    story = render.resolve_story(root, "SCRUM-101", paths=_paths(root), app="saucedemo")
     message = render.commit_message(story, run_id="run-7")
     assert "Run-ID: run-7" in message
     assert message.startswith("feat(tests): SCRUM-101 ")

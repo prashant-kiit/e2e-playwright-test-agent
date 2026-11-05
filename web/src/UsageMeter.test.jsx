@@ -1,5 +1,6 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
 import { UsageMeter } from "./components.jsx";
 
 // The quota panel (P5-04). It shipped untested, and the two defects a review
@@ -107,5 +108,90 @@ describe("UsageMeter", () => {
 
     expect(container.querySelectorAll(".usage-gauge-full")).toHaveLength(1);
     expect(screen.getByText("2 of 3")).toBeInTheDocument();
+  });
+});
+
+// --- the write half (P5-13 / #45) ---------------------------------------
+//
+// Story 5: "only authorized users can ... change quotas". The control is shown
+// only to an admin, and that is **presentation**: the server's `AdminDep` is
+// what enforces it, and a member who reached the route anyway gets a 403. A
+// hidden button is a tidier portal, not a permission.
+
+describe("UsageMeter editing", () => {
+  it("offers no way to change the caps to a non-admin", () => {
+    render(<UsageMeter usage={METERED} canEdit={false} />);
+
+    expect(screen.queryByRole("button", { name: /change caps/i })).not.toBeInTheDocument();
+  });
+
+  it("offers the caps to an admin, prefilled with what is stored", async () => {
+    render(<UsageMeter usage={METERED} canEdit />);
+
+    await userEvent.click(screen.getByRole("button", { name: /change caps/i }));
+
+    expect(screen.getByLabelText(/concurrent runs/i)).toHaveValue(3);
+    expect(screen.getByLabelText(/runs per month/i)).toHaveValue(500);
+  });
+
+  it("sends only the caps that were edited", async () => {
+    // The distinction the route takes `model_fields_set` for: an untouched
+    // field must not be sent, or raising one cap rewrites the other with a
+    // value the admin never chose.
+    const onSave = vi.fn().mockResolvedValue(METERED);
+    render(<UsageMeter usage={METERED} canEdit onSave={onSave} />);
+    await userEvent.click(screen.getByRole("button", { name: /change caps/i }));
+
+    const field = screen.getByLabelText(/concurrent runs/i);
+    await userEvent.clear(field);
+    await userEvent.type(field, "9");
+    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    expect(onSave).toHaveBeenCalledWith({ max_concurrent_runs: 9 });
+  });
+
+  it("sends an explicit null when a cap is emptied, which means unmetered", async () => {
+    // Emptying the box is how "no cap" is expressed, and it has to reach the
+    // server as `null` rather than as an omission or as 0 -- those are three
+    // different requests and only one of them means unmetered.
+    const onSave = vi.fn().mockResolvedValue(METERED);
+    render(<UsageMeter usage={METERED} canEdit onSave={onSave} />);
+    await userEvent.click(screen.getByRole("button", { name: /change caps/i }));
+
+    await userEvent.clear(screen.getByLabelText(/runs per month/i));
+    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    expect(onSave).toHaveBeenCalledWith({ monthly_run_quota: null });
+  });
+
+  it("shows the server's refusal rather than pretending the change landed", async () => {
+    const onSave = vi.fn().mockRejectedValue(new Error("tenant-admin role required"));
+    render(<UsageMeter usage={METERED} canEdit onSave={onSave} />);
+    await userEvent.click(screen.getByRole("button", { name: /change caps/i }));
+
+    const field = screen.getByLabelText(/concurrent runs/i);
+    await userEvent.clear(field);
+    await userEvent.type(field, "9");
+    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    expect(await screen.findByText(/tenant-admin role required/i)).toBeInTheDocument();
+    // Still open, so the typed values are not lost to a failed save.
+    expect(screen.getByLabelText(/concurrent runs/i)).toHaveValue(9);
+  });
+
+  it("renders the caps the server returned after a save, not the typed ones", async () => {
+    // The server is the authority on what was stored: it clamps nothing today,
+    // but a panel that showed the request rather than the response would be
+    // lying the first time it does.
+    const onSave = vi.fn().mockResolvedValue({ ...METERED, max_concurrent_runs: 4 });
+    render(<UsageMeter usage={METERED} canEdit onSave={onSave} />);
+    await userEvent.click(screen.getByRole("button", { name: /change caps/i }));
+
+    const field = screen.getByLabelText(/concurrent runs/i);
+    await userEvent.clear(field);
+    await userEvent.type(field, "9");
+    await userEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    expect(await screen.findByText("2 of 4")).toBeInTheDocument();
   });
 });

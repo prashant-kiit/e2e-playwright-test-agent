@@ -45,12 +45,21 @@ may prune or delete.
 **Append-only is enforced by the database.** A `BEFORE UPDATE OR DELETE`
 trigger on `audit_log` raises, so the guarantee survives raw SQL, a psql
 session and a future bulk delete -- not only code that goes through this
-module. There is deliberately no update and no delete function here. Note for
-whoever builds tenant purge (#30, story 32), the one exception the spec allows:
-the trigger will refuse the purge's DELETE, and the purge must disable it
-explicitly (`ALTER TABLE audit_log DISABLE TRIGGER audit_log_append_only`) in
-the same transaction. That is a seam a reviewer can see, which is the point --
-a purge that silently bypassed the trail would be the one write nobody notices.
+module. The one exception the spec allows is tenant purge (#30, story 32),
+built by P5-15: `app/accounts/purge.py` disables the trigger explicitly
+(`ALTER TABLE audit_log DISABLE TRIGGER audit_log_append_only`) for exactly
+the one statement that removes a purged tenant's rows, and re-enables it in
+the same transaction. That is a seam a reviewer can see, which was the point --
+a purge that silently bypassed the trail would be the one write nobody
+notices -- and a test asserts the trigger is back on afterwards, because a
+purge that left it off would remove story 28's guarantee with nothing else in
+the system noticing.
+
+**That module is the only thing permitted to delete from this table**, and the
+list is short enough to state: it holds the only `DISABLE TRIGGER` in the tree.
+Deleting a user does *not* remove their audit rows -- `actor` is a copied
+string rather than an FK for exactly that reason -- so offboarding a customer
+is the only thing that erases any part of the trail.
 
 **Never record a credential.** `before`/`after` hold the *state* either side of
 a mutation, and a PAT save records that the credential state went from `absent`
@@ -134,7 +143,7 @@ def record(
 def entries(session: Session, *, limit: int | None = None) -> list[AuditLog]:
     """This tenant's trail, most recent first.
 
-    An ordinary ORM select, so `tenancy.install_read_guard` adds the
+    An ordinary ORM select, so `tenancy.install_tenant_guard` adds the
     `tenant_id` filter -- the enforced read path #37's last criterion asks for,
     and the same mechanism as every other read in the tree rather than a
     hand-written `.where()` that could be forgotten.

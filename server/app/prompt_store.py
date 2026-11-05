@@ -48,7 +48,7 @@ request reaches, and it must not be able to seed a row on a tenant's behalf
 halfway through their run.
 
 **Tenant scoping is inherited, not implemented here.** `Prompt` is
-`TenantOwned`, so `tenancy.install_read_guard` filters every SELECT below by
+`TenantOwned`, so `tenancy.install_tenant_guard` filters every SELECT below by
 `current_tenant_id()` and the inserts set the column from the same function.
 There is no tenant argument in this module's signatures on purpose: a second
 way to say which tenant is acting is the thing DESIGN.md §13 carried one column
