@@ -71,7 +71,7 @@ two is a hard error before the agent starts, not something for the agent to pick
 | `{CHROMIUM_PROJECT}` | `chromium` — the generated config is single-target, so project names carry no prefix |
 | `{BASE_URL}`, `{LOCATORS}`, `{AGENT_NOTES}` | From the target's row |
 | `{TARGET_REPO}`, `{TARGET_BRANCH}` | From the target's row: where an operator later delivers |
-| `{BRANCH}`, `{PR_TITLE}` | `qa/{STORY_ID}-{SLUG}`, and `{STORY_ID}: {STORY_TITLE} E2E test suite` |
+| `{BRANCH}`, `{PR_TITLE}` | `qa/{APP}/{STORY_ID}-{SLUG}`, and `{STORY_ID}: {STORY_TITLE} E2E test suite` |
 | `{MODE}` | `full` or `changed` |
 | `{RUN_KEY}` | The run's id, e.g. `20261024-180531-saucedemo-a1b2c3` |
 

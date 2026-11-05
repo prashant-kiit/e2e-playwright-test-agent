@@ -66,7 +66,11 @@ def resolve_run_story(ctx: StepContext) -> StoryRef:
     reach another customer's tests.
     """
     paths = [path for path, _on_disk in tracked_tree(ctx.worktree)]
-    return resolve_story(ctx.worktree, ctx.story_id, paths=paths)
+    # The run's target, which since #51 is a segment of the branch name the
+    # prompt renders as `{BRANCH}`. Passed rather than defaulted: the agent and
+    # the delivery that pushes its work must name the same branch, and this is
+    # the only caller that could have disagreed.
+    return resolve_story(ctx.worktree, ctx.story_id, paths=paths, app=ctx.app)
 
 
 def _agent_notes(notes: tuple[str, ...]) -> str:

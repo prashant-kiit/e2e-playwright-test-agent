@@ -400,11 +400,17 @@ operator approves in portal
   → control plane decrypts the tenant PAT (never in a sandbox)
   → ensure_bootstrapped(): if targetBranch lacks infra, push the bootstrap commit first
   → squash the agent's many sandbox commits into ONE delivery commit
-  → append it to branch qa/<STORY_ID>-<slug>  (no force-push)
+  → append it to branch qa/<app>/<STORY_ID>-<slug>  (no force-push)
   → open or update the PR into targetBranch
   → record delivered_sha on the revision row + write audit_log
 ```
 
+- **The branch names the target as well as the story** (#51, `docs/adr/0003`). Two targets
+  of one tenant may point at the same target repo on purpose, and story ids are resolved
+  per-target, so a branch identified by the story alone was shared by both: the second
+  delivery appended the second target's whole tree onto the first's and one PR carried
+  both suites, with nothing erroring. The cost of the fix is that an already-delivered
+  story's next delivery opens a second PR under the new name.
 - **Squash means collapsing the agent's internal commits into one commit per approved
   delivery** — *not* rewriting the customer's branch. Re-delivery appends another commit.
   Force-pushing into someone else's repo destroys PR review threads and is a support

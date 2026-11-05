@@ -6,10 +6,24 @@ against the `credential` hash on their `users` row; a signed, timestamped
 cookie then carries *who they are* -- their user id, their tenant, and their
 role -- for a week.
 
-The session carries the claims rather than re-reading the row on every request:
-this is a portal speed bump, not a revocation system, so a cheap stateless
-check beats a database round-trip per request. The cost is that a role change
-takes effect at the user's next login; acceptable for the actions it gates.
+The session carries the claims rather than re-reading the `users` row on every
+request: a cheap stateless check beats a database round-trip per request, and
+the cost is that a **role change** takes effect at the user's next refresh
+rather than at once. That is still the bargain, and it is still acceptable for
+the actions it gates -- a downgraded user is somebody who still works here.
+
+**A removal is not a role change, and it does not wait.** UAT 3 (#54) is the
+reason that sentence is here: an admin removed through `DELETE /users/{id}`
+went on reading `/users`, creating admins and changing quotas with the
+credentials they already held. `/auth/refresh` re-reads the row now, so no new
+cookie can be minted for a removed user; `require_auth` additionally asks
+`app/revocation.py` whether this user id was removed within `ACCESS_MAX_AGE`,
+so the cookie they already hold stops working **now** rather than at its
+expiry. That is #56's decision, and the trade-off it accepts is one read of a
+small, bounded table per authenticated request -- not of `users`, and not a
+session table. Why that option and not the other three (read the row per
+request; cut the access cookie to ~2 minutes; accept a fifteen-minute
+offboarding window) is written up in `app/revocation.py`.
 
 **There are two cookies, not one.** A single week-long session cookie meant a
 copy of it -- out of a log, a proxy, a backup, a borrowed laptop -- was good for
@@ -25,13 +39,14 @@ a week. So the session is split:
   sitting in every request log. `/auth/refresh` is the only route that *reads*
   it; `/auth/logout` is under the same prefix so the delete can reach it.
 
-Both are stateless signed tokens; **there is no server-side token store, so
-neither can be revoked before it expires.** That is a deliberate continuation of
-the "speed bump, not a revocation system" line above, and it is what bounds the
-blast radius choice: the access cookie is short *because* nothing can cut it
-short. Logout clears both cookies, which ends the session on that browser but
-would not stop a copy already taken. Revocation, if it is ever wanted, means a
-token table, and the place to put it is here.
+Both are stateless signed tokens, and **neither is looked up in a token
+store** -- there still is none, and the access cookie is short *because* a
+stolen copy cannot be cut short. What a *removed user* holds is the one
+exception, and it is revocation of a user rather than of a token: `revoked_users`
+names the user id, not the cookie, so one row kills every session that user
+holds without the server ever having known they existed. A copy of somebody
+else's cookie is still worth a quarter of an hour, and logout still only ends
+the session on the browser that asked.
 
 The refresh cookie's lifetime is a hard cap, not a sliding window: refreshing
 does not re-issue it, so a session ends 30 days after *login* however active the
@@ -49,7 +64,8 @@ Two dependencies:
   because it is async -- sets `tenancy.current_tenant_id` **and
   `tenancy.current_actor`** for the rest of the request, so the sync endpoint and
   every repo call it makes insert and read as that tenant, and every audit row
-  names that user. A missing, bad or **expired** cookie is a 401.
+  names that user. A missing, bad or **expired** cookie is a 401, and so is a
+  valid one belonging to a user who has since been removed.
 * `require_tenant_admin` is `require_auth` plus a role check: a non-admin acting
   on a tenant-admin surface (delivery approval, PAT rotation, quota/user
   changes) is a 403.
@@ -67,8 +83,10 @@ from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, Response
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from sqlalchemy.orm import Session
 
-from . import config
+from . import config, revocation
+from .db import get_session
 from .domain.roles import UserRole
 from .tenancy import set_current_actor, set_current_tenant
 
@@ -275,7 +293,9 @@ def clear_session_cookies(response: Response) -> None:
 
 # --- the dependencies ----------------------------------------------------
 
-async def require_auth(request: Request) -> CurrentUser:
+async def require_auth(
+    request: Request, session: Session = Depends(get_session)
+) -> CurrentUser:
     """Resolve the current user, and bind their tenant for the request.
 
     Async on purpose: a value a sync dependency sets does not reach the
@@ -290,12 +310,38 @@ async def require_auth(request: Request) -> CurrentUser:
     resolver raises instead, the suite binds its tenant in an autouse fixture
     (tests/conftest.py), and the failure is asserted at the boundary in
     tests/test_tenant_isolation.py.
+
+    **It takes a session** (#56), which is new and is the cost of closing the
+    removal window -- one read of `revoked_users` per authenticated request.
+    Not of `users`: the claims still come from the cookie, so what this asks
+    the database is only "has this user been removed in the last
+    `ACCESS_MAX_AGE`?", against a table that holds nothing else. A test that
+    overrides `get_session` already covers this read; one that overrides
+    *this dependency* bypasses it, as it always has.
     """
     token = request.cookies.get(ACCESS_COOKIE)
     user = read_access(token) if token else None
     if user is None:
         raise HTTPException(status_code=401, detail="authentication required")
+    # Bound before the revocation read, not after: that read is tenant-filtered
+    # like every other, so the tenant has to be the acting one before the
+    # question can be asked. It is the cookie's own tenant, which is what makes
+    # a cookie naming another tenant's user id resolve to nothing there.
     set_current_tenant(user.tenant_id)
+    if revocation.is_revoked(session, user.id, within=ACCESS_MAX_AGE):
+        # **The one database read this dependency does** (#56), and the window
+        # it closes is a removal's: `/auth/refresh` already refuses to mint a
+        # *new* cookie for a removed user, but the cookie they already hold
+        # verifies on its signature alone and was good for the rest of its
+        # fifteen minutes. UAT 3 (#54) watched a removed admin use them to
+        # create another admin, so a removal now takes effect on the next
+        # request rather than at the next expiry.
+        #
+        # The same bare 401 as a missing or expired cookie, for the reason
+        # `/auth/refresh` gives: "removed" and "expired" must not be
+        # distinguishable to somebody probing with a withdrawn account's
+        # cookie, because that distinction is what they are probing for.
+        raise HTTPException(status_code=401, detail="authentication required")
     # The acting user, for the audit log (P5-07), bound in the same breath as
     # the tenant and for the same reason: a route that had to remember to pass
     # the actor is a route that can forget, and an audit row attributing a

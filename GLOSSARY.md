@@ -24,6 +24,13 @@ the schema already uses. Those are legacy-and-interface spellings of this
 concept, not a second concept, exactly as `targets.app` is for **Target**
 (ADR 0001). Prose says operator; columns, routes and UI labels say user.
 
+**Revocation**:
+Withdrawing an operator's access before their session would have expired.
+Of a *person*, never of a cookie: removing an operator ends every session they
+hold, while a copy of a cookie taken from one of them cannot be withdrawn at
+all (ADR 0004).
+_Avoid_: Logout, invalidation, blacklist, session kill
+
 **Onboarding**:
 Creating a tenant together with its first admin. One operation, because a
 tenant with no admin can never be administered: it is refused on the way out
@@ -205,6 +212,14 @@ _Avoid_: Remote, upstream, customer repo, test repo
 The human-initiated step that pushes a reviewed revision to the target repo as
 a branch and a pull request. Never part of a run, and never done by the agent.
 _Avoid_: Push, deploy, publish, release
+
+**Delivery branch**:
+The branch in the target repo that a story's deliveries are appended to, named
+for **both the target and the story** (`qa/<target slug>/<story id>-<story
+slug>`). Named for both because two targets of one tenant may point at the same
+target repo on purpose, and a branch named for the story alone belonged to
+whichever of them delivered last (ADR 0003).
+_Avoid_: Story branch, QA branch, feature branch
 
 **Bootstrap**:
 The first delivery to a target repo, which puts the test infrastructure there

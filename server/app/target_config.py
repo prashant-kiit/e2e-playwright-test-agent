@@ -41,6 +41,61 @@ OWNER_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*
 
 HTTP_SCHEMES = frozenset({"http", "https"})
 
+# A target's slug, which since #51 is **a segment of a git branch name**:
+# delivery pushes `qa/<app>/<STORY_ID>-<slug>`, so a slug git cannot spell is a
+# target that cannot deliver. Lower-case alphanumerics, dots, dashes and
+# underscores, starting with an alphanumeric -- a subset of what
+# `git check-ref-format` accepts, chosen to be obviously safe rather than
+# maximally permissive.
+APP_SLUG = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+# The three things that pattern still lets through and a ref may not hold: `..`
+# anywhere, a trailing `.lock`, and a trailing `.`.
+_REF_FORBIDDEN = ("..",)
+
+
+def is_app_slug(value: str) -> bool:
+    """Is this a slug that can be a branch-name segment?
+
+    The predicate rather than the refusal, because two layers refuse in their
+    own terms: the write path raises `ConfigError` (a 422 while the operator is
+    still around to be told), and `delivery.render` raises `DeliveryError` for
+    a row saved before this check existed. One rule, two errors -- a second
+    copy of the rule is how they would come to disagree.
+    """
+    if not APP_SLUG.match(value):
+        return False
+    if any(bad in value for bad in _REF_FORBIDDEN):
+        return False
+    return not (value.endswith(".lock") or value.endswith("."))
+
+
+def clean_app_slug(value: object) -> str:
+    """A target's slug, as the write path accepts it.
+
+    Stripped and lower-cased before validating, the way a tenant's slug is
+    (`accounts._normalised_email` and `create_tenant` make the same argument):
+    it is typed by hand, it is what a branch name and an object prefix are
+    keyed on, and `Saucedemo` and `saucedemo` must not be two targets.
+
+    **Not in `CLEANERS`**, which is the map the create *and* the edit path both
+    run: `app` is not editable (see `repo.update_target_config`), because the
+    slug is what a target's history, its blobs and -- since #51 -- its
+    delivered branch names are keyed on. So it is cleaned where it is set, and
+    nowhere else can set it.
+    """
+    text = str(value or "").strip().lower()
+    if not text:
+        raise ConfigError("a target needs a slug")
+    if not is_app_slug(text):
+        raise ConfigError(
+            f"target slug must be lower-case letters, digits, '.', '-' or '_', "
+            f"starting with a letter or digit, got {text!r}. It is a segment of "
+            f"the delivery branch name (qa/<slug>/<STORY_ID>-<story-slug>), so "
+            f"it has to be something git can spell"
+        )
+    return text
+
 
 class ConfigError(ValueError):
     """A configuration value a target may not be saved with."""

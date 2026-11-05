@@ -234,7 +234,11 @@ def create_target(
     target = Target(
         tenant_id=current_tenant_id(),
         project_id=project_id,
-        app=app,
+        # Cleaned here rather than through `clean_fields`, because `app` is the
+        # one configuration value that is **not** editable afterwards -- and
+        # since #51 it is a segment of the delivery branch name, so a slug git
+        # cannot spell is a target that could be created and never delivered.
+        app=target_config.clean_app_slug(app),
         **cleaned,
     )
     session.add(target)

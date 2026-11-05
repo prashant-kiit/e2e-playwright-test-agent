@@ -34,6 +34,7 @@ from app.models import (
     Prompt,
     PurgeLog,
     Revision,
+    RevokedUser,
     Run,
     RunLog,
     RunStep,
@@ -58,6 +59,13 @@ def _populate(session, store, tmp_path, *, slug, name, app_slug):
     with tenant_scope(tenant_id), actor_scope(f"boss@{slug}.example"):
         # A second user, so `users` has more than the admin.
         accounts.add_user(session, email=f"dev@{slug}.example", role=UserRole.MEMBER)
+        # A removed user, so `revoked_users` (#56) has a row -- and written by
+        # the real removal path rather than by hand, which is also what keeps
+        # this fixture honest about how such a row comes to exist.
+        leaver = accounts.add_user(
+            session, email=f"leaver@{slug}.example", role=UserRole.MEMBER
+        )
+        accounts.remove_user(session, leaver.user.id)
         project = repo.create_project(session, name=f"{slug}-project")
         target = create_target(session, project.id, app=app_slug, name=name)
         # A revision and its file index, plus the blobs behind them.
@@ -402,6 +410,7 @@ def test_the_table_list_is_every_tenant_owned_table_in_a_safe_order(two_tenants)
             FileIndex,
             Prompt,
             AuditLog,
+            RevokedUser,
         )
     }
     assert set(tables) == expected

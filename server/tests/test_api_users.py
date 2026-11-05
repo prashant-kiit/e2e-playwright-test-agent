@@ -274,3 +274,59 @@ def test_the_new_account_is_committed_rather_than_only_flushed(
         assert repo.get_user_for_login(
             s, tenant_slug=SEED_TENANT_SLUG, email="committed@example.com"
         ) is not None
+
+
+# --- removal withdraws access (#56, from UAT 3) --------------------------
+#
+# Two cookie jars, because the thing under test is what *another* browser's
+# session can still do after the admin pressed Remove. One client cannot hold
+# two sessions: logging in replaces the jar.
+
+def test_a_removed_users_own_session_dies_on_their_next_request(admin):
+    """The window #56 closed, over HTTP and through the route an admin presses.
+
+    The refresh fix that shipped with UAT 3 stops a removed user minting a new
+    cookie. This is the one they already hold: before #56 the removed member
+    kept their role for the rest of `ACCESS_MAX_AGE`, and the demonstration in
+    the ticket was a user removed seconds earlier getting `POST /users` -> 201.
+    """
+    invited = admin.post("/users", json={"email": "leaver@example.com", "role": "member"})
+    assert invited.status_code == 201, invited.text
+    body = invited.json()
+
+    with TestClient(app) as leaver:
+        _login(leaver, email=body["email"], password=body["password"])
+        assert leaver.get("/auth/me").status_code == 200
+
+        assert admin.delete(f"/users/{body['id']}").status_code == 204
+
+        # The cookie is untouched between those two requests: no logout, no
+        # refresh, no new login.
+        assert leaver.get("/auth/me").status_code == 401
+
+    # And the admin who did the removing is unaffected.
+    assert admin.get("/users").status_code == 200
+
+
+def test_an_admin_who_removes_themselves_loses_access_at_once(admin):
+    """UAT 3's finding, end to end: the sequence that was observed live.
+
+    An admin removed *themselves* and went on working -- reading `/users`,
+    creating another admin, changing the tenant's quotas -- all recorded in the
+    audit log under the deleted account's name, which is how it was noticed.
+    Two admins exist here because the last-admin rule (correctly) refuses the
+    departure that would leave the tenant unadministrable.
+    """
+    invited = admin.post("/users", json={"email": "second@example.com", "role": "admin"})
+    body = invited.json()
+
+    with TestClient(app) as leaving_admin:
+        _login(leaving_admin, email=body["email"], password=body["password"])
+
+        assert leaving_admin.delete(f"/users/{body['id']}").status_code == 204
+
+        assert leaving_admin.get("/users").status_code == 401
+        # The move UAT 3 actually watched: creating another admin afterwards.
+        assert leaving_admin.post(
+            "/users", json={"email": "third@example.com", "role": "admin"}
+        ).status_code == 401

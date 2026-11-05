@@ -1193,6 +1193,41 @@ same thing to this one.
     **[issue #56](https://github.com/prashant-kiit/e2e-playwright-test-agent/issues/56)**,
     which is where this is now tracked. (Note the coincidence: GitHub issue #56 is this
     item, follow-up **55**; follow-up 56 below is the prompt-timestamp one.)
+
+    **Closed 2026-11-05 — option 3, the revocation list.** `revoked_users` is a
+    tenant-owned table of user ids removed within `ACCESS_MAX_AGE`; `accounts.remove_user`
+    writes a row in the same transaction as the `DELETE`, and `require_auth` reads it on
+    every authenticated request and answers the same bare 401 a missing cookie gets. So a
+    removal takes effect on the removed user's **next request**, not at their cookie's
+    expiry. The decision and the three rejected options are in
+    `docs/adr/0004-a-removal-revokes-the-session-it-leaves-behind.md` and restated where
+    `app/auth.py` makes the stateless argument, in the removal's own terms rather than as
+    "a role change takes effect at next login".
+
+    What it cost, and what it did not: one read per authenticated request, of a table that
+    holds removals from the last fifteen minutes and nothing else — not of `users`, so the
+    access cookie is still claim-carrying and `app/auth.py`'s argument survives with one
+    named exception. `revocation.revoke` prunes the expired rows as it writes, so there is
+    no sweep to schedule.
+
+    Three residues, each by decision and each written down at the ADR: a **demotion** still
+    waits for the next refresh (a revocation means "no access", so using it for a downgrade
+    would log out somebody who still works here); a **purged tenant's** user keeps a
+    verifying cookie for up to fifteen minutes, because `revoked_users` is tenant-owned and
+    the purge deletes it too — with nothing left to read or write, every read filtered to a
+    tenant with no rows and every write failing its `tenant_id` FK; and a **stolen cookie**
+    is still worth the rest of its fifteen minutes, because this revokes a user rather than
+    a token.
+
+    **Covered by the suite, not by a live stack.** `tests/test_auth.py` and
+    `tests/test_api_users.py` assert the existing access cookie stops working — including
+    UAT 3's own sequence, the admin who removes themselves and then tries to create another
+    admin, over HTTP with two cookie jars — and `tests/test_revocation.py` covers the
+    window, the self-pruning and the tenant filter (user ids collide across tenants, so an
+    unfiltered list would log out an unrelated customer). What has **not** been observed is
+    the thing UAT 3 observed: this has not been re-run against the live stack with real
+    cookies. That is the same gap this record names everywhere else, and it is the honest
+    status of the fix.
 56. **A seeded prompt revision 1 renders as a date somebody saved.** Found by #36's
     verification. A shipped default is not a row until something makes it one, and
     `prompt_store._seed` materialises rev 1 at the moment the *first override* is saved — so
@@ -1216,7 +1251,7 @@ part worth keeping.
 
 | # | Survives because |
 |---|---|
-| 1, 55 | The stateless-session decision. 1 is the general statement; **55 is the actionable residue and needs filing as an issue** |
+| 1, 55 | The stateless-session decision. 1 is the general statement; **55 is closed** (2026-11-05, issue #56 — the `revoked_users` revocation list; see its entry and `docs/adr/0004`). What survives of 1 is a *stolen* token, which nothing revokes |
 | 3 | Artifact URLs bypass the refresh dance. Real, and bounded: a 401 there is a reload, not data loss |
 | 5 | One pointless `POST /auth/refresh` on a cold login page. Costs a request |
 | 7, 8 | The portal cannot show or discover your tenant slug. A usability gap that multi-tenancy created and nothing has needed yet |
@@ -1231,7 +1266,7 @@ part worth keeping.
 | 30, 31 | A lowered cap does not bound a live run, and the quota month is UTC with nothing saying so |
 | 32, 33, 34 | `/internal` on the main listener, `record_cost`'s exemption, and no request budget on the internal API. Accepted trade-offs with their reasoning at the call sites |
 | 35, 36, 37, 39 | The audit log has no customer-facing read, no cursor, no pruning, and a column one rename from being too short |
-| 40 | Still nothing can be revoked — the same decision as 1 |
+| 40 | A *token* still cannot be revoked — the same decision as 1. A **user** can be, since 55 closed: `revoked_users` ends every session a removed user holds, which is the case that mattered |
 | 41 | The CLI and console say `system`, because they bind no user. Honest, and #46 relies on it |
 | 42 | `audit.record` commits the session it is given. Stated at every call site |
 | 43, 44 | Logging below WARNING, and a `QA_ENV` typo being silent in the safe direction |
@@ -1240,8 +1275,10 @@ part worth keeping.
 | 56 | A seeded prompt rev 1 shows a date. The fix is a label |
 
 **Nothing on that list blocks P5.** Two items are sharp enough to name here rather than leave
-in a table: **55**, a security residue, now tracked as
-[issue #56](https://github.com/prashant-kiit/e2e-playwright-test-agent/issues/56), and
+in a table: **55**, the security residue tracked as
+[issue #56](https://github.com/prashant-kiit/e2e-playwright-test-agent/issues/56) and
+**closed on 2026-11-05** by the revocation list (its entry above records the decision, its
+cost and its three residues), and
 **20**, which is the single-tenant assumption still sitting in the delivery CLI — a multi-tenant control plane whose `make deliver` can only ever reach one
 customer.
 

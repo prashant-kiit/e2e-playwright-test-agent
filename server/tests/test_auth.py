@@ -15,13 +15,13 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app import auth
+from app import accounts, auth, revocation
 from app.auth import hash_password, verify_password
 from app.db import get_session
 from app.domain.roles import UserRole
 from app.main import app
 from app.models import Project, Tenant, User
-from app.tenancy import across_tenants
+from app.tenancy import across_tenants, tenant_scope
 
 # The migration seeds this operator; see the P5 users migration.
 SEED_ADMIN_EMAIL = "admin@example.com"
@@ -604,6 +604,59 @@ def test_a_removed_user_cannot_refresh_into_a_new_session(client):
     session.commit()
 
     assert client.post("/auth/refresh").status_code == 401
+
+
+def test_a_removed_users_existing_access_cookie_stops_working(client):
+    """#56: the window the refresh fix left, closed.
+
+    The refresh fix above stops a removed user minting a **new** access cookie.
+    It does nothing about the one they already hold, which verifies on its
+    signature alone -- so a user removed seconds earlier still got `POST
+    /users` -> 201 on the fixed build, which is what #56 was filed for and
+    what UAT 3 (#54) watched a removed admin do.
+
+    So `require_auth` asks `revoked_users` whether this id was removed within
+    `ACCESS_MAX_AGE`. The cookie here is untouched between the two requests --
+    no logout, no refresh, no new login -- which is what makes this the
+    existing cookie rather than a new session.
+
+    Removed through `accounts.remove_user` rather than by deleting the row, as
+    the route does: the revocation is written in the removal's transaction, so
+    a test that deleted the row by hand would be testing a path no caller
+    takes.
+    """
+    session = client_session(client)
+    user = _add_user(session, email="leaver@example.com", password="pw")
+    _login(client, email="leaver@example.com", password="pw")
+    assert client.get("/auth/me").status_code == 200
+
+    accounts.remove_user(session, user.id)
+
+    assert client.get("/auth/me").status_code == 401
+    # The same bare 401 a missing cookie gets: "removed" must not be
+    # distinguishable from "expired" by somebody probing with the cookie.
+    assert client.get("/auth/me").json()["detail"] == "authentication required"
+
+
+def test_a_revoked_id_does_not_lock_out_another_tenants_user(client):
+    """The check is tenant-filtered, and user ids collide across tenants.
+
+    Tenant 2's user 7 and tenant 1's user 7 are different people. A revocation
+    list read without the tenant would answer "7 is revoked" and log out a
+    customer who removed nobody.
+    """
+    session = client_session(client)
+    other = Tenant(slug="other", name="Other")
+    session.add(other)
+    session.commit()
+    stays = _add_user(session, email="stays@example.com", password="pw")
+    with tenant_scope(other.id):
+        revocation.revoke(session, stays.id, within=auth.ACCESS_MAX_AGE)
+        session.commit()
+
+    _login(client, email="stays@example.com", password="pw")
+
+    assert client.get("/auth/me").status_code == 200
 
 
 def test_a_refresh_takes_the_role_from_the_row_not_from_the_cookie(client):

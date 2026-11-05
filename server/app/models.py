@@ -628,6 +628,69 @@ class AuditLog(TenantOwned, Base):
 
 
 
+class RevokedUser(TenantOwned, Base):
+    """A user id whose sessions are dead, for as long as a session can live.
+
+    #56, the residue of UAT 3 (#54). `/auth/refresh` re-reads the `users` row,
+    so a removed user cannot mint a *new* access cookie -- but the one they
+    already hold is a signed, claim-carrying token that `require_auth` was
+    content to take at face value, so a removed user kept whatever role they
+    had for the remainder of it: up to `auth.ACCESS_MAX_AGE`, fifteen minutes.
+    UAT 3 watched a removed admin use those minutes to create another admin.
+
+    This table is what closes that window, and it is the option #56 chose out
+    of four: `require_auth` reads one small, bounded table per request instead
+    of reading `users` per request. The cost is a round trip either way; the
+    difference is what the round trip buys. A row lands here when a user is
+    removed, and it stops mattering `ACCESS_MAX_AGE` later, because no cookie
+    minted before the removal can still verify by then. So the table holds
+    *removals from the last fifteen minutes* and nothing else --
+    `app/revocation.py` prunes as it writes -- which is why it is a revocation
+    list rather than the session table `app/auth.py` and `app/run_token.py`
+    both declined. Those would have had to hold a row per live session for as
+    long as the session lives; this holds a row per removal for a quarter of an
+    hour.
+
+    **`user_id` is a plain integer with no foreign key**, for the reason
+    `PurgeLog.purged_tenant_id` and `AuditLog.actor` are: the row it would
+    reference is the row the operation deletes. `CASCADE` would delete the
+    revocation together with the user -- erasing the fact that is the whole
+    point of the row -- and `RESTRICT` would refuse the removal outright.
+
+    **It is `TenantOwned`**, so the per-request check is filtered to the
+    acting tenant like every other read, and a tenant purge removes these rows
+    with the rest. That second thing has a consequence worth stating: a purge
+    deletes the tenant, its users *and* this table's rows, so a purged
+    tenant's user keeps a working access cookie for up to fifteen minutes.
+    What they can reach with it is nothing -- every read is filtered to a
+    tenant with no rows and every write fails its `tenant_id` foreign key --
+    and a revocation that survived the purge would have to live outside the
+    tenant, which is `purge_log`'s argument for a table nobody reads per
+    request. Said here rather than left for a reader to work out.
+
+    There is deliberately **no unique constraint** on `(tenant_id, user_id)`.
+    A removal deletes the `users` row, so the same id cannot be removed twice,
+    and a duplicate row would mean the same thing as one row anyway. A
+    constraint would add an `IntegrityError` path to the removal that nothing
+    can reach.
+    """
+
+    __tablename__ = "revoked_users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Indexed because this is read on **every authenticated request**, by
+    # exactly this column plus `tenant_id` (which the mixin indexes) and
+    # `revoked_at`.
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    # When access was withdrawn. Read as "within `ACCESS_MAX_AGE` of now?", so
+    # it is the column the prune deletes by as well. A server default rather
+    # than a Python timestamp: the comparison is against the database's clock
+    # in both directions, so there is one clock in the question.
+    revoked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+
 class PurgeLog(Base):
     """What a tenant purge destroyed. **Deliberately not `TenantOwned`.**
 

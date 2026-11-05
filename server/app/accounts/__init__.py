@@ -48,8 +48,8 @@ from dataclasses import dataclass
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .. import audit
-from ..auth import hash_password
+from .. import audit, revocation
+from ..auth import ACCESS_MAX_AGE, hash_password
 from ..domain.audit import Action
 from ..domain.roles import UserRole
 from ..models import Tenant, User
@@ -192,6 +192,14 @@ def remove_user(session: Session, user_id: int) -> None:
     while another admin remains, and the last-admin rule already refuses the
     one departure that matters. A rule about "me" would additionally be the
     wrong rule, since the dangerous act is identical whoever performs it.
+
+    **Removal withdraws access at once** (#56), which it did not until UAT 3
+    (#54) found out what that meant: the row is deleted *and* the user id is
+    written to `revoked_users` in one transaction, so the sessions they already
+    hold stop working on their next request instead of at their cookie's
+    expiry. Being the admin who removed themselves is included -- that is the
+    exact sequence UAT 3 observed, and the next request from that browser is a
+    401.
     """
     # Tenant-filtered, so another tenant's id simply finds nothing. The message
     # is the same one a genuinely unknown id gets, for the reason
@@ -210,6 +218,15 @@ def remove_user(session: Session, user_id: int) -> None:
     before = {"email": user.email, "role": UserRole(user.role).value}
     removed_id = user.id
     session.delete(user)
+    # **In the same transaction as the delete** (#56). A removed user's
+    # existing access cookie verifies on its signature alone, so without this
+    # row they kept whatever role they had for the rest of its fifteen minutes
+    # -- which UAT 3 (#54) watched a removed admin spend creating another
+    # admin. `require_auth` reads this list on every request, and committing it
+    # separately would leave an instant in which the user is gone and their
+    # cookie still works. `app/revocation.py` deliberately does not commit, so
+    # the commit below is what makes both facts true at once.
+    revocation.revoke(session, removed_id, within=ACCESS_MAX_AGE)
     session.commit()
     audit.record(
         session,
