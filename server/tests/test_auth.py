@@ -562,3 +562,66 @@ def test_development_over_plain_http_still_works(client, monkeypatch):
 
     assert all("Secure" not in h for h in headers if h.startswith("qa_"))
     assert client.get("/auth/me").status_code == 200
+
+
+# --- a removed user loses access (found by UAT 3) -------------------------
+
+def test_a_removed_user_cannot_refresh_into_a_new_session(client):
+    """Removing a user must actually remove their access.
+
+    Found by UAT 3 (#54) against the live stack, and it is worth stating
+    exactly what was observed, because the suite had nothing that would have
+    caught it: an admin removed **themselves** through `DELETE /users/{id}`,
+    then used the refresh cookie from before the removal to mint a fresh
+    access cookie, and with it read `/users`, **created a new admin account**
+    and changed the tenant's quotas. The audit log recorded all of it under
+    the deleted account's name, which is how it was noticed.
+
+    `app/auth.py` documents the stateless trade-off as "a role or tenant
+    change takes effect at the user's next login", and for a *role change*
+    that is a reasonable bargain. P5-14 added a **removal** path, and a
+    removal is the case where the bargain does not hold: a downgrade leaves
+    someone who still works here, while a removal is usually an offboarded
+    contractor or a compromised account, and "they keep admin for up to 30
+    days" is not the answer anybody wants. 30 days, not 15 minutes, because
+    `/auth/refresh` is what re-issues the short cookie and it did not read the
+    row either.
+
+    So the row is read at refresh. The access cookie stays claim-carrying and
+    unchecked -- that is the speed bump the module argues for, and it is one
+    database read per 15 minutes per user rather than one per request -- which
+    bounds a removed user's access to the remainder of their access cookie.
+    That residual window is recorded as a follow-up rather than closed here.
+    """
+    session = client_session(client)
+    user = _add_user(session, email="leaver@example.com", password="pw")
+    r = _login(client, email="leaver@example.com", password="pw")
+    assert r.status_code == 200
+    # They can refresh while they exist.
+    assert client.post("/auth/refresh").status_code == 200
+
+    session.delete(user)
+    session.commit()
+
+    assert client.post("/auth/refresh").status_code == 401
+
+
+def test_a_refresh_takes_the_role_from_the_row_not_from_the_cookie(client):
+    """The same read, used for the thing the docstring promised and could not
+    deliver: a role change now takes effect at the next *refresh* rather than
+    only at the next login.
+
+    Asserted as a consequence rather than as the feature, because the reason
+    the read exists is the removal above. It is listed in `app/auth.py` as
+    what that read buys.
+    """
+    session = client_session(client)
+    user = _add_user(session, email="promoted@example.com", password="pw")
+    assert _login(client, email="promoted@example.com", password="pw").json()["role"] == (
+        "member"
+    )
+
+    user.role = UserRole.ADMIN
+    session.commit()
+
+    assert client.post("/auth/refresh").json()["role"] == "admin"

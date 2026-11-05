@@ -1275,10 +1275,158 @@ tickets.
 
 `make ci-test` green: ruff clean, **1307 backend tests, 115 frontend tests.**
 
-**What this does not prove.** No run executed during UAT 1 — the stack came up with
-`QA_RUNNER=fake` and nothing was dispatched, so nothing here says anything about a real agent
-or a container. That is UAT 2 (#53). The two new tenants and their rows were left in place
-for it, and for UAT 3 (#54) to offboard.
+**What this does not prove.** No run was *dispatched through the portal* during UAT 1 — the
+stack came up with `QA_RUNNER=fake` — so nothing here says anything about a real agent. That
+is UAT 2 (#53). The two new tenants and their rows were left in place for it, and for UAT 3
+(#54) to offboard.
+
+**A correction, and a thing worth knowing about the suite.** An earlier draft of this section
+said no run executed at all. That was wrong: `tests/test_docker_sandbox.py` takes a
+`real_store` fixture — the actual SeaweedFS of this stack, not `FakeStorage` — and its
+`@pytest.mark.docker` tests run whenever the daemon is usable rather than skipping. Docker was
+up for this whole session, so **every `make ci-test` run really started containers and really
+wrote objects into the dev store.** Sixteen such runs are visible in SeaweedFS as
+`tenant/1/runs/20261104-1[345]*-demo-<uuid>-*/` (5 objects each, 80 in all), which is one per
+full-suite run through the day.
+
+That is by design and not a defect, but two consequences follow. It means
+`make ci-test-docker`'s container coverage was *already* being exercised by `make ci-test` on
+this machine, which is the honest reading of #53's last criterion. And it means the suite
+leaves real objects behind in the dev store whose database rows the fixtures then truncate —
+orphans that no purge will ever name, because the tenant they belonged to still exists and
+the runs do not. Harmless here, and worth knowing before anyone reads a store listing as
+inventory.
+
+
+## Verified on 2026-11-04 — P5-19 / #53 (UAT 2: a real agent run over the HTTP seam)
+
+P5's missing counterpart to #16 (P3-09) and #28 (P4-10): **a real `QA_RUNNER=claude` run, in a
+real container, driven end to end over the HTTP control-plane seam, paused and resumed by
+hand.** P4-10 proved a real run in a real container; it could not prove this, because the HTTP
+seam did not exist then.
+
+Run 13, on tenant 2 (`acme`)'s own target rather than tenant 1's — so the phase's real
+P4-walkthrough evidence was not written into. `QA_RUNNER=claude`, `QA_SANDBOX=docker`,
+`QA_SPEND_BUDGET_USD=10`, api rebuilt from this tree.
+
+**It completed.** All five steps, **$4.01** and **428 sandbox-seconds**, no error. From a
+110-byte user story it produced an 11 KB test plan and three spec files (~17 tests) under
+`tests/login-valid-user/`, and the log is unmistakably a real agent at work:
+
+```
+[explore]  I ran all 17 scenarios from the plan by hand in the browser, starting from
+           `seed.spec.ts` in `chromium`...
+[explore]  Unexpected result: the locked-out login is rejected, yet a
+           `session-username=locked_out_user` cookie...
+[generate] I generated 17 tests in 3 files under `tests/login-valid-user/`...
+[heal]     After healing, all 17 tests pass on Chromium; the last two runs were both 17/17.
+```
+
+It committed **three revisions** over the HTTP seam — 3, 4 and 5 on target 4, parent-chained,
+each authored `run:20261104-170707-acme-app-3aa7ad` and `produced_by_run_id = 13`, growing the
+tree from 8 files to 11 — and collected **8 artifacts**, every one of them keyed
+`tenant/2/runs/<run_key>/...`. That last fact also closes #42's "not proven against
+SeaweedFS": the new key shape was written by a real run into the real store.
+
+**The sandbox holds no credentials, observed on the running container.** Not read off the
+compose file — `docker inspect` on the live container, environment variable *names* only:
+
+```
+ANTHROPIC_API_KEY  CLAUDE_CONFIG_DIR  HTTPS_PROXY  NO_PROXY  QA_APP
+QA_CONTROL_PLANE_URL  QA_RUN_ID  QA_RUN_TOKEN  QA_RUNNER  QA_RUNS_DIR  ...
+```
+
+and each forbidden name checked individually: `DATABASE_URL` absent, `S3_ENDPOINT` absent,
+`S3_ACCESS_KEY` absent, `S3_SECRET_KEY` absent, `S3_BUCKET` absent, `QA_SECRET_KEY` absent,
+`QA_ENVELOPE_KEY` absent, `QA_RUN_TOKEN_KEY` absent.
+
+**And the stores are off its network**, which is the half a variable list cannot show. The
+container is attached to `qa-sandbox` alone, and from *inside* it:
+
+```
+postgres    -> (no DNS answer)
+seaweedfs   -> (no DNS answer)
+api         -> 172.18.0.2
+```
+
+The API really is the only thing a run can resolve.
+
+**The pause, and #48's guarantee, against the live API.** Paused mid-`explore` through the
+portal route. The run went to `paused`, `sandbox_handle` was cleared, and the container was
+destroyed. The token copied from the container's environment *before* the pause then:
+
+```
+HTTP 403
+{"detail":"run 13 is no longer on attempt 1; its sandbox is gone and this token
+  no longer authorizes anything"}
+```
+
+Both tokens decoded through `run_token.read_unverified`, which is the only reader a sandbox
+has:
+
+| token | scope it carries | against the live API |
+|---|---|---|
+| copied before the pause | `RunScope(run_id=13, target_id=4, tenant_id=2, sandbox_attempt=1)` | **403** |
+| the resumed sandbox's | `RunScope(run_id=13, target_id=4, tenant_id=2, sandbox_attempt=2)` | **200** |
+
+Same run, same target, same tenant; one claim apart. Before #48 the first of those was a 200
+for the whole length of the pause, which is the window review item 51 described and this is
+the observation of it being shut. The resumed token on *another* run's path is 403 too.
+`runs.sandbox_attempt` on the row read 2.
+
+**The resume got its session back**, which is the thing P4 built the per-boundary archive for:
+
+```
+=== session: restored; the agent remembers what it explored ===
+=== hydrate: worktree built from revision 3 (8 files) ===
+=== run 20261104-170707-acme-app-3aa7ad started (begin at explore) ===
+```
+
+Re-hydrated from **revision 3** — the revision the interrupted attempt had already committed —
+and restarted at `explore`, the step the pause interrupted, not at the beginning.
+
+**The liveness exemptions, observed rather than reasoned about.** The last two lines in
+`run_log` are
+
+```
+187 | === run 20261104-170707-acme-app-3aa7ad completed ===
+188 | === teardown: worktree removed ===
+```
+
+Both are published **after** `complete_run()`, and `spend_usd` was written after it too. Had
+the gate covered `publish_log` and `record_cost`, those two lines would simply be missing and
+the cost would be null — which is the debugging session P5-05's record says this cost once.
+Once the run was terminal, **both** tokens answered 403.
+
+**Teardown left nothing**: no `qa-run-*` container, no `qa-proxy-*` container, and
+`sandbox_handle` cleared — P4's "every finished run leaking its egress proxy" staying fixed.
+
+**`make ci-test-docker` runs without skipping**, checked rather than assumed: the
+`@pytest.mark.docker` selection collects 6 tests and all 6 pass as dots, no `s`. Exit 0, with
+1307 backend and 115 frontend tests.
+
+**A thing about the suite that this uncovered**, and the reason UAT 1's own "no run executed"
+line is now corrected: `tests/test_docker_sandbox.py` takes a `real_store` fixture — the actual
+SeaweedFS of this stack — and its Docker-marked tests run whenever the daemon is usable rather
+than skipping. Docker was up all day, so **every `make ci-test` really started containers and
+really wrote into the dev store**: sixteen passes are visible as
+`tenant/1/runs/20261104-1[345]*-demo-<uuid>-*/`, five objects each. By design, and useful —
+it means the container path was being exercised far more than the record claimed — but it also
+means the suite leaves objects whose rows the fixtures then truncate, and a store listing is
+therefore not an inventory.
+
+**#50's flake.** The mechanism is recorded in follow-up 53 and in `bc73027`: the session
+archive's digest was a function of the clock, because `tarfile.open(path, "w:gz")` writes the
+current time into the gzip header, so "identical bytes are not a new version" held only for
+two saves inside one wall-clock second. It is a mechanism, not a disappearance — the fix is
+`mtime=0` and a test that saves an unchanged directory twice a real second apart. Three
+consecutive clean full-suite runs on the finished tree are recorded in UAT 3's section, which
+is where the last of them landed.
+
+**What this does not prove.** The run used one target, one story and one site; nothing here
+says anything about the agent's behaviour on a different application. The pause was taken at
+one point in one step. And the egress allowlist was not probed during this run — `#28`'s
+breach tests remain the evidence for that.
 
 
 ## Decisions recorded during this phase
