@@ -1522,8 +1522,18 @@ archive's digest was a function of the clock, because `tarfile.open(path, "w:gz"
 current time into the gzip header, so "identical bytes are not a new version" held only for
 two saves inside one wall-clock second. It is a mechanism, not a disappearance — the fix is
 `mtime=0` and a test that saves an unchanged directory twice a real second apart. Three
-consecutive clean full-suite runs on the finished tree are recorded in UAT 3's section, which
-is where the last of them landed.
+consecutive clean full-suite runs on the finished tree:
+
+```
+run 1: 1309 passed in 263.63s
+run 2: 1309 passed in 264.92s
+run 3: 1309 passed in 267.78s
+```
+
+1309 rather than 1307 because UAT 3's fix brought two tests with it. Worth recording how the
+first attempt at this went: three runs started while the UAT-3 auth tests were still being
+written failed 1, 2 and 2 — **my own edits mid-run, not a flake**, which is a reminder that
+"three consecutive green runs" only means something if nothing else is touching the tree.
 
 **What this does not prove.** The run used one target, one story and one site; nothing here
 says anything about the agent's behaviour on a different application. The pause was taken at
