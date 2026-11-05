@@ -10,7 +10,35 @@ seven tickets (#31–#37). **`SPEC-P5-multi-tenancy.md` is a zero-byte file** �
 suite, and so each ticket after the first inherits a list of what is *proven*, what rests on
 fakes, and what was deliberately deferred.
 
-> ## P5 is OPEN. This record is partial.
+> ## P5 is CLOSED, on 2026-11-05.
+>
+> **Twenty tickets, three UAT checkpoints, and the record below says per slice what is proven
+> and what is not.** The seven original tickets (#31–#37) plus #39 landed first; the two-axis
+> review of #30 on 2026-11-04 then found that the spec's unbuilt half had never been ticketed
+> at all — not deferred, simply absent — which produced #40–#50, and those ran in three waves,
+> each ending at a UAT checkpoint against the live stack (#52, #53, #54).
+>
+> **What the three UATs found that the suite could not**, which is the whole reason they exist
+> and now the sixth, seventh and eighth entries on this phase's list of the same:
+>
+> * **UAT 1** — the bypass allowlist had grown by one, and the honest reason (#44 widened the
+>   guard to cover `DELETE`, so an existing cross-tenant sweep had to declare itself) is
+>   recorded rather than ticked.
+> * **UAT 2** — nothing broken, and that is itself the finding: the pause, the attempt
+>   counter, the session restore and the liveness exemptions all behaved against a real
+>   container. It also corrected this record: the Docker-backed tests use the *real* store and
+>   run whenever the daemon is up, so `make ci-test` had been exercising the container path all
+>   along.
+> * **UAT 3** — **removing a user did not remove their access.** A deleted admin refreshed
+>   into a new session and created another admin. Thirty days, not fifteen minutes, because
+>   refresh never read the row either. Fixed; the residual 15-minute window is follow-up 55.
+>
+> **This record no longer says "partial".** Every ticket has a §Verified section, #36's
+> included — it was the one gap, and UAT 3's closeout criterion is what closed it.
+>
+> ### The old banner, kept because its caveats are still the honest ones
+>
+> ## (historical) P5 was OPEN while this record was partial.
 >
 > **All six implementable tickets are complete in the tree and closed on the tracker**, and
 > #30, the parent spec issue, is the only one of the seven still open. Tree state and tracker
@@ -1143,6 +1171,80 @@ same thing to this one.
 
 ---
 
+54. **The object store holds 532 objects no purge will ever name.** Found by UAT 2 while
+    listing the bucket by tenant prefix. `tests/test_docker_sandbox.py` takes a `real_store`
+    fixture — the actual SeaweedFS of the dev stack — and its `@pytest.mark.docker` tests run
+    whenever the daemon is usable rather than skipping, so **every** local `make ci-test` run
+    writes real objects into it. The fixtures then truncate the rows. What is left is objects
+    belonging to runs that no longer exist, under a tenant that still does, so
+    `accounts.purge` cannot reach them (it walks rows) and `artifacts.rekey` cannot either.
+    Harmless on a dev stack and a trap on any other reading: **a store listing is not an
+    inventory.** The honest options are a mark-and-sweep against `artifacts` + `file_index`
+    (which DESIGN.md §9 already describes and which nothing implements), or a test fixture
+    that cleans up after itself. Neither is ticketed.
+55. **A removed user keeps their access cookie for up to 15 minutes.** The residue of the UAT
+    3 finding, after the refresh path was fixed. Demonstrated on the fixed build: a user
+    removed seconds earlier, holding an unexpired access cookie, still got `POST /users` → 201
+    and created an admin account. Closing it needs `require_auth` to read the row on **every
+    request**, which is exactly the round trip `app/auth.py` declined, so this is a decision
+    rather than an oversight. Four options with their costs — read per request; shorten the
+    access cookie; a small revocation list bounded by `ACCESS_MAX_AGE`; or accept it and say
+    so where a reader will look — are written up in full in
+    `scratchpad/issue-removed-user-access-window.md`, **which could not be filed as an issue
+    because `gh issue create` is not permitted in this session.** It needs filing.
+56. **A seeded prompt revision 1 renders as a date somebody saved.** Found by #36's
+    verification. A shipped default is not a row until something makes it one, and
+    `prompt_store._seed` materialises rev 1 at the moment the *first override* is saved — so
+    both revisions come back with the same `created_at`, to the microsecond, and rev 1's is
+    when it became this tenant's row rather than when those bytes shipped. `#39`'s
+    `savedLabel` renders "shipped default" only for a `null` `created_at`, which is the
+    not-yet-a-row case, so a seeded rev 1 shows a date. Not a correctness bug — the row really
+    was created then — but the Prompts panel will tell a customer somebody edited a prompt
+    when nobody did. The fix is a label, and which label is a product question.
+
+### The sweep (2026-11-05, UAT 3's closeout criterion)
+
+All 56 items, each either closed, ticketed, or surviving with its reason. Closed items keep
+their text above with a dated note rather than being deleted, because the reasoning is the
+part worth keeping.
+
+**Closed during the phase** — 2, 6, 9, 13, 15, 21, 27, 27b, 28, 29, 38, 48, 49, 50, 51, 52,
+53, and 4 (on the last day). Each carries a dated note at its own entry naming what closed it.
+
+**Surviving, and why each one is not being closed now:**
+
+| # | Survives because |
+|---|---|
+| 1, 55 | The stateless-session decision. 1 is the general statement; **55 is the actionable residue and needs filing as an issue** |
+| 3 | Artifact URLs bypass the refresh dance. Real, and bounded: a 401 there is a reload, not data loss |
+| 5 | One pointless `POST /auth/refresh` on a cold login page. Costs a request |
+| 7, 8 | The portal cannot show or discover your tenant slug. A usability gap that multi-tenancy created and nothing has needed yet |
+| 10 | Review suggestions **declined** — decisions, recorded so they are not mistaken for oversights |
+| 11 | A test seam read off the module. Deliberate |
+| 12 | `SPEC-P5-multi-tenancy.md` is still a zero-byte file; the issue is the spec of record. Cosmetic, and fixing it means deciding which is canonical |
+| 14 | The README still says P4's closeout is pending. **Fixed in this closeout** (see below) |
+| 16, 17, 18 | The three documented holes in the tenant guard: the identity map, a lazy load off a bypassed row, and raw SQL. Each is a property of SQLAlchemy rather than of this code, each is stated where the guard is installed, and no call site relies on any of them |
+| 19 | One round trip per reaped run. A cost, measured and accepted |
+| 20 | The delivery CLI can only deliver tenant 1's targets — `--tenant` resolves a slug now, but `make deliver` has no tenant. **The largest remaining single-tenant assumption in the tree** |
+| 22, 23, 24, 25, 26 | The credential lifecycle: no re-wrap tooling, a revoked token reads `valid` until used, no audit row for a PAT save, nothing delivers before a PAT is saved, the authoring account is reported once. All real, all P6-shaped |
+| 30, 31 | A lowered cap does not bound a live run, and the quota month is UTC with nothing saying so |
+| 32, 33, 34 | `/internal` on the main listener, `record_cost`'s exemption, and no request budget on the internal API. Accepted trade-offs with their reasoning at the call sites |
+| 35, 36, 37, 39 | The audit log has no customer-facing read, no cursor, no pruning, and a column one rename from being too short |
+| 40 | Still nothing can be revoked — the same decision as 1 |
+| 41 | The CLI and console say `system`, because they bind no user. Honest, and #46 relies on it |
+| 42 | `audit.record` commits the session it is given. Stated at every call site |
+| 43, 44 | Logging below WARNING, and a `QA_ENV` typo being silent in the safe direction |
+| 45, 46, 47 | Prompt history reads every revision with no paging, has been seen only by jsdom, and has no rollback by decision |
+| 54 | 532 orphaned objects in the dev store, and the mark-and-sweep DESIGN.md §9 describes is unbuilt |
+| 56 | A seeded prompt rev 1 shows a date. The fix is a label |
+
+**Nothing on that list blocks P5.** Two items are sharp enough to name here rather than leave
+in a table: **55**, which is a security residue and the one thing in this sweep that should be
+filed as an issue today, and **20**, which is the single-tenant assumption still sitting in the
+delivery CLI — a multi-tenant control plane whose `make deliver` can only ever reach one
+customer.
+
+
 ## Verified on 2026-11-04 — P5-18 / #52 (UAT 1: fail-closed against live tenants)
 
 The first of P5's three UAT checkpoints, and the first evidence in this phase that
@@ -1429,6 +1531,260 @@ one point in one step. And the egress allowlist was not probed during this run �
 breach tests remain the evidence for that.
 
 
+## Verified on 2026-11-05 — P5-06 / #36 (the prompts, verified at last)
+
+The section #36 never had. It was implemented in `8b5aec3` and this record said plainly that
+it did not vouch for it: "no §Verified section was written for it". UAT 3's closeout asks for
+one, so here it is — observed against the live stack rather than reconstructed from the
+commit.
+
+**The shipped defaults are rows a tenant can see.** `GET /prompts` as tenant 1:
+
+```
+  qa_system_prompt.md     rev=1 len=8348      steps/3-explore.md   rev=1 len=975
+  steps/1-read_story.md   rev=1 len=366       steps/4-generate.md  rev=1 len=1922
+  steps/2-plan.md         rev=1 len=972       steps/5-heal.md      rev=1 len=1463
+                                              steps/_context.md    rev=1 len=1975
+```
+
+**An override is a new revision, not an overwrite.** `PUT /prompts/steps/2-plan.md` with 90
+bytes of tenant-1-specific instruction answered `rev=2`, and the history carries both:
+
+```
+  rev=1  len=972   (the shipped default)
+  rev=2  len=90    (tenant 1's)
+```
+
+**And the override is that tenant's alone**, which is story 24's actual claim. A tenant
+created fresh for this check (`promptcheck`, made with the #46 command and purged afterwards)
+read the same prompt and got `rev=1 len=972` while tenant 1 continued to read `rev=2 len=90`.
+Two tenants, one prompt name, different bytes, observed over HTTP.
+
+**A run is pinned to the versions it used.** A fake run on tenant 1's target
+(`QA_RUNNER=fake`, so this cost nothing) completed and recorded:
+
+```
+runs.prompt_revs = {"steps/2-plan.md": 2, "qa_system_prompt.md": 1,
+                    "steps/1-read_story.md": 1, "steps/3-explore.md": 1,
+                    "steps/4-generate.md": 1, "steps/5-heal.md": 1,
+                    "steps/_context.md": 1}
+```
+
+It picked up the override made minutes earlier — `2` for the one prompt that had been edited
+and `1` for the rest — which is the end-to-end claim: an edit in the portal reaches the next
+run, and the run records what it was told rather than what the prompt says now.
+
+**One thing observed that is worth writing down, because the portal will show it.** Both
+revisions came back with the *same* `created_at`, to the microsecond. That is not a bug but it
+is misleading: a shipped default is not a row until something makes it one, and
+`prompt_store._seed` materialises rev 1 at the moment the first override is saved — so rev 1's
+timestamp is when it *became this tenant's row*, not when those bytes shipped. `#39`'s
+`savedLabel` renders "shipped default" only for a `null` `created_at`, which is the
+not-yet-a-row case; a *seeded* rev 1 has a real timestamp and will render as a date somebody
+appears to have saved. Two revisions sharing a timestamp to the microsecond is the tell.
+Recorded as follow-up 56 rather than changed here: the honest fix is a label, and which label
+is a product question.
+
+**What this still does not prove.** No browser — the Prompts panel and its diff have been
+rendered only by `Settings.test.jsx`, which is the gap P5-04's lesson is about and which #39's
+own row already admits. And the override reached a *fake* run; the real run in UAT 2 used
+tenant 2's prompts, which were the shipped defaults, so "a real agent behaved differently
+because of an override" is not something this record claims.
+
+
+## Verified on 2026-11-05 — P5-20 / #54 (UAT 3: onboarded, used, offboarded)
+
+The round trip, which is the test: a tenant created through the application, used for real
+work, then purged — with the bucket and the tables checked afterwards. It is the one exercise
+that proves onboarding and offboarding are inverses, and no suite will run it against a real
+object store.
+
+Three tenants were created and all three are gone. `acme` is the interesting one: it did the
+real agent run of UAT 2.
+
+**Created without SQL** — `python -m app.accounts create-tenant`, three times. Each got its
+tenant row, its first admin, a `user.add` audit row against its own tenant with `system` as
+the actor, and caps of 3/500 from the column's server default.
+
+**Deviation, recorded rather than ticked.** The criterion says "created through the portal".
+It was created through an **operator command**, and that is
+`docs/adr/0002-tenant-creation-is-an-operator-action.md`, not an omission: every authenticated
+surface here acts *as a tenant*, and the person creating one belongs to none, so `AdminDep`
+would mean "an admin of A may create B" and ungated would let anyone create tenants. The
+requirement the criterion is really about — "no SQL" — holds. The ADR's "revisit when" is a
+platform-operator role.
+
+**The second deviation, also recorded.** "No SQL is run at any point" is not true of `acme`'s
+full lifetime: UAT 1 seeded a crashed run into it with `INSERT`, because a crash cannot be
+produced through an API. Every *administrative* action on it — invite, remove, quota change,
+purge — went through the portal routes or the command, and no SQL mutated it otherwise.
+
+**User administration, through the portal.** As `boss@acme.test`:
+
+| Action | Result |
+|---|---|
+| `GET /users` | `[{"id":3,"email":"boss@acme.test","role":"admin"}]` |
+| `POST /users` `{dev@acme.test, member}` | 201 with a one-time password |
+| that password at `POST /auth/login` | 200 — the invite works end to end |
+| `DELETE /users/5` | 204; gone from the listing; **their login is now 401** |
+
+and as the invited *member*, every admin route refused with `{"detail":"tenant-admin role
+required"}`:
+
+```
+  GET /users -> 403    GET /audit -> 403      PUT /usage/caps -> 403
+  POST /users -> 403   DELETE /users/3 -> 403     (GET /targets -> 200, its own reads work)
+```
+
+**The quota route (#45), live.** Raising the concurrency cap to 7 left the monthly quota at
+500 — the omitted-versus-`null` distinction, against a real deployment — and
+`{"monthly_run_quota": null}` made it unmetered with `at_monthly_quota: false`. A third call
+repeating a stored value answered 200 and wrote **no** audit row, which is the review fix
+working where it matters. The operator path still exists: `repo.set_tenant_caps` is reachable
+from a console and is what the route calls.
+
+**The audit log's own account of it**, read through `GET /audit`:
+
+```
+quota.change  actor=boss@acme.test  before={concurrency 7, monthly 500} after={7, null}
+quota.change  actor=boss@acme.test  before={3, 500}                     after={7, 500}
+user.add      actor=boss@acme.test  target=user:5  after={dev@acme.test, member}
+user.add      actor=system          target=user:3  after={boss@acme.test, admin}
+```
+
+Two `quota.change` rows for three calls, and the two `user.add` rows differ in exactly the way
+the design intends: `system` for the CLI-created first admin, the acting admin for the portal
+invite.
+
+**The two defined answers #46 chose.** Removing the last admin — which here was also removing
+yourself — is **409** carrying the remedy: *"boss@acme.test is the last admin of this tenant
+and cannot be removed; make another admin first, then remove this one."* With a second admin
+present, removing yourself is **204** and allowed, and the remaining admin logs in and sees a
+one-user tenant. Both observed.
+
+### The finding this UAT exists for
+
+**Removing a user did not remove their access.** After `DELETE /users/3` removed
+`boss@acme.test`, that account's own cookies still worked: `POST /auth/refresh` minted a fresh
+access cookie (200, `role: admin`), and with it the deleted account read `/users`, **created
+another admin account** (`POST /users` → 201) and changed the tenant's quotas. The audit log
+recorded every move under the deleted account's name, which is how it was noticed — the trail
+was the only control that saw it.
+
+The mechanism: neither `require_auth` nor `/auth/refresh` re-read the `users` row. `app/auth.py`
+justifies that as "a role or tenant change takes effect at the user's next login", which is a
+fair bargain for a *downgrade* — the person still works here. P5-14 added a **removal**, and
+removal is the case it does not cover: an offboarded contractor, a compromised account. And
+because refresh is what re-issues the short cookie, the honest description of the old behaviour
+was not "fifteen minutes" but **"up to thirty days"**, the refresh cookie's cap.
+
+**Fixed here**: `POST /auth/refresh` now re-reads the row, tenant-scoped, and takes the new
+cookie's claims from it — so a removed user's refresh is the same bare 401 a missing cookie
+gets, and a role change takes effect at the next refresh rather than only at the next login.
+One database read per refresh, not per request, so `app/auth.py`'s argument survives intact.
+Verified on the rebuilt stack: the removed user's refresh is 401 where it was 200.
+
+**Not fixed, and recorded as follow-up 55**: a removed user keeps their *existing* access
+cookie until it expires, up to 15 minutes. Demonstrated on the fixed build — a user removed
+seconds earlier still got `POST /users` → 201. Closing it needs a read on every request, which
+is the round trip this design declined; the options and their costs are in the follow-up.
+
+### The purge
+
+**`#42`'s expand-then-contract, proven both ways on the real store.** One artifact was planted
+under the **pre-P5-10** key shape for `acme`'s real run
+(`20261104-170707-acme-app-3aa7ad/uat3-pre-migration.txt`, outside any tenant prefix) and it
+**downloaded through the portal route, 200, unmigrated** — which is the expand half, and the
+reason a deployment can take the re-key at leisure instead of during a deploy.
+
+**"What does this tenant have in the bucket?" answered from the bucket.** By prefix, with no
+database: `tenant/2/` held 22 objects — 14 blobs and 8 run artifacts — and the planted legacy
+object was visibly *outside* it.
+
+**The gate refuses a mismatched confirmation before anything is touched:**
+
+```
+$ python -m app.accounts purge-tenant --slug acme --confirm-slug acme-typo
+error: refusing to purge 'acme': the confirmation named 'acme-typo'. Both must be the
+same tenant, because this cannot be undone
+```
+
+…and `acme`'s two runs were still there afterwards. Named twice, it ran:
+
+```
+purged: tenant 2 (acme): 23 object(s), 276 row(s) [artifacts 9, audit_log 14,
+  file_index 43, projects 1, prompts 7, revisions 5, run_log 188, run_steps 5,
+  runs 2, targets 1, users 1]
+```
+
+**23, not 22** — the planted legacy object went too. That is the review fix earning its place:
+the purge reads its own run keys *before* deleting the rows and sweeps those prefixes as well,
+so an object left under the old shape does not outlive the tenant. Without it, that object
+would have sat in the bucket for ever with nothing left to name it.
+
+**Checked directly afterwards, not inferred from the success line:**
+
+```
+tenant-owned rows remaining : NONE   (all 12 tables, inside tenant_scope(2))
+objects under tenant/2/     : 0
+the planted legacy object   : GONE
+tenants row for acme        : GONE
+```
+
+**And tenant 1 untouched**, compared against a snapshot taken before: 25 artifacts, 34
+`file_index`, 1 project, 4 revisions, 30 `run_log`, 23 `run_steps`, 9 runs, 1 target, 1 user,
+**796 objects** — every count identical. Objects outside any tenant prefix went 533 → 532,
+which is exactly the one planted object and nothing else. Tenant 1 still logs in and serves
+`/projects`, `/targets`, `/runs`, `/targets/1/revisions` and `/artifacts/1/content`, all 200.
+
+**A purge interrupted halfway, re-run, completes.** How it was interrupted, precisely: the
+pass's own steps 1–3 were run in a process that then exited **without** reaching step 4 (the
+`tenants` row) or step 5 (`purge_log`) — which is the state a crash between 3 and 4 leaves, and
+the state the order was designed to make the recoverable one. `globex` was left with its rows
+and objects gone and its tenant row present:
+
+```
+tenant row still present: 1 | its users: 0 | its runs: 0 | purge_log rows: 0
+```
+
+The same command, unchanged, then finished it: `purged: tenant 3 (globex): 0 object(s), 0
+row(s)`, the tenant row gone and `tenant/3/` empty. **Worth knowing about the log**: that row
+records zeros, because it records what *this* pass removed rather than a cumulative total. A
+reader reconstructing an offboarding from `purge_log` alone would under-count an interrupted
+one.
+
+**The purge is the only path that deletes audit rows**, checked from the strongest place —
+`psql`, outside the application entirely, after a purge had disabled and re-enabled the
+trigger:
+
+```
+qa=# update audit_log set actor='forged' where tenant_id=1;
+CONTEXT:  PL/pgSQL function audit_log_refuse_mutation() ...
+qa=# delete from audit_log where tenant_id=1;
+CONTEXT:  PL/pgSQL function audit_log_refuse_mutation() ...
+tenant 1 audit rows intact: 1 | actor=admin@example.com
+```
+
+The trigger is back on, and `grep -rn "DISABLE TRIGGER" server/app` finds exactly one
+executable occurrence: `app/accounts/purge.py`. The other three hits are prose pointing at it.
+
+**It used no cross-tenant bypass**, which is the criterion's other half and a deviation from
+its wording. `grep -c across_tenants app/accounts/purge.py` → 0; the bypass allowlist is the
+same four entries it held before wave 3. #44 put ORM `DELETE` under the guard, so a delete
+issued inside `tenant_scope(tenant_id)` is *scoped by the guard* to exactly the rows being
+purged — strictly stronger than opting out, and what the allowlist's own comment asks for.
+
+**The record that survives all of it.** `purge_log` holds three rows naming three tenants that
+no longer exist, and the dev database is back to one tenant.
+
+**What this does not prove.** No browser: every portal action here went through `curl` against
+the real routes, which is the same HTTP the browser speaks but not the same rendering, and the
+Users panel and the caps editor have been seen only by `vitest`. The purge was run by an
+operator with shell access, which is the only way it can be run. And `rekey` was exercised on
+this store's 25 real legacy rows, but 532 row-less orphans remain there and no purge will ever
+name them, because the tenant they belong to still exists and the runs do not.
+
+
 ## Decisions recorded during this phase
 
 | Decision | Why |
@@ -1563,6 +1919,14 @@ end of the phase. They are what #30 is waiting on in code, as opposed to in evid
    demoting a tenant admin leaves them able to rotate that tenant's GitHub credential — the
    credential a delivery pushes with — for up to 30 days of refreshes. It is the sharpest
    consequence of the stateless-token decision so far, and it is the same fix as item 1.
+
+   **Closed on 2026-11-05 (UAT 3).** `/auth/refresh` re-reads the `users` row,
+   tenant-scoped, and takes the new cookie's claims from it, so a role change takes effect at
+   the next refresh — within 15 minutes — rather than at the next login. It was closed not for
+   this reason but because the same gap meant a **removed** user kept their access for 30 days
+   (§"Verified on 2026-11-05 — P5-20 / #54"), which is the sharper consequence this item did
+   not anticipate: it reasoned about demotion, and removal did not exist when it was written.
+   What remains of item 1 is follow-up 55.
 5. **A cold load of the login page fires one pointless `POST /auth/refresh`.** `api.me()`
    401s when nobody is logged in, which trips the refresh dance. Harmless, one round trip,
    but it puts a 401 and a failed refresh in the log of every first visit.
@@ -1577,6 +1941,13 @@ end of the phase. They are what #30 is waiting on in code, as opposed to in evid
     it is a real edge: **a future bulk write must filter itself**, and no test would catch one
     that did not. The honest fix, if one is wanted, is a second listener on
     `do_orm_execute` for `is_update`/`is_delete`.
+
+    **Closed on 2026-11-04 by #44 (P5-12)**, with exactly that fix, after the two-axis review
+    of #30 promoted it from an edge to item 50's write half: a second tenant was shown
+    renaming a project to "stolen" and deleting every log line of a run it did not own. The
+    guard is no longer a read guard, and the test module is no longer named as if it were.
+    `bus.prune_run_logs` joined the bypass allowlist as a result — the one entry that list
+    gained in the whole phase, and UAT 1 records why that is not a widening.
 16. **A row already in a session's identity map bypasses the filter.** `Session.get()`
     returns it without a SELECT, so a session that read across tenants once can hand that
     object back afterwards. No request does — the bypasses all open their own sessions —
@@ -1959,6 +2330,15 @@ end of the phase. They are what #30 is waiting on in code, as opposed to in evid
     is noted in `app/audit.py` and in the revision, and it is deliberately an explicit,
     reviewable line rather than a quiet capability — but it does mean the purge is the one
     write that can erase part of the trail, and whoever builds it is choosing how much.
+
+    **Resolved on 2026-11-04 by #47**, and the choice it made was "all of that tenant's and
+    nothing else": `app/accounts/purge.py` disables the trigger for exactly its own `DELETE`
+    and re-enables it in the same transaction, and it holds the only executable
+    `DISABLE TRIGGER` in the tree. UAT 3 checked from `psql` — outside the application
+    entirely, after a purge had run — that an `UPDATE` and a `DELETE` on another tenant's
+    audit rows are both still refused. One thing this item did not anticipate:
+    `ALTER TABLE ... DISABLE TRIGGER` needs table-owner rights, which the suite's role has and
+    a reduced-privilege production role may not.
 39. **`action` is `VARCHAR(20)` and `delivery.approve` is 16 characters.**
     `models._enum_col` is shared by every domain enum here, so the width is not this table's
     to pick freely. `test_every_action_fits_the_enum_column` turns a would-be runtime refusal
