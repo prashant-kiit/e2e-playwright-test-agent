@@ -1190,8 +1190,9 @@ same thing to this one.
     rather than an oversight. Four options with their costs — read per request; shorten the
     access cookie; a small revocation list bounded by `ACCESS_MAX_AGE`; or accept it and say
     so where a reader will look — are written up in full in
-    `scratchpad/issue-removed-user-access-window.md`, **which could not be filed as an issue
-    because `gh issue create` is not permitted in this session.** It needs filing.
+    **[issue #56](https://github.com/prashant-kiit/e2e-playwright-test-agent/issues/56)**,
+    which is where this is now tracked. (Note the coincidence: GitHub issue #56 is this
+    item, follow-up **55**; follow-up 56 below is the prompt-timestamp one.)
 56. **A seeded prompt revision 1 renders as a date somebody saved.** Found by #36's
     verification. A shipped default is not a row until something makes it one, and
     `prompt_store._seed` materialises rev 1 at the moment the *first override* is saved — so
@@ -1239,9 +1240,9 @@ part worth keeping.
 | 56 | A seeded prompt rev 1 shows a date. The fix is a label |
 
 **Nothing on that list blocks P5.** Two items are sharp enough to name here rather than leave
-in a table: **55**, which is a security residue and the one thing in this sweep that should be
-filed as an issue today, and **20**, which is the single-tenant assumption still sitting in the
-delivery CLI — a multi-tenant control plane whose `make deliver` can only ever reach one
+in a table: **55**, a security residue, now tracked as
+[issue #56](https://github.com/prashant-kiit/e2e-playwright-test-agent/issues/56), and
+**20**, which is the single-tenant assumption still sitting in the delivery CLI — a multi-tenant control plane whose `make deliver` can only ever reach one
 customer.
 
 
